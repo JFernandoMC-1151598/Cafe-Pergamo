@@ -31,12 +31,20 @@ Proyecto desarrollado con **Django**.
    pip install -r requirements.txt
    ```
 
-4. **Aplicar migraciones:**
+4. **Configurar variables de entorno (Supabase / SQLite):**
+   - Copiar la plantilla:
+     ```powershell
+     cp .env.example .env
+     ```
+   - Si dejas el archivo `.env` vacío o no lo creas, el proyecto utilizará **SQLite local** por defecto.
+   - Para conectar con **Supabase**, abre `.env` y coloca tu cadena de conexión en `DATABASE_URL` (obtenida en *Project Settings -> Database -> Connection string*).
+
+5. **Aplicar migraciones:**
    ```bash
    python manage.py migrate
    ```
 
-5. **Iniciar el servidor de desarrollo:**
+6. **Iniciar el servidor de desarrollo:**
    ```bash
    python manage.py runserver
    ```
