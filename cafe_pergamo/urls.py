@@ -16,7 +16,13 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
+from django.shortcuts import render
+
+def registro_view(request):
+    return render(request, 'usuarios/registro.html')
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('registro/', registro_view, name='registro'), 
+    path('', registro_view, name='home'),
 ]
