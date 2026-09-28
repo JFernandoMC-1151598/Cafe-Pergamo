@@ -185,3 +185,67 @@ class JwtSessionTokenGenerationTests(TestCase):
         )
         self.assertEqual(response.status_code, 401)
 
+
+class LogoutSessionTests(TestCase):
+    """Pruebas para HU02-ST4: Cierre de Sesión (Logout Web y Revocación JWT)."""
+
+    def setUp(self):
+        self.client = Client()
+        self.logout_url = reverse('logout')
+        self.api_logout_url = reverse('api_auth_logout')
+        self.token_url = reverse('token_obtain_pair')
+        self.token_refresh_url = reverse('token_refresh')
+
+        self.username = "test_logout_user"
+        self.email = "logout_user@cafepergamo.com"
+        self.password = "Pergamo2026*Logout!"
+        self.user = User.objects.create_user(
+            username=self.username,
+            email=self.email,
+            password=self.password
+        )
+
+    def test_web_logout_via_post_destroys_session(self):
+        """Verifica que un POST a /logout/ destruya la sesión HTTP y redirija a login."""
+        self.client.login(username=self.username, password=self.password)
+        self.assertIn('_auth_user_id', self.client.session)
+
+        response = self.client.post(self.logout_url)
+        self.assertEqual(response.status_code, 302)
+        self.assertNotIn('_auth_user_id', self.client.session)
+
+    def test_web_logout_via_get_is_rejected_safely(self):
+        """Verifica que una petición GET a /logout/ no cierre sesión (protección CSRF/RFC)."""
+        self.client.login(username=self.username, password=self.password)
+        response = self.client.get(self.logout_url)
+        # Debe redirigir de forma segura sin destruir la sesión
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('_auth_user_id', self.client.session)
+
+    def test_api_logout_blacklists_jwt_refresh_token(self):
+        """Verifica que el endpoint /api/auth/logout/ invalide el token de refresco en la lista negra."""
+        # 1. Obtener tokens
+        token_res = self.client.post(
+            self.token_url,
+            data=json.dumps({"username": self.username, "password": self.password}),
+            content_type="application/json"
+        )
+        refresh_token = token_res.json()["refresh"]
+
+        # 2. Enviar petición de logout revocando el refresh token
+        logout_res = self.client.post(
+            self.api_logout_url,
+            data=json.dumps({"refresh": refresh_token}),
+            content_type="application/json"
+        )
+        self.assertEqual(logout_res.status_code, 200)
+
+        # 3. Comprobar que el refresh token ya no sirve para refrescar
+        refresh_res = self.client.post(
+            self.token_refresh_url,
+            data=json.dumps({"refresh": refresh_token}),
+            content_type="application/json"
+        )
+        self.assertEqual(refresh_res.status_code, 401)
+
+

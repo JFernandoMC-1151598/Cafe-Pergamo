@@ -154,11 +154,96 @@ def login_view(request: HttpRequest) -> HttpResponse:
 
 def logout_view(request: HttpRequest) -> HttpResponse:
     """
-    Controlador para cerrar la sesión HTTP del usuario (HU02-ST4).
+    Controlador para cerrar la sesión HTTP y revocar tokens (HU02-ST4).
+    
+    Por razones de seguridad contra ataques CSRF (Django 5+ / OWASP),
+    el cierre de sesión web debe ejecutarse mediante método POST con {% csrf_token %}.
+    Si se recibe una petición GET, se redirige de forma segura.
+    
+    Flujo:
+    1. Si se proporciona un refresh_token (JSON o POST), se invalida incluyéndolo
+       en la lista negra de SimpleJWT (BlacklistedToken).
+    2. Destruye la sesión HTTP del usuario mediante logout(request).
+    3. Elimina las cookies de sesión del navegador.
+    4. Inyecta notificación informativa con messages.info().
+    5. Redirige a la vista de login.
     """
+    if request.method != "POST":
+        messages.warning(request, "Para cerrar sesión de forma segura, utilice el botón correspondiente.")
+        return redirect("home" if request.user.is_authenticated else "login")
+
+    # 1. Revocación de token JWT si se proporciona
+    from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+    refresh_token = request.POST.get("refresh_token") or request.POST.get("refresh")
+    if not refresh_token and request.content_type == "application/json":
+        try:
+            body = json.loads(request.body.decode("utf-8") or "{}")
+            refresh_token = body.get("refresh_token") or body.get("refresh")
+        except Exception:
+            pass
+
+    if refresh_token:
+        try:
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+        except (TokenError, Exception):
+            pass
+
+    # 2. Destrucción de la sesión HTTP en Django
     logout(request)
-    messages.info(request, "Has cerrado sesión correctamente. ¡Hasta pronto!")
-    return redirect("login")
+
+    # 3. Respuesta para solicitudes API / JSON
+    if request.content_type == "application/json" or request.path.startswith("/api/"):
+        response = JsonResponse({
+            "status": "success",
+            "message": "Has cerrado sesión exitosamente."
+        }, status=200)
+        response.delete_cookie(settings.SESSION_COOKIE_NAME)
+        return response
+
+    # 4. Respuesta para formulario Web
+    messages.info(request, "Has cerrado sesión exitosamente. ¡Hasta pronto!")
+    response = redirect("login")
+    response.delete_cookie(settings.SESSION_COOKIE_NAME)
+    return response
+
+
+@csrf_exempt
+def api_logout_view(request: HttpRequest) -> JsonResponse:
+    """
+    Endpoint API REST para revocación de JWT y cierre de sesión (/api/auth/logout/).
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Método no permitido. Utilice POST."}, status=405)
+
+    from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+    refresh_token = None
+    if request.content_type == "application/json":
+        try:
+            body = json.loads(request.body.decode("utf-8") or "{}")
+            refresh_token = body.get("refresh_token") or body.get("refresh")
+        except Exception:
+            pass
+    else:
+        refresh_token = request.POST.get("refresh_token") or request.POST.get("refresh")
+
+    if refresh_token:
+        try:
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+        except TokenError:
+            return JsonResponse({"error": "El token de refresco es inválido o ya expiró."}, status=400)
+        except Exception as e:
+            return JsonResponse({"error": f"Error al revocar el token: {str(e)}"}, status=400)
+
+    logout(request)
+    response = JsonResponse({
+        "status": "success",
+        "message": "Has cerrado sesión exitosamente. Token revocado."
+    }, status=200)
+    response.delete_cookie(settings.SESSION_COOKIE_NAME)
+    return response
+
 
 
 def registro_view(request: HttpRequest) -> HttpResponse:
