@@ -18,6 +18,8 @@ from django.contrib import admin
 from django.urls import path
 from django.shortcuts import render
 
+from usuarios.views import registro_api
+
 def registro_view(request):
     return render(request, 'usuarios/registro.html')
 
@@ -37,5 +39,7 @@ urlpatterns = [
     path('login/', login_view, name='login'),
     path('logout/', logout_view, name='logout'),
     path('', login_view, name='home'),
-]
 
+    # HU01-ST3 (SCRUM-60): endpoint de registro de usuarios (backend).
+    path('api/auth/register', registro_api, name='api_registro'),
+]
