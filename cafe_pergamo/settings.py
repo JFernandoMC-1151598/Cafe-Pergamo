@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'usuarios',
 ]
 
 MIDDLEWARE = [
@@ -112,6 +113,17 @@ else:
             'NAME': BASE_DIR / 'db.sqlite3',
         }
     }
+
+
+# Supabase (Auth + API)
+# La autenticación real (correo, contraseña, recuperación) la resuelve
+# Supabase Auth, no Django — ver usuarios/supabase_client.py. Estos
+# valores son la URL del proyecto y la publishable/anon key, seguros de
+# exponer en el backend: la protección real la da Row Level Security en
+# Supabase. Nunca poner aquí la service_role key.
+
+SUPABASE_URL = os.getenv('SUPABASE_URL')
+SUPABASE_ANON_KEY = os.getenv('SUPABASE_ANON_KEY')
 
 
 # Password validation
