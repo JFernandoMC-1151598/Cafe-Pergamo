@@ -16,7 +16,26 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
+from django.shortcuts import render
+
+def registro_view(request):
+    return render(request, 'usuarios/registro.html')
+
+def login_view(request):
+    return render(request, 'usuarios/login.html')
+
+def logout_view(request):
+    # Endpoint para HU02-ST4 (Lógica de Cierre de Sesión)
+    from django.contrib.auth import logout
+    from django.shortcuts import redirect
+    logout(request)
+    return redirect('login')
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('registro/', registro_view, name='registro'), 
+    path('login/', login_view, name='login'),
+    path('logout/', logout_view, name='logout'),
+    path('', login_view, name='home'),
 ]
+
