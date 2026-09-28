@@ -95,3 +95,93 @@ class AuthCredentialVerificationTests(TestCase):
         data = response.json()
         self.assertEqual(data.get("status"), "success")
         self.assertEqual(data["user"]["email"], self.email)
+
+
+class JwtSessionTokenGenerationTests(TestCase):
+    """Pruebas para HU02-ST3: Generación de Tokens de Sesión (JWT) y Custom Claims."""
+
+    def setUp(self):
+        import jwt
+        self.jwt = jwt
+        self.client = Client()
+        self.token_url = reverse('token_obtain_pair')
+        self.token_refresh_url = reverse('token_refresh')
+
+        self.username = "productor_jwt"
+        self.email = "carlos.valdez@cafepergamo.com"
+        self.password = "Pergamo2026*JWT!"
+        self.user = User.objects.create_user(
+            username=self.username,
+            email=self.email,
+            password=self.password,
+            first_name="Carlos",
+            last_name="Valdez"
+        )
+
+    def test_obtain_token_success_and_custom_claims(self):
+        """Verifica emisión de access/refresh token y claims personalizados (role, email, full_name)."""
+        from django.conf import settings
+        response = self.client.post(
+            self.token_url,
+            data=json.dumps({"username": self.username, "password": self.password}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("access", data)
+        self.assertIn("refresh", data)
+        self.assertIn("user", data)
+        self.assertEqual(data["user"]["email"], self.email)
+        self.assertEqual(data["user"]["full_name"], "Carlos Valdez")
+
+        # Decodificar el token para verificar claims del payload
+        access_token = data["access"]
+        payload = self.jwt.decode(
+            access_token,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            options={"verify_signature": True}
+        )
+        self.assertEqual(payload["email"], self.email)
+        self.assertEqual(payload["full_name"], "Carlos Valdez")
+        self.assertEqual(payload["username"], self.username)
+        self.assertIn("role", payload)
+        self.assertIn("exp", payload)
+
+    def test_obtain_token_with_email_identifier(self):
+        """Verifica que el endpoint acepte 'email' como identificador."""
+        response = self.client.post(
+            self.token_url,
+            data=json.dumps({"email": self.email, "password": self.password}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("access", data)
+
+    def test_refresh_token_lifecycle(self):
+        """Verifica que el refresh token permita obtener un nuevo access token válido."""
+        token_res = self.client.post(
+            self.token_url,
+            data=json.dumps({"username": self.username, "password": self.password}),
+            content_type="application/json"
+        )
+        refresh_token = token_res.json()["refresh"]
+
+        refresh_res = self.client.post(
+            self.token_refresh_url,
+            data=json.dumps({"refresh": refresh_token}),
+            content_type="application/json"
+        )
+        self.assertEqual(refresh_res.status_code, 200)
+        self.assertIn("access", refresh_res.json())
+
+    def test_obtain_token_invalid_password(self):
+        """Verifica código 401 si las credenciales son erróneas."""
+        response = self.client.post(
+            self.token_url,
+            data=json.dumps({"username": self.username, "password": "BadPassword123"}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 401)
+

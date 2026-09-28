@@ -166,3 +166,22 @@ def registro_view(request: HttpRequest) -> HttpResponse:
     Controlador temporal para renderizar la pantalla de registro de usuarios (HU-01).
     """
     return render(request, "usuarios/registro.html")
+
+
+# ==============================================================================
+# VISTAS DE TOKENS JWT (HU02-ST3)
+# ==============================================================================
+from rest_framework_simplejwt.views import TokenObtainPairView
+from .serializers import CustomTokenObtainPairSerializer
+
+
+class CustomTokenObtainPairView(TokenObtainPairView):
+    """
+    Vista personalizada para la emisión de tokens JWT (HU02-ST3).
+    
+    Utiliza CustomTokenObtainPairSerializer para incrustar los claims del
+    rol y metadatos de usuario en el payload del access token, retornando
+    tanto el token de acceso como el de refresco en formato JSON.
+    """
+    serializer_class = CustomTokenObtainPairSerializer
+
