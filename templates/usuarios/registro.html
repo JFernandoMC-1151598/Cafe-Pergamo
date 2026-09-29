@@ -225,6 +225,28 @@
                     </div>
                 </div>
 
+                <!-- Tipo y Numero de Documento -->
+                <div class="row g-3 mb-3">
+                    <div class="col-md-5">
+                        <label for="tipo_documento" class="form-label">Tipo de Documento <span class="text-danger">*</span></label>
+                        <select class="form-select" id="tipo_documento" name="tipo_documento" required>
+                            <option value="" selected disabled>Seleccione...</option>
+                            <option value="CC">Cedula de Ciudadania</option>
+                            <option value="CE">Cedula de Extranjeria</option>
+                            <option value="TI">Tarjeta de Identidad</option>
+                            <option value="PA">Pasaporte</option>
+                            <option value="NIT">NIT</option>
+                        </select>
+                        <div class="invalid-feedback">Seleccione un tipo de documento.</div>
+                    </div>
+                    <div class="col-md-7">
+                        <label for="numero_documento" class="form-label">Numero de Documento <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="numero_documento" name="numero_documento"
+                            placeholder="Ej. 1091234567" required>
+                        <div class="invalid-feedback" id="numero-documento-feedback">El numero de documento es obligatorio.</div>
+                    </div>
+                </div>
+
                 <!-- Rol -->
                 <div class="mb-3">
                     <label for="role" class="form-label">Rol en Café Pérgamo <span class="text-danger">*</span></label>
@@ -286,19 +308,21 @@
             const lastName = document.getElementById('last_name');
             const email = document.getElementById('email');
             const phone = document.getElementById('phone');
+            const tipoDocumento = document.getElementById('tipo_documento');
+            const numeroDocumento = document.getElementById('numero_documento');
             const role = document.getElementById('role');
             const password = document.getElementById('password');
             const confirmPassword = document.getElementById('confirm_password');
             const generalAlert = document.getElementById('general-alert');
+            const generalAlertMessage = document.getElementById('general-alert-message');
             const emailFeedback = document.getElementById('email-feedback');
             const confirmFeedback = document.getElementById('confirm-password-feedback');
+            const numeroDocumentoFeedback = document.getElementById('numero-documento-feedback');
+            const submitButton = form.querySelector('button[type="submit"]');
+            const submitButtonHtmlOriginal = submitButton.innerHTML;
 
-            // Expresión regular estándar para validación de formato de correo electrónico
             const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-            /**
-             * Marca un campo como inválido y especifica un mensaje si aplica
-             */
             function setInvalid(input, feedbackElement = null, customMessage = null) {
                 input.classList.remove('is-valid');
                 input.classList.add('is-invalid');
@@ -307,23 +331,31 @@
                 }
             }
 
-            /**
-             * Marca un campo como válido
-             */
             function setValid(input) {
                 input.classList.remove('is-invalid');
                 input.classList.add('is-valid');
             }
 
-            /**
-             * Limpia las clases de validación de un elemento
-             */
             function clearValidation(input) {
                 input.classList.remove('is-valid', 'is-invalid');
             }
 
-            // Escuchar cambios en vivo para limpiar o validar campos dinámicamente
-            [firstName, lastName, phone, role, password].forEach(field => {
+            function mostrarAlertaGeneral(mensaje, tipo) {
+                generalAlert.classList.remove('d-none', 'alert-danger', 'alert-success');
+                generalAlert.classList.add('alert-' + (tipo || 'danger'));
+                generalAlertMessage.textContent = mensaje;
+            }
+
+            const CAMPO_A_INPUT = {
+                correo: { input: email, feedback: emailFeedback },
+                'contraseña': { input: password, feedback: null },
+                telefono: { input: phone, feedback: null },
+                tipo_documento: { input: tipoDocumento, feedback: null },
+                numero_documento: { input: numeroDocumento, feedback: numeroDocumentoFeedback },
+                rol: { input: role, feedback: null },
+            };
+
+            [firstName, lastName, phone, numeroDocumento, password].forEach(field => {
                 field.addEventListener('input', function () {
                     if (this.value.trim() !== '') {
                         setValid(this);
@@ -333,12 +365,14 @@
                 });
             });
 
-            role.addEventListener('change', function () {
-                if (this.value !== '') {
-                    setValid(this);
-                } else {
-                    clearValidation(this);
-                }
+            [role, tipoDocumento].forEach(select => {
+                select.addEventListener('change', function () {
+                    if (this.value !== '') {
+                        setValid(this);
+                    } else {
+                        clearValidation(this);
+                    }
+                });
             });
 
             email.addEventListener('input', function () {
@@ -364,12 +398,69 @@
                 }
             });
 
-            // Validación al enviar el formulario
+            async function enviarRegistro() {
+                const payload = {
+                    email: email.value.trim(),
+                    password: password.value,
+                    first_name: firstName.value.trim(),
+                    last_name: lastName.value.trim(),
+                    phone: phone.value.trim(),
+                    role: role.value,
+                    tipo_documento: tipoDocumento.value,
+                    numero_documento: numeroDocumento.value.trim(),
+                };
+
+                submitButton.disabled = true;
+                submitButton.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Registrando...';
+
+                try {
+                    const response = await fetch("{% url 'api_registro' %}", {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+
+                    let data = {};
+                    try {
+                        data = await response.json();
+                    } catch (parseError) {
+                        data = {};
+                    }
+
+                    if (response.ok) {
+                        mostrarAlertaGeneral('¡Registro exitoso! Redirigiendo al inicio de sesión...', 'success');
+                        setTimeout(function () {
+                            window.location.href = "{% url 'login' %}";
+                        }, 1800);
+                        return;
+                    }
+
+                    if (data.campos) {
+                        Object.keys(data.campos).forEach(function (campo) {
+                            const mapeo = CAMPO_A_INPUT[campo];
+                            if (mapeo && mapeo.input) {
+                                setInvalid(mapeo.input, mapeo.feedback, data.campos[campo]);
+                            }
+                        });
+                    }
+
+                    mostrarAlertaGeneral(data.error || 'No se pudo completar el registro. Intente de nuevo.', 'danger');
+                    submitButton.disabled = false;
+                    submitButton.innerHTML = submitButtonHtmlOriginal;
+                } catch (networkError) {
+                    mostrarAlertaGeneral('No se pudo conectar con el servidor. Verifique su conexión e intente de nuevo.', 'danger');
+                    submitButton.disabled = false;
+                    submitButton.innerHTML = submitButtonHtmlOriginal;
+                }
+            }
+
             form.addEventListener('submit', function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+
                 let isValid = true;
                 let firstInvalidElement = null;
 
-                // 1. Validar nombre no vacío
                 if (firstName.value.trim() === '') {
                     setInvalid(firstName);
                     isValid = false;
@@ -378,7 +469,6 @@
                     setValid(firstName);
                 }
 
-                // 2. Validar apellido no vacío
                 if (lastName.value.trim() === '') {
                     setInvalid(lastName);
                     isValid = false;
@@ -387,7 +477,6 @@
                     setValid(lastName);
                 }
 
-                // 3. Validar correo no vacío y con formato válido
                 const emailVal = email.value.trim();
                 if (emailVal === '') {
                     setInvalid(email, emailFeedback, 'El correo electrónico es obligatorio.');
@@ -401,7 +490,6 @@
                     setValid(email);
                 }
 
-                // 4. Validar teléfono no vacío
                 if (phone.value.trim() === '') {
                     setInvalid(phone);
                     isValid = false;
@@ -410,7 +498,22 @@
                     setValid(phone);
                 }
 
-                // 5. Validar rol seleccionado
+                if (!tipoDocumento.value || tipoDocumento.value.trim() === '') {
+                    setInvalid(tipoDocumento);
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = tipoDocumento;
+                } else {
+                    setValid(tipoDocumento);
+                }
+
+                if (numeroDocumento.value.trim() === '') {
+                    setInvalid(numeroDocumento, numeroDocumentoFeedback, 'El número de documento es obligatorio.');
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = numeroDocumento;
+                } else {
+                    setValid(numeroDocumento);
+                }
+
                 if (!role.value || role.value.trim() === '') {
                     setInvalid(role);
                     isValid = false;
@@ -419,7 +522,6 @@
                     setValid(role);
                 }
 
-                // 6. Validar contraseña no vacía
                 const passVal = password.value;
                 if (passVal.trim() === '') {
                     setInvalid(password);
@@ -429,7 +531,6 @@
                     setValid(password);
                 }
 
-                // 7. Validar confirmación de contraseña no vacía y coincidencia exacta
                 const confirmVal = confirmPassword.value;
                 if (confirmVal.trim() === '') {
                     setInvalid(confirmPassword, confirmFeedback, 'Debe confirmar su contraseña.');
@@ -443,20 +544,18 @@
                     setValid(confirmPassword);
                 }
 
-                // Si hay campos inválidos, frenar el envío
                 if (!isValid) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    generalAlert.classList.remove('d-none');
+                    mostrarAlertaGeneral('Por favor, revise los errores en el formulario antes de continuar.', 'danger');
                     if (firstInvalidElement) {
                         firstInvalidElement.focus();
                     }
-                } else {
-                    generalAlert.classList.add('d-none');
+                    return;
                 }
+
+                generalAlert.classList.add('d-none');
+                enviarRegistro();
             });
         });
     </script>
 </body>
-
 </html>
