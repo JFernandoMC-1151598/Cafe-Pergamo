@@ -445,3 +445,17 @@ def logout_view(request: HttpRequest) -> HttpResponse:
 def registro_view(request: HttpRequest) -> HttpResponse:
     """Renderiza la pantalla de registro de usuarios (HU01-ST2)."""
     return render(request, "usuarios/registro.html")
+
+
+def recuperar_contrasena_view(request: HttpRequest) -> HttpResponse:
+    """Renderiza el formulario inicial de recuperación (HU03-ST1)."""
+    return render(request, "usuarios/recuperar_contrasena.html")
+
+
+def restablecer_contrasena_view(request: HttpRequest, token: str) -> HttpResponse:
+    """Renderiza la vista de nueva contraseña (HU03-ST4)."""
+    return render(
+        request,
+        "usuarios/restablecer_contrasena.html",
+        {"token": token},
+    )
