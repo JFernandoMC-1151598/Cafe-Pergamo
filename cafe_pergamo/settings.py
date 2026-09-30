@@ -183,8 +183,27 @@ STATICFILES_DIRS = [
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
-MAILERS = {
-    'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
-    },
-}
+_email_host = os.getenv('EMAIL_HOST', '')
+_email_backend = os.getenv('EMAIL_BACKEND', '')
+
+if _email_host or _email_backend:
+    MAILERS = {
+        'default': {
+            'BACKEND': _email_backend or 'django.core.mail.backends.smtp.EmailBackend',
+            'OPTIONS': {
+                'host': _email_host,
+                'port': int(os.getenv('EMAIL_PORT', '587')),
+                'username': os.getenv('EMAIL_HOST_USER', ''),
+                'password': os.getenv('EMAIL_HOST_PASSWORD', ''),
+                'use_tls': os.getenv('EMAIL_USE_TLS', 'True').lower() in ('true', '1', 't'),
+            },
+        },
+    }
+else:
+    MAILERS = {
+        'default': {
+            'BACKEND': 'django.core.mail.backends.console.EmailBackend',
+        },
+    }
+
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'no-reply@cafepergamo.local')

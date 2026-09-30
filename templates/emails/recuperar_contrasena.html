@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Recuperaci&oacute;n de contrase&ntilde;a</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f8f4ee; color: #2b2b2b; font-family: Arial, sans-serif;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color: #f8f4ee; padding: 32px 16px;">
+        <tr>
+            <td align="center">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width: 560px; background-color: #ffffff; border: 1px solid #e8ded4;">
+                    <tr>
+                        <td style="background-color: #3d2314; padding: 28px 24px; text-align: center; color: #ffffff;">
+                            <div style="font-size: 28px; color: #f1caa3;">&#9749;</div>
+                            <h1 style="margin: 8px 0 0; font-size: 24px;">Caf&eacute; P&eacute;rgamo</h1>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 32px 28px;">
+                            <h2 style="margin: 0 0 16px; color: #3d2314; font-size: 22px;">Restablece tu contrase&ntilde;a</h2>
+                            <p style="margin: 0 0 16px; line-height: 1.6;">Hola{% if user_name %}, {{ user_name }}{% endif %}:</p>
+                            <p style="margin: 0 0 24px; line-height: 1.6;">Recibimos una solicitud para restablecer la contrase&ntilde;a de tu cuenta. Usa el siguiente bot&oacute;n para continuar:</p>
+                            <p style="margin: 0 0 28px; text-align: center;">
+                                <a href="{{ reset_url }}" style="display: inline-block; background-color: #b07d4b; color: #ffffff; font-weight: bold; text-decoration: none; padding: 13px 22px;">Restablecer contrase&ntilde;a</a>
+                            </p>
+                            <p style="margin: 0 0 12px; color: #6c757d; font-size: 14px; line-height: 1.5;">Este enlace expirar&aacute; en {{ expiration_minutes }} minutos y solo podr&aacute; utilizarse una vez.</p>
+                            <p style="margin: 0; color: #6c757d; font-size: 14px; line-height: 1.5;">Si no solicitaste este cambio, puedes ignorar este mensaje.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="border-top: 1px solid #e8ded4; padding: 18px 28px; color: #6c757d; font-size: 12px; text-align: center;">
+                            Este mensaje fue enviado autom&aacute;ticamente. No respondas a este correo.
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
