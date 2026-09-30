@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Registro de Usuario - Café Pérgamo</title>
+
+    <!-- Bootstrap 5 CSS CDN -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+
+    <!-- Bootstrap Icons CDN -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
+
+    <!-- Estilos personalizados Café Pérgamo -->
+    <style>
+        :root {
+            --pergamo-primary: #3d2314;
+            --pergamo-accent: #b07d4b;
+            --pergamo-accent-hover: #96673a;
+            --pergamo-cream: #fbf8f5;
+            --pergamo-surface: #ffffff;
+            --pergamo-border: #e8ded4;
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background: linear-gradient(135deg, #f8f4ee 0%, #ede3d7 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem 1rem;
+            color: #2b2b2b;
+        }
+
+        .auth-card {
+            background-color: var(--pergamo-surface);
+            border-radius: 1.25rem;
+            border: 1px solid var(--pergamo-border);
+            box-shadow: 0 15px 35px rgba(61, 35, 20, 0.08);
+            width: 100%;
+            max-width: 680px;
+            overflow: hidden;
+        }
+
+        .auth-header {
+            background: linear-gradient(135deg, var(--pergamo-primary) 0%, #57331d 100%);
+            color: #ffffff;
+            padding: 2.25rem 2rem;
+            text-align: center;
+        }
+
+        .auth-header .brand-icon {
+            font-size: 2.5rem;
+            color: #f1caa3;
+            margin-bottom: 0.5rem;
+        }
+
+        .auth-header h1 {
+            font-size: 1.75rem;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            margin-bottom: 0.25rem;
+        }
+
+        .auth-header p {
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 0.95rem;
+            margin-bottom: 0;
+        }
+
+        .auth-body {
+            padding: 2.25rem;
+        }
+
+        .form-label {
+            font-weight: 600;
+            font-size: 0.875rem;
+            color: var(--pergamo-primary);
+            margin-bottom: 0.4rem;
+        }
+
+        .form-control,
+        .form-select {
+            border: 1.5px solid var(--pergamo-border);
+            border-radius: 0.65rem;
+            padding: 0.68rem 0.95rem;
+            font-size: 0.95rem;
+            transition: all 0.2s ease-in-out;
+        }
+
+        .form-control:focus,
+        .form-select:focus {
+            border-color: var(--pergamo-accent);
+            box-shadow: 0 0 0 0.25rem rgba(176, 125, 75, 0.2);
+        }
+
+        .btn-pergamo {
+            background-color: var(--pergamo-accent);
+            color: #ffffff;
+            font-weight: 600;
+            border: none;
+            border-radius: 0.65rem;
+            padding: 0.75rem 1.5rem;
+            font-size: 1rem;
+            transition: all 0.2s ease;
+        }
+
+        .btn-pergamo:hover {
+            background-color: var(--pergamo-accent-hover);
+            color: #ffffff;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(150, 103, 58, 0.25);
+        }
+
+        .input-group-text {
+            background-color: var(--pergamo-cream);
+            border: 1.5px solid var(--pergamo-border);
+            border-right: none;
+            color: var(--pergamo-accent);
+            border-radius: 0.65rem 0 0 0.65rem;
+        }
+
+        .input-group .form-control {
+            border-left: none;
+            border-radius: 0 0.65rem 0.65rem 0;
+        }
+
+        .input-group .form-control:focus {
+            border-left: none;
+        }
+
+        .login-link {
+            color: var(--pergamo-accent);
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .login-link:hover {
+            text-decoration: underline;
+            color: var(--pergamo-accent-hover);
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="auth-card">
+        <!-- Encabezado con identidad de marca -->
+        <div class="auth-header">
+            <div class="brand-icon">
+                <i class="bi bi-cup-hot-fill"></i>
+            </div>
+            <h1>Café Pérgamo</h1>
+            <p>Plataforma Integral de Comercio y Gestión Cafetera</p>
+        </div>
+
+        <!-- Contenedor del Formulario -->
+        <div class="auth-body">
+            <div class="text-center mb-4">
+                <h2 class="h4 fw-bold text-dark mb-1">Registro de Usuario</h2>
+                <p class="text-muted small">Diligencie los campos requeridos para crear su cuenta</p>
+            </div>
+
+            <!-- Mensajes Flash de Django -->
+            {% if messages %}
+            {% for message in messages %}
+            <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endfor %}
+            {% endif %}
+
+            <!-- Alerta general de error (JavaScript) -->
+            <div id="general-alert" class="alert alert-danger d-none" role="alert">
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                <span id="general-alert-message">Por favor, revise los errores en el formulario antes de
+                    continuar.</span>
+            </div>
+
+            <!-- Formulario de Registro -->
+            <form id="registroForm" action="" method="POST" novalidate>
+                {% csrf_token %}
+
+                <!-- Nombres y Apellidos -->
+                <div class="row g-3 mb-3">
+                    <div class="col-md-6">
+                        <label for="first_name" class="form-label">Nombres <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="first_name" name="first_name"
+                            placeholder="Ej. Carlos Alberto" required>
+                        <div class="invalid-feedback">El nombre es obligatorio.</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="last_name" class="form-label">Apellidos <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="last_name" name="last_name"
+                            placeholder="Ej. Gómez Pérez" required>
+                        <div class="invalid-feedback">El apellido es obligatorio.</div>
+                    </div>
+                </div>
+
+                <!-- Correo Electrónico y Teléfono -->
+                <div class="row g-3 mb-3">
+                    <div class="col-md-6">
+                        <label for="email" class="form-label">Correo Electrónico <span
+                                class="text-danger">*</span></label>
+                        <input type="email" class="form-control" id="email" name="email"
+                            placeholder="nombre@ejemplo.com" required>
+                        <div class="invalid-feedback" id="email-feedback">Ingrese un correo electrónico válido.</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="phone" class="form-label">Teléfono / Celular <span
+                                class="text-danger">*</span></label>
+                        <input type="tel" class="form-control" id="phone" name="phone" placeholder="Ej. 3101234567"
+                            required>
+                        <div class="invalid-feedback">El teléfono es obligatorio.</div>
+                    </div>
+                </div>
+
+                <!-- Tipo y Numero de Documento -->
+                <div class="row g-3 mb-3">
+                    <div class="col-md-5">
+                        <label for="tipo_documento" class="form-label">Tipo de Documento <span class="text-danger">*</span></label>
+                        <select class="form-select" id="tipo_documento" name="tipo_documento" required>
+                            <option value="" selected disabled>Seleccione...</option>
+                            <option value="CC">Cedula de Ciudadania</option>
+                            <option value="CE">Cedula de Extranjeria</option>
+                            <option value="TI">Tarjeta de Identidad</option>
+                            <option value="PA">Pasaporte</option>
+                            <option value="NIT">NIT</option>
+                        </select>
+                        <div class="invalid-feedback">Seleccione un tipo de documento.</div>
+                    </div>
+                    <div class="col-md-7">
+                        <label for="numero_documento" class="form-label">Numero de Documento <span class="text-danger">*</span></label>
+                        <input type="text" class="form-control" id="numero_documento" name="numero_documento"
+                            placeholder="Ej. 1091234567" required>
+                        <div class="invalid-feedback" id="numero-documento-feedback">El numero de documento es obligatorio.</div>
+                    </div>
+                </div>
+
+                <!-- Rol -->
+                <div class="mb-3">
+                    <label for="role" class="form-label">Rol en Café Pérgamo <span class="text-danger">*</span></label>
+                    <select class="form-select" id="role" name="role" required>
+                        <option value="" selected disabled>Seleccione un tipo de actor...</option>
+                        <option value="PRODUCTOR">Productor</option>
+                        <option value="COMERCIALIZADOR">Comercializador</option>
+                        <option value="COMPRADOR">Comprador</option>
+                        <option value="ASOCIACION">Asociación</option>
+                    </select>
+                    <div class="invalid-feedback">Por favor, seleccione un rol de la lista.</div>
+                </div>
+
+                <!-- Contraseña y Confirmar Contraseña -->
+                <div class="row g-3 mb-4">
+                    <div class="col-md-6">
+                        <label for="password" class="form-label">Contraseña <span class="text-danger">*</span></label>
+                        <input type="password" class="form-control" id="password" name="password" placeholder="••••••••"
+                            required>
+                        <div class="invalid-feedback">La contraseña es obligatoria.</div>
+                    </div>
+                    <div class="col-md-6">
+                        <label for="confirm_password" class="form-label">Confirmar Contraseña <span
+                                class="text-danger">*</span></label>
+                        <input type="password" class="form-control" id="confirm_password" name="confirm_password"
+                            placeholder="••••••••" required>
+                        <div class="invalid-feedback" id="confirm-password-feedback">Las contraseñas no coinciden.</div>
+                    </div>
+                </div>
+
+                <!-- Botón de Envío -->
+                <div class="d-grid gap-2">
+                    <button type="submit" class="btn btn-pergamo py-2">
+                        <i class="bi bi-person-check-fill me-1"></i> Registrarse
+                    </button>
+                </div>
+            </form>
+
+            <!-- Enlace alternativo a Login -->
+            <div class="text-center mt-4 pt-3 border-top">
+                <p class="text-muted small mb-0">
+                    ¿Ya tienes una cuenta registrada?
+                    <a href="{% url 'login' %}" class="login-link ms-1">Inicia sesión aquí</a>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap 5 Bundle JS CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+        crossorigin="anonymous"></script>
+
+    <!-- Script de Validación Nativo en el Cliente -->
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const form = document.getElementById('registroForm');
+            const firstName = document.getElementById('first_name');
+            const lastName = document.getElementById('last_name');
+            const email = document.getElementById('email');
+            const phone = document.getElementById('phone');
+            const tipoDocumento = document.getElementById('tipo_documento');
+            const numeroDocumento = document.getElementById('numero_documento');
+            const role = document.getElementById('role');
+            const password = document.getElementById('password');
+            const confirmPassword = document.getElementById('confirm_password');
+            const generalAlert = document.getElementById('general-alert');
+            const generalAlertMessage = document.getElementById('general-alert-message');
+            const emailFeedback = document.getElementById('email-feedback');
+            const confirmFeedback = document.getElementById('confirm-password-feedback');
+            const numeroDocumentoFeedback = document.getElementById('numero-documento-feedback');
+            const submitButton = form.querySelector('button[type="submit"]');
+            const submitButtonHtmlOriginal = submitButton.innerHTML;
+
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+            function setInvalid(input, feedbackElement = null, customMessage = null) {
+                input.classList.remove('is-valid');
+                input.classList.add('is-invalid');
+                if (feedbackElement && customMessage) {
+                    feedbackElement.textContent = customMessage;
+                }
+            }
+
+            function setValid(input) {
+                input.classList.remove('is-invalid');
+                input.classList.add('is-valid');
+            }
+
+            function clearValidation(input) {
+                input.classList.remove('is-valid', 'is-invalid');
+            }
+
+            function mostrarAlertaGeneral(mensaje, tipo) {
+                generalAlert.classList.remove('d-none', 'alert-danger', 'alert-success');
+                generalAlert.classList.add('alert-' + (tipo || 'danger'));
+                generalAlertMessage.textContent = mensaje;
+            }
+
+            const CAMPO_A_INPUT = {
+                correo: { input: email, feedback: emailFeedback },
+                'contraseña': { input: password, feedback: null },
+                telefono: { input: phone, feedback: null },
+                tipo_documento: { input: tipoDocumento, feedback: null },
+                numero_documento: { input: numeroDocumento, feedback: numeroDocumentoFeedback },
+                rol: { input: role, feedback: null },
+            };
+
+            [firstName, lastName, phone, numeroDocumento, password].forEach(field => {
+                field.addEventListener('input', function () {
+                    if (this.value.trim() !== '') {
+                        setValid(this);
+                    } else {
+                        clearValidation(this);
+                    }
+                });
+            });
+
+            [role, tipoDocumento].forEach(select => {
+                select.addEventListener('change', function () {
+                    if (this.value !== '') {
+                        setValid(this);
+                    } else {
+                        clearValidation(this);
+                    }
+                });
+            });
+
+            email.addEventListener('input', function () {
+                const val = this.value.trim();
+                if (val === '') {
+                    clearValidation(this);
+                } else if (!emailRegex.test(val)) {
+                    setInvalid(this, emailFeedback, 'Ingrese un formato de correo válido (ej. usuario@dominio.com).');
+                } else {
+                    setValid(this);
+                }
+            });
+
+            confirmPassword.addEventListener('input', function () {
+                const passVal = password.value;
+                const confirmVal = this.value;
+                if (confirmVal === '') {
+                    clearValidation(this);
+                } else if (confirmVal !== passVal) {
+                    setInvalid(this, confirmFeedback, 'Las contraseñas no coinciden.');
+                } else {
+                    setValid(this);
+                }
+            });
+
+            async function enviarRegistro() {
+                const payload = {
+                    email: email.value.trim(),
+                    password: password.value,
+                    first_name: firstName.value.trim(),
+                    last_name: lastName.value.trim(),
+                    phone: phone.value.trim(),
+                    role: role.value,
+                    tipo_documento: tipoDocumento.value,
+                    numero_documento: numeroDocumento.value.trim(),
+                };
+
+                submitButton.disabled = true;
+                submitButton.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Registrando...';
+
+                try {
+                    const response = await fetch("{% url 'api_registro' %}", {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+
+                    let data = {};
+                    try {
+                        data = await response.json();
+                    } catch (parseError) {
+                        data = {};
+                    }
+
+                    if (response.ok) {
+                        mostrarAlertaGeneral('¡Registro exitoso! Redirigiendo al inicio de sesión...', 'success');
+                        setTimeout(function () {
+                            window.location.href = "{% url 'login' %}";
+                        }, 1800);
+                        return;
+                    }
+
+                    if (data.campos) {
+                        Object.keys(data.campos).forEach(function (campo) {
+                            const mapeo = CAMPO_A_INPUT[campo];
+                            if (mapeo && mapeo.input) {
+                                setInvalid(mapeo.input, mapeo.feedback, data.campos[campo]);
+                            }
+                        });
+                    }
+
+                    mostrarAlertaGeneral(data.error || 'No se pudo completar el registro. Intente de nuevo.', 'danger');
+                    submitButton.disabled = false;
+                    submitButton.innerHTML = submitButtonHtmlOriginal;
+                } catch (networkError) {
+                    mostrarAlertaGeneral('No se pudo conectar con el servidor. Verifique su conexión e intente de nuevo.', 'danger');
+                    submitButton.disabled = false;
+                    submitButton.innerHTML = submitButtonHtmlOriginal;
+                }
+            }
+
+            form.addEventListener('submit', function (event) {
+                event.preventDefault();
+                event.stopPropagation();
+
+                let isValid = true;
+                let firstInvalidElement = null;
+
+                if (firstName.value.trim() === '') {
+                    setInvalid(firstName);
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = firstName;
+                } else {
+                    setValid(firstName);
+                }
+
+                if (lastName.value.trim() === '') {
+                    setInvalid(lastName);
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = lastName;
+                } else {
+                    setValid(lastName);
+                }
+
+                const emailVal = email.value.trim();
+                if (emailVal === '') {
+                    setInvalid(email, emailFeedback, 'El correo electrónico es obligatorio.');
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = email;
+                } else if (!emailRegex.test(emailVal)) {
+                    setInvalid(email, emailFeedback, 'Ingrese una dirección de correo electrónico válida.');
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = email;
+                } else {
+                    setValid(email);
+                }
+
+                if (phone.value.trim() === '') {
+                    setInvalid(phone);
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = phone;
+                } else {
+                    setValid(phone);
+                }
+
+                if (!tipoDocumento.value || tipoDocumento.value.trim() === '') {
+                    setInvalid(tipoDocumento);
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = tipoDocumento;
+                } else {
+                    setValid(tipoDocumento);
+                }
+
+                if (numeroDocumento.value.trim() === '') {
+                    setInvalid(numeroDocumento, numeroDocumentoFeedback, 'El número de documento es obligatorio.');
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = numeroDocumento;
+                } else {
+                    setValid(numeroDocumento);
+                }
+
+                if (!role.value || role.value.trim() === '') {
+                    setInvalid(role);
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = role;
+                } else {
+                    setValid(role);
+                }
+
+                const passVal = password.value;
+                if (passVal.trim() === '') {
+                    setInvalid(password);
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = password;
+                } else {
+                    setValid(password);
+                }
+
+                const confirmVal = confirmPassword.value;
+                if (confirmVal.trim() === '') {
+                    setInvalid(confirmPassword, confirmFeedback, 'Debe confirmar su contraseña.');
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = confirmPassword;
+                } else if (confirmVal !== passVal) {
+                    setInvalid(confirmPassword, confirmFeedback, 'La confirmación de contraseña debe coincidir exactamente con la contraseña.');
+                    isValid = false;
+                    if (!firstInvalidElement) firstInvalidElement = confirmPassword;
+                } else {
+                    setValid(confirmPassword);
+                }
+
+                if (!isValid) {
+                    mostrarAlertaGeneral('Por favor, revise los errores en el formulario antes de continuar.', 'danger');
+                    if (firstInvalidElement) {
+                        firstInvalidElement.focus();
+                    }
+                    return;
+                }
+
+                generalAlert.classList.add('d-none');
+                enviarRegistro();
+            });
+        });
+    </script>
+</body>
+</html>
