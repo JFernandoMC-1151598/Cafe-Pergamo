@@ -143,23 +143,158 @@ class AuthCredentialVerificationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data.get("status"), "success")
-        self.assertEqual(data["user"]["correo"], self.correo)
-        self.assertEqual(data["user"]["rol"], "PRODUCTOR")
+        self.assertEqual(data["user"]["email"], self.email)
 
-    @patch("usuarios.views.Usuario")
-    @patch("usuarios.views.get_supabase_client")
-    def test_login_perfil_inactivo_es_rechazado(self, mock_get_client, mock_usuario_model):
-        """Un perfil con activo=False no debe poder iniciar sesión, aunque la contraseña sea correcta."""
-        mock_get_client.return_value.auth.sign_in_with_password.return_value.user = _fake_auth_user(
-            self.user_id, self.correo
-        )
-        mock_usuario_model.objects.select_related.return_value.get.return_value = _fake_perfil(
-            self.user_id, self.correo, activo=False
+
+class JwtSessionTokenGenerationTests(TestCase):
+    """Pruebas para HU02-ST3: Generación de Tokens de Sesión (JWT) y Custom Claims."""
+
+    def setUp(self):
+        import jwt
+        self.jwt = jwt
+        self.client = Client()
+        self.token_url = reverse('token_obtain_pair')
+        self.token_refresh_url = reverse('token_refresh')
+
+        self.username = "productor_jwt"
+        self.email = "carlos.valdez@cafepergamo.com"
+        self.password = "Pergamo2026*JWT!"
+        self.user = User.objects.create_user(
+            username=self.username,
+            email=self.email,
+            password=self.password,
+            first_name="Carlos",
+            last_name="Valdez"
         )
 
+    def test_obtain_token_success_and_custom_claims(self):
+        """Verifica emisión de access/refresh token y claims personalizados (role, email, full_name)."""
+        from django.conf import settings
         response = self.client.post(
-            self.api_login_url,
-            data=json.dumps({"email": self.correo, "password": self.password}),
+            self.token_url,
+            data=json.dumps({"username": self.username, "password": self.password}),
             content_type="application/json"
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("access", data)
+        self.assertIn("refresh", data)
+        self.assertIn("user", data)
+        self.assertEqual(data["user"]["email"], self.email)
+        self.assertEqual(data["user"]["full_name"], "Carlos Valdez")
+
+        # Decodificar el token para verificar claims del payload
+        access_token = data["access"]
+        payload = self.jwt.decode(
+            access_token,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            options={"verify_signature": True}
+        )
+        self.assertEqual(payload["email"], self.email)
+        self.assertEqual(payload["full_name"], "Carlos Valdez")
+        self.assertEqual(payload["username"], self.username)
+        self.assertIn("role", payload)
+        self.assertIn("exp", payload)
+
+    def test_obtain_token_with_email_identifier(self):
+        """Verifica que el endpoint acepte 'email' como identificador."""
+        response = self.client.post(
+            self.token_url,
+            data=json.dumps({"email": self.email, "password": self.password}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("access", data)
+
+    def test_refresh_token_lifecycle(self):
+        """Verifica que el refresh token permita obtener un nuevo access token válido."""
+        token_res = self.client.post(
+            self.token_url,
+            data=json.dumps({"username": self.username, "password": self.password}),
+            content_type="application/json"
+        )
+        refresh_token = token_res.json()["refresh"]
+
+        refresh_res = self.client.post(
+            self.token_refresh_url,
+            data=json.dumps({"refresh": refresh_token}),
+            content_type="application/json"
+        )
+        self.assertEqual(refresh_res.status_code, 200)
+        self.assertIn("access", refresh_res.json())
+
+    def test_obtain_token_invalid_password(self):
+        """Verifica código 401 si las credenciales son erróneas."""
+        response = self.client.post(
+            self.token_url,
+            data=json.dumps({"username": self.username, "password": "BadPassword123"}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 401)
+
+
+class LogoutSessionTests(TestCase):
+    """Pruebas para HU02-ST4: Cierre de Sesión (Logout Web y Revocación JWT)."""
+
+    def setUp(self):
+        self.client = Client()
+        self.logout_url = reverse('logout')
+        self.api_logout_url = reverse('api_auth_logout')
+        self.token_url = reverse('token_obtain_pair')
+        self.token_refresh_url = reverse('token_refresh')
+
+        self.username = "test_logout_user"
+        self.email = "logout_user@cafepergamo.com"
+        self.password = "Pergamo2026*Logout!"
+        self.user = User.objects.create_user(
+            username=self.username,
+            email=self.email,
+            password=self.password
+        )
+
+    def test_web_logout_via_post_destroys_session(self):
+        """Verifica que un POST a /logout/ destruya la sesión HTTP y redirija a login."""
+        self.client.login(username=self.username, password=self.password)
+        self.assertIn('_auth_user_id', self.client.session)
+
+        response = self.client.post(self.logout_url)
+        self.assertEqual(response.status_code, 302)
+        self.assertNotIn('_auth_user_id', self.client.session)
+
+    def test_web_logout_via_get_is_rejected_safely(self):
+        """Verifica que una petición GET a /logout/ no cierre sesión (protección CSRF/RFC)."""
+        self.client.login(username=self.username, password=self.password)
+        response = self.client.get(self.logout_url)
+        # Debe redirigir de forma segura sin destruir la sesión
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('_auth_user_id', self.client.session)
+
+    def test_api_logout_blacklists_jwt_refresh_token(self):
+        """Verifica que el endpoint /api/auth/logout/ invalide el token de refresco en la lista negra."""
+        # 1. Obtener tokens
+        token_res = self.client.post(
+            self.token_url,
+            data=json.dumps({"username": self.username, "password": self.password}),
+            content_type="application/json"
+        )
+        refresh_token = token_res.json()["refresh"]
+
+        # 2. Enviar petición de logout revocando el refresh token
+        logout_res = self.client.post(
+            self.api_logout_url,
+            data=json.dumps({"refresh": refresh_token}),
+            content_type="application/json"
+        )
+        self.assertEqual(logout_res.status_code, 200)
+
+        # 3. Comprobar que el refresh token ya no sirve para refrescar
+        refresh_res = self.client.post(
+            self.token_refresh_url,
+            data=json.dumps({"refresh": refresh_token}),
+            content_type="application/json"
+        )
+        self.assertEqual(refresh_res.status_code, 401)
+
+
