@@ -17,6 +17,39 @@ usuarios reales; su contraseña queda explícitamente inutilizable
 (`set_unusable_password()`). El panel de administración de Django
 (`/admin/`) tiene su propio login nativo, completamente aparte de esta
 vista, para inspección local (ver usuarios/admin.py).
+
+HU01-ST4 (SCRUM-61) - Cifrado/hash de contraseñas (RNF04):
+Esta subtarea pedía "integrar una librería de encriptación segura (ej.
+Bcrypt o Argon2) para encriptar la contraseña antes de guardarla en la
+base de datos, garantizando que nunca se almacene en texto plano".
+
+Por la decisión de arquitectura de arriba, esto ya está cubierto por
+diseño y no requiere una librería adicional en este proyecto:
+
+  1. Ni `registro_api()` ni `login_view()` escriben la contraseña en
+     ninguna tabla propia. El modelo `Usuario` (usuarios/models.py) ni
+     siquiera tiene un campo de contraseña.
+  2. La contraseña en texto plano solo viaja, por HTTPS, hacia
+     Supabase Auth (`auth.sign_up()` / `auth.sign_in_with_password()`
+     en supabase_client.py). Supabase Auth (GoTrue) es quien la
+     hashea con bcrypt internamente antes de persistirla en
+     `auth.users` — una tabla que este proyecto ni siquiera modela ni
+     puede leer directamente desde Django.
+  3. La única contraseña que toca una tabla de Django es la fila
+     "espejo" en `auth_user` (ver punto anterior), y esa se crea
+     explícitamente con `set_unusable_password()`: no es un hash de la
+     contraseña real, es un valor que Django reconoce como "sin
+     contraseña utilizable" y que nunca se compara contra nada.
+
+En otras palabras: no existe ningún punto del código de este proyecto
+donde una contraseña en texto plano llegue a guardarse en una base de
+datos — ni sin cifrar ni cifrada por nosotros mismos — porque nunca la
+guardamos nosotros; se la delegamos por completo a un proveedor de
+autenticación especializado. Agregar Bcrypt/Argon2 en Django aquí
+sería cifrar un dato que Django nunca posee, y crear una segunda
+fuente de verdad de contraseñas que contradice la arquitectura ya
+usada en HU01-ST3/HU02-ST2. Ver también la sección "Seguridad de
+contraseñas (RNF04 / HU01-ST4)" en README.md.
 """
 
 import json
