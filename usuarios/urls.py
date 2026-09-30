@@ -12,6 +12,7 @@ urlpatterns = [
     path('login/', views.login_view, name='login'),
     path('logout/', views.logout_view, name='logout'),
     path('registro/', views.registro_view, name='registro'),
+    path('recuperar-contrasena/', views.recuperar_contrasena_view, name='recuperar_contrasena'),
 
     # Endpoints y alias API (HU02-ST2: POST /api/auth/login)
     path('api/auth/login', views.login_view, name='api_auth_login_raw'),
