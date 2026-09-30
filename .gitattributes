@@ -1,0 +1,16 @@
+# Normaliza los finales de línea a LF en el repositorio, sin importar el
+# sistema operativo o el editor de cada integrante (Windows con
+# core.autocrlf a veces reescribe archivos completos con CRLF, lo que
+# infla los diffs y ensucia git status con "ruido" que no es un cambio
+# real). Git sigue mostrando el archivo con los finales de línea del
+# sistema operativo al hacer checkout; lo que cambia es lo que se
+# guarda en el repositorio.
+* text=auto eol=lf
+
+# Los binarios no se tocan.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
