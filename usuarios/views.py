@@ -56,6 +56,7 @@ import json
 import logging
 import re
 
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import login, logout
 from django.contrib.auth.models import User
@@ -369,19 +370,53 @@ def login_view(request: HttpRequest) -> HttpResponse:
         messages.error(request, _LOGIN_ERROR_GENERICO)
         return render(request, "usuarios/login.html", {"email": correo})
 
-    # 1. Verificación de credenciales: solo Supabase Auth.
+    from .security import (
+        verificar_cuenta_bloqueada,
+        registrar_intento_fallido,
+        resetear_intentos,
+    )
+
+    # 1. Verificación de Bloqueo Temporal previo (SCRUM-79 / HU02-ST5)
+    bloqueada, reg_bloqueo, minutos_restantes = verificar_cuenta_bloqueada(correo)
+    if bloqueada:
+        msg_bloqueo = "Cuenta bloqueada temporalmente por demasiados intentos fallidos. Intente de nuevo más tarde."
+        if is_json_request:
+            return JsonResponse({
+                "error": msg_bloqueo,
+                "locked": True,
+                "minutos_restantes": minutos_restantes,
+            }, status=403)
+        messages.error(request, msg_bloqueo)
+        return render(request, "usuarios/login.html", {"email": correo})
+
+    # 2. Verificación de credenciales: solo Supabase Auth.
     try:
         auth_response = get_supabase_client().auth.sign_in_with_password(
             {"email": correo, "password": password}
         )
     except AuthApiError as exc:
         logger.info("Login fallido para %s (%s)", correo, exc.code)
+        
+        # Registrar intento fallido
+        quedo_bloqueado, reg_fallo = registrar_intento_fallido(correo, request=request)
+        if quedo_bloqueado:
+            msg_bloqueo = "Cuenta bloqueada temporalmente por demasiados intentos fallidos. Intente de nuevo más tarde."
+            if is_json_request:
+                return JsonResponse({
+                    "error": msg_bloqueo,
+                    "locked": True,
+                    "minutos_restantes": reg_fallo.tiempo_restante_minutos(),
+                }, status=403)
+            messages.error(request, msg_bloqueo)
+            return render(request, "usuarios/login.html", {"email": correo})
+
         if exc.code in ("over_request_rate_limit", "too_many_requests"):
             error_msg = "Demasiados intentos. Intente de nuevo en unos minutos."
             if is_json_request:
                 return JsonResponse({"error": error_msg}, status=429)
             messages.error(request, error_msg)
             return render(request, "usuarios/login.html", {"email": correo})
+            
         return _fallo_generico()
     except RuntimeError as exc:
         logger.error("Configuración de Supabase incompleta: %s", exc)
@@ -392,7 +427,11 @@ def login_view(request: HttpRequest) -> HttpResponse:
         return render(request, "usuarios/login.html", {"email": correo})
 
     if auth_response.user is None:
+        quedo_bloqueado, reg_fallo = registrar_intento_fallido(correo, request=request)
         return _fallo_generico()
+        
+    # Reiniciar contador de intentos fallidos tras login exitoso
+    resetear_intentos(correo)
 
     # 2. Traer el perfil de negocio (rol, nombres, etc.) de public.usuarios.
     try:
@@ -469,12 +508,147 @@ def login_view(request: HttpRequest) -> HttpResponse:
 
 
 def logout_view(request: HttpRequest) -> HttpResponse:
-    """Controlador para cerrar la sesión HTTP del usuario (HU02-ST4)."""
+    """
+    Controlador para cerrar la sesión HTTP y revocar tokens (HU02-ST4).
+    
+    Por razones de seguridad contra ataques CSRF (Django 5+ / OWASP),
+    el cierre de sesión web debe ejecutarse mediante método POST con {% csrf_token %}.
+    Si se recibe una petición GET, se redirige de forma segura.
+    
+    Flujo:
+    1. Si se proporciona un refresh_token (JSON o POST), se invalida incluyéndolo
+       en la lista negra de SimpleJWT (BlacklistedToken).
+    2. Destruye la sesión HTTP del usuario mediante logout(request).
+    3. Elimina las cookies de sesión del navegador.
+    4. Inyecta notificación informativa con messages.info().
+    5. Redirige a la vista de login.
+    """
+    if request.method != "POST":
+        messages.warning(request, "Para cerrar sesión de forma segura, utilice el botón correspondiente.")
+        return redirect("home" if request.user.is_authenticated else "login")
+
+    # 1. Revocación de token JWT si se proporciona
+    from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+    refresh_token = request.POST.get("refresh_token") or request.POST.get("refresh")
+    if not refresh_token and request.content_type == "application/json":
+        try:
+            body = json.loads(request.body.decode("utf-8") or "{}")
+            refresh_token = body.get("refresh_token") or body.get("refresh")
+        except Exception:
+            pass
+
+    if refresh_token:
+        try:
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+        except (TokenError, Exception):
+            pass
+
+    # 2. Destrucción de la sesión HTTP en Django
     logout(request)
-    messages.info(request, "Has cerrado sesión correctamente. ¡Hasta pronto!")
-    return redirect("login")
+
+    # 3. Respuesta para solicitudes API / JSON
+    if request.content_type == "application/json" or request.path.startswith("/api/"):
+        response = JsonResponse({
+            "status": "success",
+            "message": "Has cerrado sesión exitosamente."
+        }, status=200)
+        response.delete_cookie(settings.SESSION_COOKIE_NAME)
+        return response
+
+    # 4. Respuesta para formulario Web
+    messages.info(request, "Has cerrado sesión exitosamente. ¡Hasta pronto!")
+    response = redirect("login")
+    response.delete_cookie(settings.SESSION_COOKIE_NAME)
+    return response
+
+
+@csrf_exempt
+def api_logout_view(request: HttpRequest) -> JsonResponse:
+    """
+    Endpoint API REST para revocación de JWT y cierre de sesión (/api/auth/logout/).
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Método no permitido. Utilice POST."}, status=405)
+
+    from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+    refresh_token = None
+    if request.content_type == "application/json":
+        try:
+            body = json.loads(request.body.decode("utf-8") or "{}")
+            refresh_token = body.get("refresh_token") or body.get("refresh")
+        except Exception:
+            pass
+    else:
+        refresh_token = request.POST.get("refresh_token") or request.POST.get("refresh")
+
+    if refresh_token:
+        try:
+            token = RefreshToken(refresh_token)
+            token.blacklist()
+        except TokenError:
+            return JsonResponse({"error": "El token de refresco es inválido o ya expiró."}, status=400)
+        except Exception as e:
+            return JsonResponse({"error": f"Error al revocar el token: {str(e)}"}, status=400)
+
+    logout(request)
+    response = JsonResponse({
+        "status": "success",
+        "message": "Has cerrado sesión exitosamente. Token revocado."
+    }, status=200)
+    response.delete_cookie(settings.SESSION_COOKIE_NAME)
+    return response
+
 
 
 def registro_view(request: HttpRequest) -> HttpResponse:
     """Renderiza la pantalla de registro de usuarios (HU01-ST2)."""
     return render(request, "usuarios/registro.html")
+
+
+def recuperar_contrasena_view(request: HttpRequest) -> HttpResponse:
+    """
+    Renderiza la pantalla de "olvidé mi contraseña".
+
+    NOTA: esta vista solo pinta la plantilla por ahora. La lógica de
+    envío del correo (usuarios/email_service.py ya existe, pero todavía
+    no está conectada aquí) y la generación/validación del token de
+    restablecimiento contra Supabase Auth quedan pendientes como parte
+    de la funcionalidad de recuperación de contraseña (fuera de las
+    subtareas HU01-ST3/ST4/ST5 y HU02-ST2/ST5 ya cubiertas en este
+    archivo). Se agrega como stub para que la ruta 'recuperar_contrasena'
+    que referencia templates/usuarios/login.html no rompa el sitio.
+    """
+    return render(request, "usuarios/recuperar_contrasena.html")
+
+
+def restablecer_contrasena_view(request: HttpRequest, token: str) -> HttpResponse:
+    """
+    Renderiza la pantalla para definir una nueva contraseña a partir de un
+    token de recuperación.
+
+    NOTA: ver docstring de recuperar_contrasena_view — la validación real
+    del token contra Supabase Auth y el cambio de contraseña todavía no
+    están implementados; esto solo evita que la ruta correspondiente
+    rompa el sitio mientras esa funcionalidad se termina.
+    """
+    return render(request, "usuarios/restablecer_contrasena.html", {"token": token})
+
+
+# ==============================================================================
+# VISTAS DE TOKENS JWT (HU02-ST3)
+# ==============================================================================
+from rest_framework_simplejwt.views import TokenObtainPairView
+from .serializers import CustomTokenObtainPairSerializer
+
+
+class CustomTokenObtainPairView(TokenObtainPairView):
+    """
+    Vista personalizada para la emisión de tokens JWT (HU02-ST3).
+    
+    Utiliza CustomTokenObtainPairSerializer para incrustar los claims del
+    rol y metadatos de usuario en el payload del access token, retornando
+    tanto el token de acceso como el de refresco en formato JSON.
+    """
+    serializer_class = CustomTokenObtainPairSerializer
+

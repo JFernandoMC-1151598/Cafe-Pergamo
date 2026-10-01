@@ -47,6 +47,9 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',
+    'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'usuarios',
 ]
 
@@ -188,3 +191,56 @@ MAILERS = {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
     },
 }
+
+
+# ==============================================================================
+# DJANGO REST FRAMEWORK & SIMPLE JWT (HU02-ST3)
+# ==============================================================================
+from datetime import timedelta
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ),
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
+}
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'ALGORITHM': 'HS256',
+    'SIGNING_KEY': SECRET_KEY,
+    'VERIFYING_KEY': None,
+    'AUDIENCE': None,
+    'ISSUER': 'cafe-pergamo-auth',
+    'AUTH_HEADER_TYPES': ('Bearer',),
+    'AUTH_HEADER_NAME': 'HTTP_AUTHORIZATION',
+    'USER_ID_FIELD': 'id',
+    'USER_ID_CLAIM': 'user_id',
+    'USER_AUTHENTICATION_RULE': 'rest_framework_simplejwt.authentication.default_user_authentication_rule',
+    'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),
+    'TOKEN_TYPE_CLAIM': 'token_type',
+}
+
+# ==============================================================================
+# SEGURIDAD Y CONTROL DE INTENTOS FALLIDOS (SCRUM-79 / HU02-ST5 - RN03 / EX-3)
+# ==============================================================================
+# Límite máximo de intentos fallidos consecutivos antes de bloquear la cuenta (RN03)
+LOGIN_FAILURE_LIMIT = int(os.getenv('LOGIN_FAILURE_LIMIT', 5))
+
+# Tiempo de bloqueo temporal en minutos (15 minutos = 0.25 horas) (EX-3)
+LOGIN_COOLOFF_MINUTES = int(os.getenv('LOGIN_COOLOFF_MINUTES', 15))
+
+# Reinicio automático del contador tras autenticación exitosa (RN03)
+LOGIN_RESET_ON_SUCCESS = True
+
+# Parámetros estándar compatibles con directivas tipo django-axes
+AXES_FAILURE_LIMIT = LOGIN_FAILURE_LIMIT
+AXES_COOLOFF_TIME = LOGIN_COOLOFF_MINUTES / 60.0  # 0.25 horas = 15 minutos
+AXES_RESET_ON_SUCCESS = LOGIN_RESET_ON_SUCCESS
+
+
