@@ -23,4 +23,3 @@ urlpatterns = [
     path('', include('usuarios.urls')),
     path('', login_view, name='home'),
 ]
-

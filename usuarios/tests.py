@@ -1,11 +1,40 @@
 """
 Pruebas unitarias para la subtarea SCRUM-76 / HU02-ST2: Autenticación y verificación de credenciales.
+
+La verificación de credenciales real vive en Supabase Auth (ver
+usuarios/supabase_client.py y el docstring de usuarios/views.py), así
+que estas pruebas simulan (mock) el cliente de Supabase y la consulta al
+perfil de negocio (`usuarios.Usuario`) en vez de tocar la base de datos
+real: esas tablas son `managed = False` y no existen en la base de datos
+de pruebas que Django crea automáticamente para cada `TestCase`.
 """
 
-from django.test import TestCase, Client
-from django.contrib.auth.models import User
-from django.urls import reverse
 import json
+from unittest.mock import MagicMock, patch
+
+from django.contrib.auth.models import User
+from django.test import Client, TestCase
+from django.urls import reverse
+
+from supabase_auth.errors import AuthApiError
+
+
+def _fake_auth_user(user_id, email):
+    fake_user = MagicMock()
+    fake_user.id = user_id
+    fake_user.email = email
+    return fake_user
+
+
+def _fake_perfil(user_id, correo, nombres="Juan", apellidos="Valdez", rol_codigo="PRODUCTOR", activo=True):
+    perfil = MagicMock()
+    perfil.id = user_id
+    perfil.correo = correo
+    perfil.nombres = nombres
+    perfil.apellidos = apellidos
+    perfil.activo = activo
+    perfil.rol.codigo = rol_codigo
+    return perfil
 
 
 class AuthCredentialVerificationTests(TestCase):
@@ -15,18 +44,9 @@ class AuthCredentialVerificationTests(TestCase):
         self.client = Client()
         self.login_url = reverse('login')
         self.api_login_url = reverse('api_auth_login')
-        
-        # Crear usuario de prueba en base de datos con contraseña cifrada
-        self.username = "cafe_user"
-        self.email = "productor@cafepergamo.com"
+        self.correo = "productor@cafepergamo.com"
         self.password = "Pergamo2026*Secure!"
-        self.user = User.objects.create_user(
-            username=self.username,
-            email=self.email,
-            password=self.password,
-            first_name="Juan",
-            last_name="Valdez"
-        )
+        self.user_id = "11111111-1111-1111-1111-111111111111"
 
     def test_get_login_page(self):
         """Verifica que la página de login responda con código 200 y use la plantilla correspondiente."""
@@ -52,18 +72,26 @@ class AuthCredentialVerificationTests(TestCase):
         data = response.json()
         self.assertIn("error", data)
 
-    def test_login_invalid_credentials_generic_error_web(self):
+    @patch("usuarios.views.get_supabase_client")
+    def test_login_invalid_credentials_generic_error_web(self, mock_get_client):
         """Verifica el mensaje genérico contra enumeración de cuentas (seguridad) ante credenciales incorrectas."""
+        mock_get_client.return_value.auth.sign_in_with_password.side_effect = AuthApiError(
+            "Invalid login credentials", 400, "invalid_credentials"
+        )
         response = self.client.post(self.login_url, {
-            "email": self.email,
+            "email": self.correo,
             "password": "WrongPassword123!"
         })
         self.assertEqual(response.status_code, 200)
         messages = list(response.context['messages'])
         self.assertTrue(any("incorrectos" in str(m) for m in messages))
 
-    def test_login_invalid_credentials_api(self):
+    @patch("usuarios.views.get_supabase_client")
+    def test_login_invalid_credentials_api(self, mock_get_client):
         """Verifica que la API retorne 401 y mensaje genérico ante credenciales incorrectas."""
+        mock_get_client.return_value.auth.sign_in_with_password.side_effect = AuthApiError(
+            "Invalid login credentials", 400, "invalid_credentials"
+        )
         response = self.client.post(
             self.api_login_url,
             data=json.dumps({"email": "inexistente@correo.com", "password": "DummyPassword"}),
@@ -73,22 +101,43 @@ class AuthCredentialVerificationTests(TestCase):
         data = response.json()
         self.assertIn("error", data)
 
-    def test_login_success_with_email_web(self):
-        """Verifica autenticación exitosa usando correo electrónico y redirección."""
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.get_supabase_client")
+    def test_login_success_with_email_web(self, mock_get_client, mock_usuario_model):
+        """Verifica autenticación exitosa contra Supabase y redirección, con sesión de Django sincronizada."""
+        mock_get_client.return_value.auth.sign_in_with_password.return_value.user = _fake_auth_user(
+            self.user_id, self.correo
+        )
+        mock_usuario_model.objects.select_related.return_value.get.return_value = _fake_perfil(
+            self.user_id, self.correo
+        )
+
         response = self.client.post(self.login_url, {
-            "email": self.email,
+            "email": self.correo,
             "password": self.password
         })
-        # Debe redirigir a 'home'
+        # Debe redirigir a 'home'.
         self.assertEqual(response.status_code, 302)
-        # Verificar que el usuario quedó autenticado en la sesión
-        self.assertEqual(int(self.client.session['_auth_user_id']), self.user.pk)
+        # La fila "espejo" en auth_user queda identificada por el UUID de Supabase.
+        django_user = User.objects.get(username=self.user_id)
+        self.assertEqual(int(self.client.session['_auth_user_id']), django_user.pk)
+        self.assertFalse(django_user.has_usable_password())
+        self.assertEqual(self.client.session["rol"], "PRODUCTOR")
 
-    def test_login_success_api(self):
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.get_supabase_client")
+    def test_login_success_api(self, mock_get_client, mock_usuario_model):
         """Verifica autenticación exitosa mediante la API JSON retornando código 200."""
+        mock_get_client.return_value.auth.sign_in_with_password.return_value.user = _fake_auth_user(
+            self.user_id, self.correo
+        )
+        mock_usuario_model.objects.select_related.return_value.get.return_value = _fake_perfil(
+            self.user_id, self.correo
+        )
+
         response = self.client.post(
             self.api_login_url,
-            data=json.dumps({"email": self.email, "password": self.password}),
+            data=json.dumps({"email": self.correo, "password": self.password}),
             content_type="application/json"
         )
         self.assertEqual(response.status_code, 200)
