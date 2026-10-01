@@ -13,6 +13,13 @@ urlpatterns = [
     path('login/', views.login_view, name='login'),
     path('logout/', views.logout_view, name='logout'),
     path('registro/', views.registro_view, name='registro'),
+    # NOTA (merge franciscogallo -> david, 2026-10-01): franciscogallo
+    # traía estas 2 rutas apuntando a funciones que no existían en
+    # views.py (AttributeError al arrancar el proyecto). Se agregaron
+    # vistas mínimas (solo renderizan la plantilla, ver sus docstrings)
+    # para que login.html (que enlaza a 'recuperar_contrasena') y estas
+    # rutas no rompan el sitio; la lógica real de recuperación de
+    # contraseña queda pendiente como funcionalidad aparte.
     path('recuperar-contrasena/', views.recuperar_contrasena_view, name='recuperar_contrasena'),
     path('restablecer-contrasena/<str:token>/', views.restablecer_contrasena_view, name='restablecer_contrasena'),
 
@@ -27,6 +34,12 @@ urlpatterns = [
     # Endpoints de generación y refresco de Tokens JWT (HU02-ST3)
     path('api/auth/token/', views.CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+
+    # HU01-ST3 (SCRUM-60): endpoint de registro de usuarios (backend).
+    # Esta ruta venía en david pero se perdió en el merge con
+    # franciscogallo (su urls.py no la tenía); se restaura aquí porque
+    # templates/usuarios/registro.html depende de ella (api_registro).
+    path('api/auth/register', views.registro_api, name='api_registro'),
 ]
 
 

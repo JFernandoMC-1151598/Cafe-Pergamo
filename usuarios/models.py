@@ -103,6 +103,15 @@ class Usuario(models.Model):
         related_name="usuarios",
     )
     activo = models.BooleanField(db_default=True)
+    failed_attempts = models.PositiveIntegerField(
+        default=0,
+        help_text="Contador de intentos de autenticación fallidos consecutivos (RN03)",
+    )
+    locked_until = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Marca temporal hasta la cual la cuenta permanece bloqueada (EX-3)",
+    )
     creado_en = models.DateTimeField(db_default=Now())
     actualizado_en = models.DateTimeField(db_default=Now())
 
@@ -120,6 +129,14 @@ class Usuario(models.Model):
 
     def __str__(self):
         return f"{self.nombres} {self.apellidos} <{self.correo}>"
+
+    @property
+    def is_locked(self) -> bool:
+        """Determina si el perfil de negocio se encuentra actualmente bloqueado."""
+        if not self.locked_until:
+            return False
+        from django.utils import timezone
+        return self.locked_until > timezone.now()
 
 
 class Permiso(models.Model):
@@ -177,3 +194,77 @@ class RolPermiso(models.Model):
 
     def __str__(self):
         return f"{self.rol.codigo} → {self.permiso.codigo}"
+
+
+# ==============================================================================
+# AUDITORÍA DE SEGURIDAD Y CONTROL DE BLOQUEO (SCRUM-79 / HU02-ST5)
+# ==============================================================================
+from django.contrib.auth.models import User
+
+
+class RegistroIntentoLogin(models.Model):
+    """
+    Registro y control de intentos fallidos de autenticación (SCRUM-79 / HU02-ST5).
+    Implementa RN03 (Límite de intentos) y EX-3 (Bloqueo temporal de cuenta).
+    Tabla gestionada por Django para persistencia independiente y auditoría.
+    """
+
+    identificador = models.CharField(
+        max_length=255,
+        unique=True,
+        db_index=True,
+        help_text="Identificador único (correo o username en minúsculas).",
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="intentos_login",
+        help_text="Usuario de Django asociado si existe en la plataforma.",
+    )
+    failed_attempts = models.PositiveIntegerField(
+        default=0,
+        help_text="Número consecutivo de intentos fallidos registrados.",
+    )
+    locked_until = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Marca temporal hasta la cual la cuenta permanece bloqueada.",
+    )
+    ip_address = models.GenericIPAddressField(
+        null=True,
+        blank=True,
+        help_text="Dirección IP de origen del último intento.",
+    )
+    ultimo_intento = models.DateTimeField(
+        auto_now=True,
+        help_text="Fecha y hora del intento más reciente.",
+    )
+
+    class Meta:
+        managed = True
+        db_table = "usuarios_registro_intentos"
+        verbose_name = "Registro de intento de login"
+        verbose_name_plural = "Registros de intentos de login"
+
+    def __str__(self):
+        estado = "BLOQUEADO" if self.is_locked else "ACTIVO"
+        return f"{self.identificador} [{estado}] - Intentos fallidos: {self.failed_attempts}"
+
+    @property
+    def is_locked(self) -> bool:
+        """Determina si la cuenta está actualmente bloqueada."""
+        if not self.locked_until:
+            return False
+        from django.utils import timezone
+        return self.locked_until > timezone.now()
+
+    def tiempo_restante_minutos(self) -> int:
+        """Calcula los minutos restantes de bloqueo temporal."""
+        if not self.is_locked:
+            return 0
+        from django.utils import timezone
+        delta = self.locked_until - timezone.now()
+        return max(1, int(delta.total_seconds() / 60) + 1)
+

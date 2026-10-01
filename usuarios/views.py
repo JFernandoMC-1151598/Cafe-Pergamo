@@ -17,12 +17,46 @@ usuarios reales; su contraseña queda explícitamente inutilizable
 (`set_unusable_password()`). El panel de administración de Django
 (`/admin/`) tiene su propio login nativo, completamente aparte de esta
 vista, para inspección local (ver usuarios/admin.py).
+
+HU01-ST4 (SCRUM-61) - Cifrado/hash de contraseñas (RNF04):
+Esta subtarea pedía "integrar una librería de encriptación segura (ej.
+Bcrypt o Argon2) para encriptar la contraseña antes de guardarla en la
+base de datos, garantizando que nunca se almacene en texto plano".
+
+Por la decisión de arquitectura de arriba, esto ya está cubierto por
+diseño y no requiere una librería adicional en este proyecto:
+
+  1. Ni `registro_api()` ni `login_view()` escriben la contraseña en
+     ninguna tabla propia. El modelo `Usuario` (usuarios/models.py) ni
+     siquiera tiene un campo de contraseña.
+  2. La contraseña en texto plano solo viaja, por HTTPS, hacia
+     Supabase Auth (`auth.sign_up()` / `auth.sign_in_with_password()`
+     en supabase_client.py). Supabase Auth (GoTrue) es quien la
+     hashea con bcrypt internamente antes de persistirla en
+     `auth.users` — una tabla que este proyecto ni siquiera modela ni
+     puede leer directamente desde Django.
+  3. La única contraseña que toca una tabla de Django es la fila
+     "espejo" en `auth_user` (ver punto anterior), y esa se crea
+     explícitamente con `set_unusable_password()`: no es un hash de la
+     contraseña real, es un valor que Django reconoce como "sin
+     contraseña utilizable" y que nunca se compara contra nada.
+
+En otras palabras: no existe ningún punto del código de este proyecto
+donde una contraseña en texto plano llegue a guardarse en una base de
+datos — ni sin cifrar ni cifrada por nosotros mismos — porque nunca la
+guardamos nosotros; se la delegamos por completo a un proveedor de
+autenticación especializado. Agregar Bcrypt/Argon2 en Django aquí
+sería cifrar un dato que Django nunca posee, y crear una segunda
+fuente de verdad de contraseñas que contradice la arquitectura ya
+usada en HU01-ST3/HU02-ST2. Ver también la sección "Seguridad de
+contraseñas (RNF04 / HU01-ST4)" en README.md.
 """
 
 import json
 import logging
 import re
 
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import login, logout
 from django.contrib.auth.models import User
@@ -336,19 +370,53 @@ def login_view(request: HttpRequest) -> HttpResponse:
         messages.error(request, _LOGIN_ERROR_GENERICO)
         return render(request, "usuarios/login.html", {"email": correo})
 
-    # 1. Verificación de credenciales: solo Supabase Auth.
+    from .security import (
+        verificar_cuenta_bloqueada,
+        registrar_intento_fallido,
+        resetear_intentos,
+    )
+
+    # 1. Verificación de Bloqueo Temporal previo (SCRUM-79 / HU02-ST5)
+    bloqueada, reg_bloqueo, minutos_restantes = verificar_cuenta_bloqueada(correo)
+    if bloqueada:
+        msg_bloqueo = "Cuenta bloqueada temporalmente por demasiados intentos fallidos. Intente de nuevo más tarde."
+        if is_json_request:
+            return JsonResponse({
+                "error": msg_bloqueo,
+                "locked": True,
+                "minutos_restantes": minutos_restantes,
+            }, status=403)
+        messages.error(request, msg_bloqueo)
+        return render(request, "usuarios/login.html", {"email": correo})
+
+    # 2. Verificación de credenciales: solo Supabase Auth.
     try:
         auth_response = get_supabase_client().auth.sign_in_with_password(
             {"email": correo, "password": password}
         )
     except AuthApiError as exc:
         logger.info("Login fallido para %s (%s)", correo, exc.code)
+        
+        # Registrar intento fallido
+        quedo_bloqueado, reg_fallo = registrar_intento_fallido(correo, request=request)
+        if quedo_bloqueado:
+            msg_bloqueo = "Cuenta bloqueada temporalmente por demasiados intentos fallidos. Intente de nuevo más tarde."
+            if is_json_request:
+                return JsonResponse({
+                    "error": msg_bloqueo,
+                    "locked": True,
+                    "minutos_restantes": reg_fallo.tiempo_restante_minutos(),
+                }, status=403)
+            messages.error(request, msg_bloqueo)
+            return render(request, "usuarios/login.html", {"email": correo})
+
         if exc.code in ("over_request_rate_limit", "too_many_requests"):
             error_msg = "Demasiados intentos. Intente de nuevo en unos minutos."
             if is_json_request:
                 return JsonResponse({"error": error_msg}, status=429)
             messages.error(request, error_msg)
             return render(request, "usuarios/login.html", {"email": correo})
+            
         return _fallo_generico()
     except RuntimeError as exc:
         logger.error("Configuración de Supabase incompleta: %s", exc)
@@ -359,7 +427,11 @@ def login_view(request: HttpRequest) -> HttpResponse:
         return render(request, "usuarios/login.html", {"email": correo})
 
     if auth_response.user is None:
+        quedo_bloqueado, reg_fallo = registrar_intento_fallido(correo, request=request)
         return _fallo_generico()
+        
+    # Reiniciar contador de intentos fallidos tras login exitoso
+    resetear_intentos(correo)
 
     # 2. Traer el perfil de negocio (rol, nombres, etc.) de public.usuarios.
     try:
@@ -532,6 +604,35 @@ def api_logout_view(request: HttpRequest) -> JsonResponse:
 def registro_view(request: HttpRequest) -> HttpResponse:
     """Renderiza la pantalla de registro de usuarios (HU01-ST2)."""
     return render(request, "usuarios/registro.html")
+
+
+def recuperar_contrasena_view(request: HttpRequest) -> HttpResponse:
+    """
+    Renderiza la pantalla de "olvidé mi contraseña".
+
+    NOTA: esta vista solo pinta la plantilla por ahora. La lógica de
+    envío del correo (usuarios/email_service.py ya existe, pero todavía
+    no está conectada aquí) y la generación/validación del token de
+    restablecimiento contra Supabase Auth quedan pendientes como parte
+    de la funcionalidad de recuperación de contraseña (fuera de las
+    subtareas HU01-ST3/ST4/ST5 y HU02-ST2/ST5 ya cubiertas en este
+    archivo). Se agrega como stub para que la ruta 'recuperar_contrasena'
+    que referencia templates/usuarios/login.html no rompa el sitio.
+    """
+    return render(request, "usuarios/recuperar_contrasena.html")
+
+
+def restablecer_contrasena_view(request: HttpRequest, token: str) -> HttpResponse:
+    """
+    Renderiza la pantalla para definir una nueva contraseña a partir de un
+    token de recuperación.
+
+    NOTA: ver docstring de recuperar_contrasena_view — la validación real
+    del token contra Supabase Auth y el cambio de contraseña todavía no
+    están implementados; esto solo evita que la ruta correspondiente
+    rompa el sitio mientras esa funcionalidad se termina.
+    """
+    return render(request, "usuarios/restablecer_contrasena.html", {"token": token})
 
 
 # ==============================================================================

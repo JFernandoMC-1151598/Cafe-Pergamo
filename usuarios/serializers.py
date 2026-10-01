@@ -24,14 +24,16 @@ def obtener_rol_usuario(user: User) -> str:
 
     # Consulta del rol en el modelo de dominio Usuario (RBAC)
     try:
-        from .models import Usuario
-        perfil = (
-            Usuario.objects.filter(correo__iexact=user.email)
-            .select_related("rol")
-            .first()
-        )
-        if perfil and perfil.rol:
-            return perfil.rol.nombre
+        from django.db import connection
+        if "usuarios" in connection.introspection.table_names():
+            from .models import Usuario
+            perfil = (
+                Usuario.objects.filter(correo__iexact=user.email)
+                .select_related("rol")
+                .first()
+            )
+            if perfil and perfil.rol:
+                return perfil.rol.nombre
     except Exception:
         # En caso de fallo transitorio o tablas no sincronizadas
         pass
@@ -52,12 +54,14 @@ def obtener_nombre_completo(user: User) -> str:
 
     # Intentar obtener del perfil Usuario
     try:
-        from .models import Usuario
-        perfil = Usuario.objects.filter(correo__iexact=user.email).first()
-        if perfil:
-            perfil_nombre = f"{perfil.nombres} {perfil.apellidos}".strip()
-            if perfil_nombre:
-                return perfil_nombre
+        from django.db import connection
+        if "usuarios" in connection.introspection.table_names():
+            from .models import Usuario
+            perfil = Usuario.objects.filter(correo__iexact=user.email).first()
+            if perfil:
+                perfil_nombre = f"{perfil.nombres} {perfil.apellidos}".strip()
+                if perfil_nombre:
+                    return perfil_nombre
     except Exception:
         pass
 
@@ -110,8 +114,17 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs: Dict[str, Any]) -> Dict[str, Any]:
         """
         Valida las credenciales recibidas y enriquece la respuesta con metadatos.
+        Aplica control de intentos fallidos (RN03), bloqueo temporal (EX-3) y mitigación RNF07.
         """
+        from rest_framework import exceptions
+        from .security import (
+            verificar_cuenta_bloqueada,
+            registrar_intento_fallido,
+            resetear_intentos,
+        )
+
         identificador = attrs.get(self.username_field)
+        request = self.context.get("request") if hasattr(self, "context") else None
 
         # Si el identificador provisto contiene formato de correo, resolver el username de Django
         if identificador and "@" in identificador:
@@ -122,8 +135,32 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             except Exception:
                 pass
 
-        # Ejecuta la validación nativa de credenciales y contraseña segura (RNF04)
-        data = super().validate(attrs)
+        # 1. Verificación previa de bloqueo temporal (RN03 / EX-3)
+        bloqueada, reg_bloqueo, minutos_restantes = verificar_cuenta_bloqueada(identificador)
+        if bloqueada:
+            raise exceptions.AuthenticationFailed(
+                "Cuenta bloqueada temporalmente por demasiados intentos fallidos. Intente de nuevo más tarde.",
+                code="account_locked"
+            )
+
+        # 2. Validación de credenciales nativa (RNF04)
+        try:
+            data = super().validate(attrs)
+        except Exception:
+            # Registrar intento fallido
+            quedo_bloqueado, reg_fallo = registrar_intento_fallido(identificador, request=request)
+            if quedo_bloqueado:
+                raise exceptions.AuthenticationFailed(
+                    "Cuenta bloqueada temporalmente por demasiados intentos fallidos. Intente de nuevo más tarde.",
+                    code="account_locked"
+                )
+            raise exceptions.AuthenticationFailed(
+                "Correo electrónico o contraseña incorrectos. Por favor verifique sus datos.",
+                code="invalid_credentials"
+            )
+
+        # 3. Autenticación exitosa: Reiniciar contador de intentos fallidos (RN03 / AXES_RESET_ON_SUCCESS)
+        resetear_intentos(identificador, user=self.user)
 
         # Enriquecer la respuesta HTTP con metadatos del usuario autenticado
         rol_usuario = obtener_rol_usuario(self.user)
