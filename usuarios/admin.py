@@ -40,9 +40,31 @@ class PermisoAdmin(admin.ModelAdmin):
 
 @admin.register(Usuario)
 class UsuarioAdmin(admin.ModelAdmin):
-    list_display = ("correo", "nombres", "apellidos", "rol", "activo", "creado_en")
+    list_display = ("correo", "nombres", "apellidos", "rol", "activo", "failed_attempts", "locked_until", "creado_en")
     list_filter = ("rol", "tipo_documento", "activo")
     search_fields = ("correo", "nombres", "apellidos", "numero_documento")
     # El correo/contraseña reales viven en Supabase Auth: este admin es
     # solo lectura de la ficha de negocio, no un formulario de alta.
     readonly_fields = ("id", "correo", "creado_en", "actualizado_en")
+
+
+from .models import RegistroIntentoLogin
+
+
+@admin.register(RegistroIntentoLogin)
+class RegistroIntentoLoginAdmin(admin.ModelAdmin):
+    list_display = ("identificador", "user", "failed_attempts", "locked_until", "is_locked_display", "ip_address", "ultimo_intento")
+    search_fields = ("identificador", "user__username", "user__email", "ip_address")
+    list_filter = ("failed_attempts",)
+    readonly_fields = ("ultimo_intento",)
+    actions = ["desbloquear_cuentas"]
+
+    @admin.display(boolean=True, description="¿Bloqueado?")
+    def is_locked_display(self, obj):
+        return obj.is_locked
+
+    @admin.action(description="Desbloquear cuentas seleccionadas (Reiniciar contador)")
+    def desbloquear_cuentas(self, request, queryset):
+        filas = queryset.update(failed_attempts=0, locked_until=None)
+        self.message_user(request, f"Se han desbloqueado {filas} cuenta(s) exitosamente.")
+

@@ -63,6 +63,26 @@ def login_view(request: HttpRequest) -> HttpResponse:
             messages.error(request, error_msg)
             return render(request, "usuarios/login.html", {"email": username_or_email})
 
+        # 2.1 Verificación de Bloqueo Temporal previo (SCRUM-79 / HU02-ST5 - RN03 / EX-3)
+        from .security import (
+            verificar_cuenta_bloqueada,
+            registrar_intento_fallido,
+            resetear_intentos,
+        )
+
+        bloqueada, reg_bloqueo, minutos_restantes = verificar_cuenta_bloqueada(username_or_email)
+        if bloqueada:
+            msg_bloqueo = "Cuenta bloqueada temporalmente por demasiados intentos fallidos. Intente de nuevo más tarde."
+            if is_json_request:
+                return JsonResponse({
+                    "error": msg_bloqueo,
+                    "locked": True,
+                    "minutos_restantes": minutos_restantes,
+                }, status=403)
+
+            messages.error(request, msg_bloqueo)
+            return render(request, "usuarios/login.html", {"email": username_or_email})
+
         # 3. Verificación de credenciales (RNF04 - Comparación segura de Hash)
         # Primero intentamos autenticar directamente por username
         user = authenticate(request, username=username_or_email, password=password)
@@ -108,6 +128,9 @@ def login_view(request: HttpRequest) -> HttpResponse:
                 messages.error(request, error_msg)
                 return render(request, "usuarios/login.html", {"email": username_or_email})
 
+            # Reiniciar contador de intentos fallidos tras login exitoso (RN03 / AXES_RESET_ON_SUCCESS)
+            resetear_intentos(username_or_email, user=user)
+
             # Iniciar sesión HTTP de Django
             login(request, user)
 
@@ -141,7 +164,25 @@ def login_view(request: HttpRequest) -> HttpResponse:
             next_url = request.GET.get("next") or request.POST.get("next") or "home"
             return redirect(next_url)
 
-        # 5. Autenticación fallida: Mensaje genérico para evitar enumeración de cuentas
+        # 5. Autenticación fallida: Registrar fallo y verificar si se bloquea la cuenta (RN03 / EX-3)
+        quedo_bloqueado, reg_fallo = registrar_intento_fallido(
+            username_or_email,
+            request=request,
+        )
+
+        if quedo_bloqueado:
+            msg_bloqueo = "Cuenta bloqueada temporalmente por demasiados intentos fallidos. Intente de nuevo más tarde."
+            if is_json_request:
+                return JsonResponse({
+                    "error": msg_bloqueo,
+                    "locked": True,
+                    "minutos_restantes": reg_fallo.tiempo_restante_minutos(),
+                }, status=403)
+
+            messages.error(request, msg_bloqueo)
+            return render(request, "usuarios/login.html", {"email": username_or_email})
+
+        # Mensaje genérico para evitar enumeración de cuentas (RNF07)
         generic_error = "Correo electrónico o contraseña incorrectos. Por favor verifique sus datos."
         if is_json_request:
             return JsonResponse({"error": generic_error}, status=401)

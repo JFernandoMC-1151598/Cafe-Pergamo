@@ -249,3 +249,181 @@ class LogoutSessionTests(TestCase):
         self.assertEqual(refresh_res.status_code, 401)
 
 
+class AccountLockoutSecurityTests(TestCase):
+    """
+    Pruebas automatizadas para SCRUM-79 / HU02-ST5: Control de intentos fallidos y bloqueo de cuenta.
+    Valida RN03 (5 intentos consecutivos), EX-3 (Bloqueo temporal 15 min), RNF07 (Prevención de enumeración).
+    """
+
+    def setUp(self):
+        from usuarios.models import RegistroIntentoLogin
+        self.RegistroIntentoLogin = RegistroIntentoLogin
+        self.client = Client()
+        self.login_url = reverse('login')
+        self.api_login_url = reverse('api_auth_login')
+        self.token_url = reverse('token_obtain_pair')
+
+        self.username = "bloqueo_user"
+        self.email = "seguridad@cafepergamo.com"
+        self.password = "Pergamo2026*SecureLock!"
+        self.user = User.objects.create_user(
+            username=self.username,
+            email=self.email,
+            password=self.password,
+            first_name="Diana",
+            last_name="Segura"
+        )
+
+    def test_failed_attempt_increments_counter(self):
+        """1. Prueba que incrementa el contador ante cada contraseña errónea (RN03)."""
+        # Realizar 3 intentos con contraseña errónea
+        for i in range(1, 4):
+            response = self.client.post(
+                self.api_login_url,
+                data=json.dumps({"email": self.email, "password": f"PasswordInvalido_{i}"}),
+                content_type="application/json"
+            )
+            self.assertEqual(response.status_code, 401)
+
+            # Verificar incremento progresivo en la base de datos
+            registro = self.RegistroIntentoLogin.objects.get(identificador=self.username.lower())
+            self.assertEqual(registro.failed_attempts, i)
+            self.assertFalse(registro.is_locked)
+            self.assertIsNone(registro.locked_until)
+
+    def test_account_lockout_on_consecutive_failures(self):
+        """2. Prueba que bloquea el acceso tras alcanzar el límite y rechaza el intento N+1 (EX-3)."""
+        # Ejecutar 5 intentos fallidos consecutivos (límite configurado = 5)
+        for i in range(1, 6):
+            response = self.client.post(
+                self.api_login_url,
+                data=json.dumps({"email": self.email, "password": f"WrongPwd_{i}"}),
+                content_type="application/json"
+            )
+            if i < 5:
+                self.assertEqual(response.status_code, 401)
+            else:
+                # En el 5to fallo se activa el bloqueo
+                self.assertEqual(response.status_code, 403)
+                data = response.json()
+                self.assertTrue(data.get("locked"))
+                self.assertIn("demasiados intentos", data.get("error", ""))
+
+        # Verificar estado del registro en base de datos
+        registro = self.RegistroIntentoLogin.objects.get(identificador=self.username.lower())
+        self.assertEqual(registro.failed_attempts, 5)
+        self.assertTrue(registro.is_locked)
+        self.assertIsNotNone(registro.locked_until)
+
+        # Intento N+1 (intento 6): Incluso con la contraseña CORRECTA, debe ser rechazado por estar bloqueado
+        response_n_plus_1 = self.client.post(
+            self.api_login_url,
+            data=json.dumps({"email": self.email, "password": self.password}),
+            content_type="application/json"
+        )
+        self.assertEqual(response_n_plus_1.status_code, 403)
+        data_n1 = response_n_plus_1.json()
+        self.assertTrue(data_n1.get("locked"))
+        self.assertIn("bloqueada temporalmente", data_n1.get("error", ""))
+
+    def test_successful_login_resets_counter(self):
+        """3. Prueba que reinicia el contador de fallos a 0 tras un inicio de sesión exitoso."""
+        # Generar 3 intentos fallidos previos
+        for i in range(3):
+            self.client.post(
+                self.api_login_url,
+                data=json.dumps({"email": self.email, "password": "BadPassword"}),
+                content_type="application/json"
+            )
+
+        registro = self.RegistroIntentoLogin.objects.get(identificador=self.username.lower())
+        self.assertEqual(registro.failed_attempts, 3)
+
+        # Inicio de sesión exitoso con credenciales correctas
+        response = self.client.post(
+            self.api_login_url,
+            data=json.dumps({"email": self.email, "password": self.password}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+
+        # Verificar reinicio del contador a 0
+        registro.refresh_from_db()
+        self.assertEqual(registro.failed_attempts, 0)
+        self.assertIsNone(registro.locked_until)
+        self.assertFalse(registro.is_locked)
+
+    def test_generic_error_response_prevents_enumeration_rnf07(self):
+        """4. Prueba que valida la respuesta de error genérica uniforme para prevenir enumeración (RNF07)."""
+        # Caso A: Usuario existente con contraseña incorrecta
+        res_existente = self.client.post(
+            self.api_login_url,
+            data=json.dumps({"email": self.email, "password": "ContraseñaEquivocada"}),
+            content_type="application/json"
+        )
+        self.assertEqual(res_existente.status_code, 401)
+        err_existente = res_existente.json().get("error")
+
+        # Caso B: Usuario inexistente en la plataforma
+        res_inexistente = self.client.post(
+            self.api_login_url,
+            data=json.dumps({"email": "no_existe_9876@cafepergamo.com", "password": "Password123"}),
+            content_type="application/json"
+        )
+        self.assertEqual(res_inexistente.status_code, 401)
+        err_inexistente = res_inexistente.json().get("error")
+
+        # Ambos mensajes de error deben ser idénticos
+        self.assertEqual(err_existente, err_inexistente)
+        self.assertIn("incorrectos", err_existente)
+
+    def test_jwt_endpoint_account_lockout(self):
+        """5. Prueba que el endpoint de tokens JWT (/api/auth/token/) bloquea el acceso tras 5 fallos."""
+        # 5 intentos fallidos en el endpoint JWT
+        for i in range(5):
+            res = self.client.post(
+                self.token_url,
+                data=json.dumps({"username": self.username, "password": "WrongPassword"}),
+                content_type="application/json"
+            )
+            self.assertEqual(res.status_code, 401)
+
+        # Intento posterior: cuenta bloqueada
+        res_blocked = self.client.post(
+            self.token_url,
+            data=json.dumps({"username": self.username, "password": self.password}),
+            content_type="application/json"
+        )
+        self.assertEqual(res_blocked.status_code, 401)
+        data = res_blocked.json()
+        self.assertIn("bloqueada temporalmente", str(data))
+
+    def test_lockout_cooloff_automatic_expiration(self):
+        """6. Prueba que la cuenta se desbloquea automáticamente cuando el período de bloqueo expira."""
+        from django.utils import timezone
+        from datetime import timedelta
+
+        # Simular una cuenta bloqueada cuyo tiempo de bloqueo ya expiró (en el pasado)
+        registro, _ = self.RegistroIntentoLogin.objects.get_or_create(
+            identificador=self.username.lower(),
+            defaults={"user": self.user}
+        )
+        registro.failed_attempts = 5
+        registro.locked_until = timezone.now() - timedelta(minutes=1)
+        registro.save()
+
+        # Al intentar iniciar sesión con credenciales correctas, el cooloff expiró y debe permitir entrar
+        response = self.client.post(
+            self.api_login_url,
+            data=json.dumps({"email": self.email, "password": self.password}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+
+        registro.refresh_from_db()
+        self.assertEqual(registro.failed_attempts, 0)
+        self.assertIsNone(registro.locked_until)
+        self.assertFalse(registro.is_locked)
+
+
+
