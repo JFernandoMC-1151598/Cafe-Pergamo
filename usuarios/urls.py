@@ -7,6 +7,7 @@ Subtarea: SCRUM-60 / HU01-ST3: Registro de usuarios.
 from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 from . import views
+from .password_reset import password_reset_request_api, password_reset_supabase_redirect
 
 urlpatterns = [
     # Vistas de interfaz Web
@@ -21,7 +22,9 @@ urlpatterns = [
     # rutas no rompan el sitio; la lógica real de recuperación de
     # contraseña queda pendiente como funcionalidad aparte.
     path('recuperar-contrasena/', views.recuperar_contrasena_view, name='recuperar_contrasena'),
+    path('restablecer-contrasena/', password_reset_supabase_redirect, name='restablecer_contrasena_supabase'),
     path('restablecer-contrasena/<str:token>/', views.restablecer_contrasena_view, name='restablecer_contrasena'),
+    path('api/auth/password-reset/request/', password_reset_request_api, name='password_reset_request'),
 
     # Endpoints y alias API (HU02-ST2: POST /api/auth/login)
     path('api/auth/login', views.login_view, name='api_auth_login_raw'),

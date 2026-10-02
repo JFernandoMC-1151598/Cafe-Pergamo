@@ -144,12 +144,38 @@
                 submitButton.disabled = true;
                 submitButton.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Enviando...';
 
-                window.setTimeout(function () {
-                    submitButton.disabled = false;
-                    submitButton.innerHTML = '<i class="bi bi-envelope-arrow-up me-1"></i> Solicitar recuperaci&oacute;n';
-                    generalAlert.className = 'alert alert-success';
-                    generalAlert.textContent = 'El correo tiene un formato valido. La solicitud podra enviarse cuando se integre el servicio de recuperacion.';
-                }, 900);
+                fetch('{% url "password_reset_request" %}', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+                    },
+                    body: JSON.stringify({ email: value })
+                })
+                    .then(function (response) {
+                        return response.json().then(function (data) {
+                            return { ok: response.ok, data: data };
+                        });
+                    })
+                    .then(function (result) {
+                        submitButton.disabled = false;
+                        submitButton.innerHTML = '<i class="bi bi-envelope-arrow-up me-1"></i> Solicitar recuperaci&oacute;n';
+
+                        if (!result.ok) {
+                            generalAlert.className = 'alert alert-danger';
+                            generalAlert.textContent = result.data.error || 'No se pudo procesar la solicitud.';
+                            return;
+                        }
+
+                        generalAlert.className = 'alert alert-success';
+                        generalAlert.textContent = result.data.message;
+                    })
+                    .catch(function () {
+                        submitButton.disabled = false;
+                        submitButton.innerHTML = '<i class="bi bi-envelope-arrow-up me-1"></i> Solicitar recuperaci&oacute;n';
+                        generalAlert.className = 'alert alert-danger';
+                        generalAlert.textContent = 'No se pudo conectar con el servicio de recuperacion.';
+                    });
             });
         });
     </script>

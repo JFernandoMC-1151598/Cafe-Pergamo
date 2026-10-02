@@ -268,3 +268,5 @@ class RegistroIntentoLogin(models.Model):
         delta = self.locked_until - timezone.now()
         return max(1, int(delta.total_seconds() / 60) + 1)
 
+
+

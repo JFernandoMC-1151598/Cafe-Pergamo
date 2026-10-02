@@ -106,10 +106,16 @@
         </div>
     </main>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
 
     <script>
         document.addEventListener('DOMContentLoaded', function () {
+            const supabaseUrl = '{{ supabase_url|escapejs }}';
+            const supabaseAnonKey = '{{ supabase_anon_key|escapejs }}';
+            const supabaseClient = supabaseUrl && supabaseAnonKey
+                ? window.supabase.createClient(supabaseUrl, supabaseAnonKey)
+                : null;
             const form = document.getElementById('resetPasswordForm');
             const newPassword = document.getElementById('new_password');
             const confirmPassword = document.getElementById('confirm_password');
@@ -117,6 +123,7 @@
             const confirmPasswordFeedback = document.getElementById('confirm-password-feedback');
             const generalAlert = document.getElementById('general-alert');
             const submitButton = document.getElementById('submitResetBtn');
+            let recoverySession = null;
             const requirementElements = {
                 length: document.getElementById('lengthRequirement'),
                 case: document.getElementById('caseRequirement'),
@@ -153,6 +160,17 @@
                 generalAlert.textContent = '';
             }
 
+            function showError(message) {
+                generalAlert.className = 'alert alert-danger';
+                generalAlert.textContent = message;
+            }
+
+            function setFormEnabled(enabled) {
+                newPassword.disabled = !enabled;
+                confirmPassword.disabled = !enabled;
+                submitButton.disabled = !enabled;
+            }
+
             function setPasswordVisibility(buttonId, input, iconId) {
                 document.getElementById(buttonId).addEventListener('click', function () {
                     const isHidden = input.type === 'password';
@@ -175,7 +193,28 @@
                 confirmPassword.classList.remove('is-invalid');
             });
 
-            form.addEventListener('submit', function (event) {
+            async function loadRecoverySession() {
+                if (!supabaseClient) {
+                    showError('El servicio de recuperacion no esta configurado.');
+                    setFormEnabled(false);
+                    return;
+                }
+
+                supabaseClient.auth.onAuthStateChange(function (event, session) {
+                    if (event === 'PASSWORD_RECOVERY') {
+                        recoverySession = session;
+                    }
+                });
+
+                const sessionResult = await supabaseClient.auth.getSession();
+                recoverySession = sessionResult.data.session;
+                if (sessionResult.error || !recoverySession) {
+                    showError('El enlace de recuperacion es invalido o ya expiro.');
+                    setFormEnabled(false);
+                }
+            }
+
+            form.addEventListener('submit', async function (event) {
                 event.preventDefault();
                 const passwordIsStrong = updateRequirements();
                 const passwordsMatch = newPassword.value !== '' && newPassword.value === confirmPassword.value;
@@ -195,15 +234,35 @@
                     return;
                 }
 
+                if (!recoverySession) {
+                    showError('El enlace de recuperacion es invalido o ya expiro.');
+                    return;
+                }
+
                 submitButton.disabled = true;
                 submitButton.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span> Guardando...';
-                window.setTimeout(function () {
+
+                const updateResult = await supabaseClient.auth.updateUser({
+                    password: newPassword.value
+                });
+
+                if (updateResult.error) {
                     submitButton.disabled = false;
                     submitButton.innerHTML = '<i class="bi bi-key-fill me-1"></i> Restablecer contrase&ntilde;a';
-                    generalAlert.className = 'alert alert-success';
-                    generalAlert.textContent = 'La contrasena cumple los requisitos. La actualizacion se completara cuando se integre ST5.';
-                }, 900);
+                    showError('No se pudo actualizar la contrasena. El enlace puede haber expirado o ya haber sido utilizado.');
+                    return;
+                }
+
+                await supabaseClient.auth.signOut();
+                generalAlert.className = 'alert alert-success';
+                generalAlert.textContent = 'La contrasena se actualizo correctamente. Redirigiendo al inicio de sesion...';
+                submitButton.innerHTML = '<i class="bi bi-check-circle me-1"></i> Contrase&ntilde;a actualizada';
+                window.setTimeout(function () {
+                    window.location.href = '{% url "login" %}';
+                }, 1200);
             });
+
+            loadRecoverySession();
         });
     </script>
 </body>
