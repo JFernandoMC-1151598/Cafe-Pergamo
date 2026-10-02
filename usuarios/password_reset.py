@@ -1,5 +1,6 @@
 import json
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.http import JsonResponse
@@ -60,4 +61,11 @@ def password_reset_request_api(request):
 
 def password_reset_supabase_redirect(request):
     """Renderiza la pantalla destino del enlace generado por Supabase Auth."""
-    return render(request, "usuarios/restablecer_contrasena.html")
+    return render(
+        request,
+        "usuarios/restablecer_contrasena.html",
+        {
+            "supabase_url": settings.SUPABASE_URL or "",
+            "supabase_anon_key": settings.SUPABASE_ANON_KEY or "",
+        },
+    )
