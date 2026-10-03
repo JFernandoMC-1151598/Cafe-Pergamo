@@ -46,6 +46,43 @@ def obtener_rol_usuario(user: User) -> str:
     return "Usuario"
 
 
+def obtener_codigo_rol_usuario(user: User) -> str:
+    """
+    Determina el CÓDIGO estable del rol de negocio del usuario (ej.
+    'PRODUCTOR', 'ADMINISTRADOR'), para HU04-ST2 (SCRUM-108):
+    autorización por claims de rol en el JWT.
+
+    A diferencia de `obtener_rol_usuario()` (que devuelve el nombre de
+    presentación, ej. "Productor / Comercializador", pensado para
+    mostrarse en la interfaz), este valor es el que usa
+    `usuarios/permissions.py` para consultar la matriz RBAC
+    (`RolPermiso`), que está indexada por `Rol.codigo`, no por
+    `Rol.nombre`. Misma prioridad de resolución que `obtener_rol_usuario`.
+    """
+    if user.is_superuser:
+        return "ADMINISTRADOR"
+
+    try:
+        from django.db import connection
+        if "usuarios" in connection.introspection.table_names():
+            from .models import Usuario
+            perfil = (
+                Usuario.objects.filter(correo__iexact=user.email)
+                .select_related("rol")
+                .first()
+            )
+            if perfil and perfil.rol:
+                return perfil.rol.codigo
+    except Exception:
+        pass
+
+    primer_grupo = user.groups.first()
+    if primer_grupo:
+        return primer_grupo.name.upper()
+
+    return ""
+
+
 def obtener_nombre_completo(user: User) -> str:
     """Obtiene el nombre completo formateado del usuario o su username como fallback."""
     nombre_completo = f"{user.first_name} {user.last_name}".strip()
@@ -74,7 +111,12 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     
     Extiende TokenObtainPairSerializer para:
     1. Incrustar Claims Personalizados (Custom Claims) en el payload del token (access):
-       - 'role': Rol asignado en la plataforma (Administrador, Productor, Comprador, etc.).
+       - 'role': Rol asignado en la plataforma, para mostrar en la UI
+         (Administrador, Productor / Comercializador, Comprador, etc.).
+       - 'role_code': código estable del mismo rol (ADMINISTRADOR,
+         PRODUCTOR, ...), usado por el middleware de autorización RBAC
+         de HU04-ST2 (ver usuarios/permissions.py) para validar el
+         acceso a cada endpoint contra la matriz Rol-Permiso.
        - 'email': Correo electrónico verificado.
        - 'full_name': Nombre completo del usuario.
        - 'username': Nombre de usuario registrado.
@@ -91,11 +133,13 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
         # Resolver claims de identidad y rol
         rol_usuario = obtener_rol_usuario(user)
+        codigo_rol_usuario = obtener_codigo_rol_usuario(user)
         nombre_completo = obtener_nombre_completo(user)
         correo_usuario = user.email or user.username
 
         # Incrustar claims personalizados en el payload del token JWT
         token["role"] = rol_usuario
+        token["role_code"] = codigo_rol_usuario
         token["email"] = correo_usuario
         token["full_name"] = nombre_completo
         token["username"] = user.username

@@ -13,6 +13,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
+from django.http import JsonResponse
 from django.test import Client, TestCase
 from django.urls import reverse
 
@@ -473,6 +474,244 @@ class AccountLockoutSecurityTests(TestCase):
         self.assertEqual(registro.failed_attempts, 0)
         self.assertIsNone(registro.locked_until)
         self.assertFalse(registro.is_locked)
+
+
+class RoleCodeJwtClaimTests(TestCase):
+    """
+    Pruebas para HU04-ST2 (SCRUM-108), parte 1: el JWT debe incluir el
+    claim 'role_code' (código estable del rol), además del 'role' ya
+    existente (nombre de presentación) de HU02-ST3.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.token_url = reverse('token_obtain_pair')
+        self.username = "admin_rbac"
+        self.email = "admin.rbac@cafepergamo.com"
+        self.password = "Pergamo2026*Rbac!"
+        self.user = User.objects.create_user(
+            username=self.username,
+            email=self.email,
+            password=self.password,
+        )
+
+    @patch("usuarios.models.Usuario")
+    @patch("django.db.connection.introspection.table_names")
+    def test_token_incluye_role_code_del_perfil(self, mock_table_names, mock_usuario_model):
+        """El claim 'role_code' debe tomar el código del rol del perfil de negocio."""
+        mock_table_names.return_value = ["usuarios"]
+        perfil = _fake_perfil(self.user.id, self.email, rol_codigo="ADMINISTRADOR")
+        # obtener_rol_usuario() (HU02-ST3) también lee perfil.rol.nombre para
+        # el claim 'role' de presentación; sin fijarlo queda como un
+        # MagicMock no serializable y rompe la codificación del JWT.
+        perfil.rol.nombre = "Administrador"
+        mock_usuario_model.objects.filter.return_value.select_related.return_value.first.return_value = perfil
+
+        response = self.client.post(
+            self.token_url,
+            data=json.dumps({"email": self.email, "password": self.password}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+
+        import jwt
+        from django.conf import settings
+        payload = jwt.decode(
+            response.json()["access"],
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            options={"verify_signature": True}
+        )
+        self.assertEqual(payload["role_code"], "ADMINISTRADOR")
+        # El claim original de HU02-ST3 sigue intacto.
+        self.assertIn("role", payload)
+
+    def test_token_sin_perfil_de_negocio_no_rompe_y_deja_role_code_vacio(self):
+        """
+        Sin perfil Usuario resoluble (tabla no sincronizada o usuario sin
+        perfil), el claim debe quedar vacío en vez de romper la emisión
+        del token — igual de "fail-closed" que el resto del sistema.
+        """
+        response = self.client.post(
+            self.token_url,
+            data=json.dumps({"email": self.email, "password": self.password}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+
+        import jwt
+        from django.conf import settings
+        payload = jwt.decode(
+            response.json()["access"],
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            options={"verify_signature": True}
+        )
+        self.assertEqual(payload.get("role_code"), "")
+
+
+class AuthorizationRBACTests(TestCase):
+    """
+    Pruebas para HU04-ST2 (SCRUM-108), parte 2: el middleware de
+    autorización (usuarios/permissions.py) que decide, a partir del
+    claim 'role_code' del JWT, si el rol tiene el permiso requerido
+    para un endpoint, consultando la matriz RolPermiso (HU04-ST1).
+    """
+
+    # --- usuario_tiene_permiso(): la función que consulta la matriz ---
+
+    @patch("usuarios.models.RolPermiso")
+    def test_usuario_tiene_permiso_concedido(self, mock_rol_permiso):
+        from usuarios.permissions import usuario_tiene_permiso
+        mock_rol_permiso.objects.filter.return_value.exists.return_value = True
+
+        self.assertTrue(usuario_tiene_permiso("ADMINISTRADOR", "usuarios.administrar"))
+        mock_rol_permiso.objects.filter.assert_called_once_with(
+            rol__codigo="ADMINISTRADOR",
+            rol__activo=True,
+            permiso__codigo__in=["usuarios.administrar"],
+            permiso__activo=True,
+        )
+
+    @patch("usuarios.models.RolPermiso")
+    def test_usuario_tiene_permiso_denegado(self, mock_rol_permiso):
+        from usuarios.permissions import usuario_tiene_permiso
+        mock_rol_permiso.objects.filter.return_value.exists.return_value = False
+
+        self.assertFalse(usuario_tiene_permiso("COMPRADOR", "usuarios.administrar"))
+
+    def test_usuario_tiene_permiso_sin_role_code_deniega_sin_consultar_bd(self):
+        from usuarios.permissions import usuario_tiene_permiso
+        self.assertFalse(usuario_tiene_permiso("", "usuarios.administrar"))
+        self.assertFalse(usuario_tiene_permiso(None, "usuarios.administrar"))
+
+    @patch("usuarios.models.RolPermiso")
+    def test_usuario_tiene_permiso_acepta_lista_de_codigos_ored(self, mock_rol_permiso):
+        from usuarios.permissions import usuario_tiene_permiso
+        mock_rol_permiso.objects.filter.return_value.exists.return_value = True
+
+        self.assertTrue(
+            usuario_tiene_permiso("PRODUCTOR", ["lotes.crear", "lotes.consultar"])
+        )
+        mock_rol_permiso.objects.filter.assert_called_once_with(
+            rol__codigo="PRODUCTOR",
+            rol__activo=True,
+            permiso__codigo__in=["lotes.crear", "lotes.consultar"],
+            permiso__activo=True,
+        )
+
+    # --- TienePermisoRBAC: permission class de DRF para vistas de clase ---
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_permission_class_concede_acceso(self, mock_check):
+        from usuarios.permissions import TienePermisoRBAC
+        mock_check.return_value = True
+
+        request = MagicMock()
+        request.auth = {"role_code": "ADMINISTRADOR"}
+        view = MagicMock()
+        view.required_permission = "usuarios.administrar"
+
+        self.assertTrue(TienePermisoRBAC().has_permission(request, view))
+        mock_check.assert_called_once_with("ADMINISTRADOR", "usuarios.administrar")
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_permission_class_deniega_acceso(self, mock_check):
+        from usuarios.permissions import TienePermisoRBAC
+        mock_check.return_value = False
+
+        request = MagicMock()
+        request.auth = {"role_code": "COMPRADOR"}
+        view = MagicMock()
+        view.required_permission = "usuarios.administrar"
+
+        self.assertFalse(TienePermisoRBAC().has_permission(request, view))
+
+    def test_permission_class_deniega_sin_token_jwt(self):
+        """Petición sin JWT validado (request.auth es None) -> denegar."""
+        from usuarios.permissions import TienePermisoRBAC
+
+        request = MagicMock()
+        request.auth = None
+        view = MagicMock()
+        view.required_permission = "usuarios.administrar"
+
+        self.assertFalse(TienePermisoRBAC().has_permission(request, view))
+
+    def test_permission_class_deniega_si_vista_no_declara_permiso_requerido(self):
+        """Vista mal configurada (sin required_permission) -> denegar (fail-closed)."""
+        from usuarios.permissions import TienePermisoRBAC
+
+        request = MagicMock()
+        request.auth = {"role_code": "ADMINISTRADOR"}
+        view = MagicMock(spec=[])  # sin el atributo required_permission
+
+        self.assertFalse(TienePermisoRBAC().has_permission(request, view))
+
+    # --- permiso_requerido: decorador para vistas basadas en función ---
+
+    def test_decorador_responde_401_sin_token(self):
+        from django.test import RequestFactory
+        from usuarios.permissions import permiso_requerido
+
+        with patch(
+            "usuarios.permissions.JWTAuthentication.authenticate",
+            return_value=None,
+        ):
+            @permiso_requerido("usuarios.administrar")
+            def vista_protegida(request):
+                return JsonResponse({"ok": True})
+
+            request = RequestFactory().get("/api/cualquier-endpoint/")
+            response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 401)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_decorador_responde_403_sin_permiso(self, mock_check):
+        from django.test import RequestFactory
+        from usuarios.permissions import permiso_requerido
+
+        mock_check.return_value = False
+        fake_token = {"role_code": "COMPRADOR"}
+
+        with patch(
+            "usuarios.permissions.JWTAuthentication.authenticate",
+            return_value=(MagicMock(), fake_token),
+        ):
+            @permiso_requerido("usuarios.administrar")
+            def vista_protegida(request):
+                return JsonResponse({"ok": True})
+
+            request = RequestFactory().get("/api/cualquier-endpoint/")
+            response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 403)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_decorador_deja_pasar_con_permiso_concedido(self, mock_check):
+        from django.test import RequestFactory
+        from usuarios.permissions import permiso_requerido
+
+        mock_check.return_value = True
+        fake_user = MagicMock()
+        fake_token = {"role_code": "ADMINISTRADOR"}
+
+        with patch(
+            "usuarios.permissions.JWTAuthentication.authenticate",
+            return_value=(fake_user, fake_token),
+        ):
+            @permiso_requerido("usuarios.administrar")
+            def vista_protegida(request):
+                return JsonResponse({"ok": True, "user": request.user is fake_user})
+
+            request = RequestFactory().get("/api/cualquier-endpoint/")
+            response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["user"])
 
 
 
