@@ -8,3 +8,5 @@ djangorestframework-simplejwt==5.5.1
 sqlparse==0.6.0
 supabase==2.31.0
 tzdata==2026.4
+gunicorn>=23.0.0
+whitenoise>=6.8.0
