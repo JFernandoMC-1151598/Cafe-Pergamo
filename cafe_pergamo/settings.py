@@ -76,6 +76,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                'usuarios.context_processors.rol_actual',
             ],
         },
     },
@@ -189,7 +190,22 @@ STORAGES = {
         "BACKEND": "django.core.files.storage.FileSystemStorage",
     },
     "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        # NOTA (fix post-merge con main, 2026-10-03): la storage de
+        # WhiteNoise con manifiesto comprimido (`CompressedManifestStaticFilesStorage`)
+        # exige que exista `staticfiles.json`, generado por `collectstatic`.
+        # En desarrollo/pruebas locales (DEBUG=True) ese manifiesto nunca se
+        # genera, asi que cualquier uso de {% static %} lanzaba
+        # `ValueError: Missing staticfiles manifest entry`, rompiendo
+        # login.html, base.html y todo lo que los extiende (se detecto por
+        # 5 tests que empezaron a fallar justo despues del merge).
+        # Se usa la storage de WhiteNoise solo en produccion (DEBUG=False,
+        # donde el build en Render si corre `collectstatic`); en local se
+        # mantiene la storage estandar de Django, que no requiere manifiesto.
+        "BACKEND": (
+            "whitenoise.storage.CompressedManifestStaticFilesStorage"
+            if not DEBUG
+            else "django.contrib.staticfiles.storage.StaticFilesStorage"
+        ),
     },
 }
 

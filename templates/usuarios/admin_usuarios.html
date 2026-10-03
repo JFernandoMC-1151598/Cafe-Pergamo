@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}Administración de Usuarios - Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h1 class="h3 fw-bold text-dark mb-1">Administración de Usuarios</h1>
+            <p class="text-muted mb-0">Consulte los usuarios del sistema y reasigne su rol cuando sea necesario.</p>
+        </div>
+        <span class="user-badge">
+            <i class="bi bi-people-fill"></i>
+            <span>{{ usuarios.count }} usuario{{ usuarios.count|pluralize }}</span>
+        </span>
+    </div>
+
+    <!-- Filtros por Rol y Estado -->
+    <form method="GET" class="row g-2 align-items-end mb-4">
+        <div class="col-auto">
+            <label for="filtroRol" class="form-label small text-muted mb-1">Rol</label>
+            <select class="form-select" id="filtroRol" name="rol" onchange="this.form.submit()">
+                <option value="">Todos los roles</option>
+                {% for rol in roles_asignables %}
+                    <option value="{{ rol.codigo }}" {% if rol.codigo == rol_filtro %}selected{% endif %}>{{ rol.nombre }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-auto">
+            <label for="filtroEstado" class="form-label small text-muted mb-1">Estado</label>
+            <select class="form-select" id="filtroEstado" name="estado" onchange="this.form.submit()">
+                <option value="">Todos</option>
+                <option value="activo" {% if estado_filtro == "activo" %}selected{% endif %}>Activos</option>
+                <option value="inactivo" {% if estado_filtro == "inactivo" %}selected{% endif %}>Inactivos</option>
+            </select>
+        </div>
+        {% if rol_filtro or estado_filtro %}
+            <div class="col-auto">
+                <a href="{% url 'admin_usuarios' %}" class="btn btn-outline-pergamo btn-sm">
+                    <i class="bi bi-x-circle me-1"></i> Quitar filtros
+                </a>
+            </div>
+        {% endif %}
+    </form>
+
+    <!-- Listado de Usuarios -->
+    <div class="table-responsive">
+        <table class="table align-middle bg-white">
+            <thead>
+                <tr>
+                    <th>Usuario</th>
+                    <th>Correo</th>
+                    <th>Rol actual</th>
+                    <th>Estado</th>
+                    <th>Reasignar rol</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for usuario in usuarios %}
+                    <tr>
+                        <td>{{ usuario.nombres }} {{ usuario.apellidos }}</td>
+                        <td>{{ usuario.correo }}</td>
+                        <td>
+                            <span class="user-badge">
+                                <i class="bi bi-person-badge"></i>
+                                <span>{{ usuario.rol.nombre|default:"Sin rol" }}</span>
+                            </span>
+                        </td>
+                        <td>
+                            {% if usuario.activo %}
+                                <span class="badge text-bg-success">Activo</span>
+                            {% else %}
+                                <span class="badge text-bg-secondary">Inactivo</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <form method="POST" class="d-flex gap-2">
+                                {% csrf_token %}
+                                <input type="hidden" name="usuario_id" value="{{ usuario.id }}">
+                                <select name="nuevo_rol" class="form-select form-select-sm" style="width: auto;">
+                                    {% for rol in roles_asignables %}
+                                        <option value="{{ rol.codigo }}" {% if usuario.rol_id == rol.id %}selected{% endif %}>{{ rol.nombre }}</option>
+                                    {% endfor %}
+                                </select>
+                                <button type="submit" class="btn btn-pergamo btn-sm">Guardar</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="5" class="text-center text-muted py-4">No hay usuarios que coincidan con los filtros seleccionados.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

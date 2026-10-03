@@ -10,13 +10,18 @@ de pruebas que Django crea automáticamente para cada `TestCase`.
 """
 
 import json
+import uuid
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
+from django.http import JsonResponse
 from django.test import Client, TestCase
 from django.urls import reverse
+from django.utils import timezone
 
 from supabase_auth.errors import AuthApiError
+
+from usuarios.models import Usuario
 
 
 def _fake_auth_user(user_id, email):
@@ -475,4 +480,1538 @@ class AccountLockoutSecurityTests(TestCase):
         self.assertFalse(registro.is_locked)
 
 
+class RoleCodeJwtClaimTests(TestCase):
+    """
+    Pruebas para HU04-ST2 (SCRUM-108), parte 1: el JWT debe incluir el
+    claim 'role_code' (código estable del rol), además del 'role' ya
+    existente (nombre de presentación) de HU02-ST3.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.token_url = reverse('token_obtain_pair')
+        self.username = "admin_rbac"
+        self.email = "admin.rbac@cafepergamo.com"
+        self.password = "Pergamo2026*Rbac!"
+        self.user = User.objects.create_user(
+            username=self.username,
+            email=self.email,
+            password=self.password,
+        )
+
+    @patch("usuarios.models.Usuario")
+    @patch("django.db.connection.introspection.table_names")
+    def test_token_incluye_role_code_del_perfil(self, mock_table_names, mock_usuario_model):
+        """El claim 'role_code' debe tomar el código del rol del perfil de negocio."""
+        mock_table_names.return_value = ["usuarios"]
+        perfil = _fake_perfil(self.user.id, self.email, rol_codigo="ADMINISTRADOR")
+        # obtener_rol_usuario() (HU02-ST3) también lee perfil.rol.nombre para
+        # el claim 'role' de presentación; sin fijarlo queda como un
+        # MagicMock no serializable y rompe la codificación del JWT.
+        perfil.rol.nombre = "Administrador"
+        mock_usuario_model.objects.filter.return_value.select_related.return_value.first.return_value = perfil
+
+        response = self.client.post(
+            self.token_url,
+            data=json.dumps({"email": self.email, "password": self.password}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+
+        import jwt
+        from django.conf import settings
+        payload = jwt.decode(
+            response.json()["access"],
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            options={"verify_signature": True}
+        )
+        self.assertEqual(payload["role_code"], "ADMINISTRADOR")
+        # El claim original de HU02-ST3 sigue intacto.
+        self.assertIn("role", payload)
+
+    def test_token_sin_perfil_de_negocio_no_rompe_y_deja_role_code_vacio(self):
+        """
+        Sin perfil Usuario resoluble (tabla no sincronizada o usuario sin
+        perfil), el claim debe quedar vacío en vez de romper la emisión
+        del token — igual de "fail-closed" que el resto del sistema.
+        """
+        response = self.client.post(
+            self.token_url,
+            data=json.dumps({"email": self.email, "password": self.password}),
+            content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+
+        import jwt
+        from django.conf import settings
+        payload = jwt.decode(
+            response.json()["access"],
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            options={"verify_signature": True}
+        )
+        self.assertEqual(payload.get("role_code"), "")
+
+
+class AuthorizationRBACTests(TestCase):
+    """
+    Pruebas para HU04-ST2 (SCRUM-108), parte 2: el middleware de
+    autorización (usuarios/permissions.py) que decide, a partir del
+    claim 'role_code' del JWT, si el rol tiene el permiso requerido
+    para un endpoint, consultando la matriz RolPermiso (HU04-ST1).
+    """
+
+    # --- usuario_tiene_permiso(): la función que consulta la matriz ---
+
+    @patch("usuarios.models.RolPermiso")
+    def test_usuario_tiene_permiso_concedido(self, mock_rol_permiso):
+        from usuarios.permissions import usuario_tiene_permiso
+        mock_rol_permiso.objects.filter.return_value.exists.return_value = True
+
+        self.assertTrue(usuario_tiene_permiso("ADMINISTRADOR", "usuarios.administrar"))
+        mock_rol_permiso.objects.filter.assert_called_once_with(
+            rol__codigo="ADMINISTRADOR",
+            rol__activo=True,
+            permiso__codigo__in=["usuarios.administrar"],
+            permiso__activo=True,
+        )
+
+    @patch("usuarios.models.RolPermiso")
+    def test_usuario_tiene_permiso_denegado(self, mock_rol_permiso):
+        from usuarios.permissions import usuario_tiene_permiso
+        mock_rol_permiso.objects.filter.return_value.exists.return_value = False
+
+        self.assertFalse(usuario_tiene_permiso("COMPRADOR", "usuarios.administrar"))
+
+    def test_usuario_tiene_permiso_sin_role_code_deniega_sin_consultar_bd(self):
+        from usuarios.permissions import usuario_tiene_permiso
+        self.assertFalse(usuario_tiene_permiso("", "usuarios.administrar"))
+        self.assertFalse(usuario_tiene_permiso(None, "usuarios.administrar"))
+
+    @patch("usuarios.models.RolPermiso")
+    def test_usuario_tiene_permiso_acepta_lista_de_codigos_ored(self, mock_rol_permiso):
+        from usuarios.permissions import usuario_tiene_permiso
+        mock_rol_permiso.objects.filter.return_value.exists.return_value = True
+
+        self.assertTrue(
+            usuario_tiene_permiso("PRODUCTOR", ["lotes.crear", "lotes.consultar"])
+        )
+        mock_rol_permiso.objects.filter.assert_called_once_with(
+            rol__codigo="PRODUCTOR",
+            rol__activo=True,
+            permiso__codigo__in=["lotes.crear", "lotes.consultar"],
+            permiso__activo=True,
+        )
+
+    # --- TienePermisoRBAC: permission class de DRF para vistas de clase ---
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_permission_class_concede_acceso(self, mock_check):
+        from usuarios.permissions import TienePermisoRBAC
+        mock_check.return_value = True
+
+        request = MagicMock()
+        request.auth = {"role_code": "ADMINISTRADOR"}
+        view = MagicMock()
+        view.required_permission = "usuarios.administrar"
+
+        self.assertTrue(TienePermisoRBAC().has_permission(request, view))
+        mock_check.assert_called_once_with("ADMINISTRADOR", "usuarios.administrar")
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_permission_class_deniega_acceso(self, mock_check):
+        from usuarios.permissions import TienePermisoRBAC
+        mock_check.return_value = False
+
+        request = MagicMock()
+        request.auth = {"role_code": "COMPRADOR"}
+        view = MagicMock()
+        view.required_permission = "usuarios.administrar"
+
+        self.assertFalse(TienePermisoRBAC().has_permission(request, view))
+
+    def test_permission_class_deniega_sin_token_jwt(self):
+        """Petición sin JWT validado (request.auth es None) -> denegar."""
+        from usuarios.permissions import TienePermisoRBAC
+
+        request = MagicMock()
+        request.auth = None
+        view = MagicMock()
+        view.required_permission = "usuarios.administrar"
+
+        self.assertFalse(TienePermisoRBAC().has_permission(request, view))
+
+    def test_permission_class_deniega_si_vista_no_declara_permiso_requerido(self):
+        """Vista mal configurada (sin required_permission) -> denegar (fail-closed)."""
+        from usuarios.permissions import TienePermisoRBAC
+
+        request = MagicMock()
+        request.auth = {"role_code": "ADMINISTRADOR"}
+        view = MagicMock(spec=[])  # sin el atributo required_permission
+
+        self.assertFalse(TienePermisoRBAC().has_permission(request, view))
+
+    # --- permiso_requerido: decorador para vistas basadas en función ---
+
+    def test_decorador_responde_401_sin_token(self):
+        from django.test import RequestFactory
+        from usuarios.permissions import permiso_requerido
+
+        with patch(
+            "usuarios.permissions.JWTAuthentication.authenticate",
+            return_value=None,
+        ):
+            @permiso_requerido("usuarios.administrar")
+            def vista_protegida(request):
+                return JsonResponse({"ok": True})
+
+            request = RequestFactory().get("/api/cualquier-endpoint/")
+            response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 401)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_decorador_responde_403_sin_permiso(self, mock_check):
+        from django.test import RequestFactory
+        from usuarios.permissions import permiso_requerido
+
+        mock_check.return_value = False
+        fake_token = {"role_code": "COMPRADOR"}
+
+        with patch(
+            "usuarios.permissions.JWTAuthentication.authenticate",
+            return_value=(MagicMock(), fake_token),
+        ):
+            @permiso_requerido("usuarios.administrar")
+            def vista_protegida(request):
+                return JsonResponse({"ok": True})
+
+            request = RequestFactory().get("/api/cualquier-endpoint/")
+            response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 403)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_decorador_deja_pasar_con_permiso_concedido(self, mock_check):
+        from django.test import RequestFactory
+        from usuarios.permissions import permiso_requerido
+
+        mock_check.return_value = True
+        fake_user = MagicMock()
+        fake_token = {"role_code": "ADMINISTRADOR"}
+
+        with patch(
+            "usuarios.permissions.JWTAuthentication.authenticate",
+            return_value=(fake_user, fake_token),
+        ):
+            @permiso_requerido("usuarios.administrar")
+            def vista_protegida(request):
+                return JsonResponse({"ok": True, "user": request.user is fake_user})
+
+            request = RequestFactory().get("/api/cualquier-endpoint/")
+            response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["user"])
+
+
+class RoleMenuRenderingTests(TestCase):
+    """
+    Pruebas para HU04-ST3 (SCRUM-109), parte 1: exponer el rol de la
+    sesión a las plantillas (rol_actual) y el filtro que consulta la
+    matriz RBAC para decidir qué mostrar (tiene_permiso).
+    """
+
+    def test_rol_actual_toma_el_rol_de_la_sesion(self):
+        from usuarios.context_processors import rol_actual
+
+        request = MagicMock()
+        request.session = {"rol": "ADMINISTRADOR"}
+
+        self.assertEqual(rol_actual(request), {"rol_actual": "ADMINISTRADOR"})
+
+    def test_rol_actual_vacio_sin_sesion_iniciada(self):
+        from usuarios.context_processors import rol_actual
+
+        request = MagicMock()
+        request.session = {}
+
+        self.assertEqual(rol_actual(request), {"rol_actual": ""})
+
+    @patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso")
+    def test_filtro_tiene_permiso_delega_en_usuario_tiene_permiso(self, mock_check):
+        from usuarios.templatetags.rbac_tags import tiene_permiso
+
+        mock_check.return_value = True
+        self.assertTrue(tiene_permiso("ADMINISTRADOR", "usuarios.administrar"))
+        mock_check.assert_called_once_with("ADMINISTRADOR", "usuarios.administrar")
+
+
+class WebNavigationGuardTests(TestCase):
+    """
+    Pruebas para HU04-ST3 (SCRUM-109), parte 2: el guard de navegación
+    para páginas web basadas en sesión (permiso_requerido_sesion), que
+    debe comportarse igual de "fail-closed" que su equivalente de JWT
+    (HU04-ST2), pero con la UX del resto del sitio (mensaje flash +
+    redirección, no un código de error crudo).
+    """
+
+    def _fake_request(self, path="/alguna-pantalla/", autenticado=True, rol=""):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        request = RequestFactory().get(path)
+        request.user = MagicMock(is_authenticated=autenticado)
+        request.session = {"rol": rol} if rol else {}
+        request._messages = FallbackStorage(request)
+        return request
+
+    def test_sin_sesion_iniciada_redirige_a_login_con_next(self):
+        from usuarios.permissions import permiso_requerido_sesion
+
+        @permiso_requerido_sesion("usuarios.administrar")
+        def vista_protegida(request):
+            return JsonResponse({"ok": True})
+
+        request = self._fake_request(path="/panel-admin/", autenticado=False)
+        response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+        self.assertIn("next=/panel-admin/", response.url)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_autenticado_sin_permiso_redirige_a_home(self, mock_check):
+        from usuarios.permissions import permiso_requerido_sesion
+
+        mock_check.return_value = False
+
+        @permiso_requerido_sesion("usuarios.administrar")
+        def vista_protegida(request):
+            return JsonResponse({"ok": True})
+
+        request = self._fake_request(autenticado=True, rol="COMPRADOR")
+        response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("home"))
+
+    def test_sin_rol_en_sesion_deniega_sin_consultar_la_matriz(self):
+        """Sesión autenticada pero sin 'rol' asignado -> deniega (fail-closed)."""
+        from usuarios.permissions import permiso_requerido_sesion
+
+        @permiso_requerido_sesion("usuarios.administrar")
+        def vista_protegida(request):
+            return JsonResponse({"ok": True})
+
+        request = self._fake_request(autenticado=True, rol="")
+        response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("home"))
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_autenticado_con_permiso_deja_pasar(self, mock_check):
+        from usuarios.permissions import permiso_requerido_sesion
+
+        mock_check.return_value = True
+
+        @permiso_requerido_sesion("usuarios.administrar")
+        def vista_protegida(request):
+            return JsonResponse({"ok": True})
+
+        request = self._fake_request(autenticado=True, rol="ADMINISTRADOR")
+        response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(json.loads(response.content)["ok"])
+
+
+class AdminUsuariosPanelTests(TestCase):
+    """
+    Pruebas para HU04-ST4 (SCRUM-119): pantalla de administración de
+    usuarios y reasignación de roles.
+
+    El guard de acceso (permiso_requerido_sesion) ya tiene sus propias
+    pruebas en WebNavigationGuardTests, así que aquí se mockea
+    `usuario_tiene_permiso` para dejarlo pasar y concentrarse en lo que
+    hace la vista: filtrar/listar y procesar la reasignación de rol.
+    Usuario y Rol son managed=False (ver docstring del módulo), así que
+    se mockean en vez de tocar la base de datos de pruebas.
+    """
+
+    def _fake_request_autenticado(self, method="get", path="/admin/usuarios/", data=None, rol="ADMINISTRADOR"):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        factory = RequestFactory()
+        request = factory.post(path, data or {}) if method == "post" else factory.get(path, data or {})
+        request.user = MagicMock(is_authenticated=True)
+        request.session = {"rol": rol}
+        request._messages = FallbackStorage(request)
+        return request
+
+    @patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_listado_filtra_por_rol_y_estado(self, mock_usuario, mock_rol, _mock_check, _mock_check_menu):
+        from usuarios.views import panel_administracion_usuarios
+
+        # La lista final solo necesita comportarse como iterable (para el
+        # {% for %} de la plantilla) y responder a .count (usado en el
+        # encabezado), no como un queryset real.
+        lista_final = MagicMock()
+        lista_final.__iter__.return_value = iter([])
+        lista_final.count.return_value = 0
+
+        queryset_base = MagicMock()
+        mock_usuario.objects.select_related.return_value.order_by.return_value = queryset_base
+        queryset_base.filter.return_value.filter.return_value = lista_final
+        mock_rol.objects.filter.return_value.order_by.return_value = []
+
+        request = self._fake_request_autenticado(data={"rol": "PRODUCTOR", "estado": "activo"})
+        response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 200)
+        queryset_base.filter.assert_called_once_with(rol__codigo="PRODUCTOR")
+        queryset_base.filter.return_value.filter.assert_called_once_with(activo=True)
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_reasignar_rol_delega_en_cambiar_rol_usuario_y_redirige(
+        self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol
+    ):
+        """
+        Desde HU04-ST5 (SCRUM-120), la vista ya no actualiza el rol
+        directamente: delega en `gestion_roles.cambiar_rol_usuario`, que
+        es quien aplica la regla de "no dejar el sistema sin
+        administradores" y registra la bitácora de auditoría (RF28).
+        """
+        from usuarios.views import panel_administracion_usuarios
+
+        usuario_existente = MagicMock(id="u1", rol_id=1, nombres="Ana", apellidos="Gómez")
+        nuevo_rol = MagicMock(id=2, nombre="Administrador")
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
+        mock_rol.objects.filter.return_value.first.return_value = nuevo_rol
+        mock_cambiar_rol.return_value = (usuario_existente, MagicMock(id=99))
+
+        request = self._fake_request_autenticado(
+            method="post", data={"usuario_id": "u1", "nuevo_rol": "ADMINISTRADOR"}
+        )
+        response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("admin_usuarios"))
+        mock_cambiar_rol.assert_called_once()
+        args, kwargs = mock_cambiar_rol.call_args
+        self.assertEqual(args[0], usuario_existente)
+        self.assertEqual(args[1], nuevo_rol)
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_reasignar_al_mismo_rol_no_rompe(self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol):
+        """Cuando `cambiar_rol_usuario` detecta que no hubo cambio real, devuelve bitácora None."""
+        from usuarios.views import panel_administracion_usuarios
+
+        usuario_existente = MagicMock(id="u1", rol_id=1, nombres="Ana", apellidos="Gómez")
+        rol_sin_cambios = MagicMock(id=1, nombre="Productor")
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
+        mock_rol.objects.filter.return_value.first.return_value = rol_sin_cambios
+        mock_cambiar_rol.return_value = (usuario_existente, None)
+
+        request = self._fake_request_autenticado(
+            method="post", data={"usuario_id": "u1", "nuevo_rol": "PRODUCTOR"}
+        )
+        response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 302)
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_reasignar_con_usuario_o_rol_invalido_no_rompe(
+        self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol
+    ):
+        from usuarios.views import panel_administracion_usuarios
+
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = None
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock()
+
+        request = self._fake_request_autenticado(
+            method="post", data={"usuario_id": "no-existe", "nuevo_rol": "ADMINISTRADOR"}
+        )
+        response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("admin_usuarios"))
+        mock_cambiar_rol.assert_not_called()
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_reasignar_cuando_quedaria_sin_administradores_muestra_error(
+        self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol
+    ):
+        """RF28: si cambiar_rol_usuario rechaza el cambio, la vista no debe romperse (500)."""
+        from usuarios.gestion_roles import CambioRolInvalido
+        from usuarios.views import panel_administracion_usuarios
+
+        usuario_existente = MagicMock(id="admin-1", rol_id=1, nombres="Carlos", apellidos="Pérez")
+        otro_rol = MagicMock(id=2, nombre="Productor / Comercializador")
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
+        mock_rol.objects.filter.return_value.first.return_value = otro_rol
+        mock_cambiar_rol.side_effect = CambioRolInvalido("el sistema se quedaría sin administradores")
+
+        request = self._fake_request_autenticado(
+            method="post", data={"usuario_id": "admin-1", "nuevo_rol": "PRODUCTOR"}
+        )
+        response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("admin_usuarios"))
+
+
+class GestionRolesTests(TestCase):
+    """
+    Pruebas para HU04-ST5 (SCRUM-120): `gestion_roles.cambiar_rol_usuario`,
+    la función que centraliza la reasignación de rol, la restricción de
+    "no dejar el sistema sin administradores" (RF28) y el registro en
+    la bitácora de auditoría.
+
+    `Usuario` y `Rol` son managed=False y se mockean (igual que en el
+    resto del archivo). `BitacoraCambioRol` sí es managed=True — aquí
+    se deja escribir de verdad en la base de datos de pruebas, para
+    confirmar que la auditoría efectivamente queda registrada.
+    """
+
+    def _fake_usuario(self, rol_codigo, activo=True, correo="usuario@example.com"):
+        usuario = MagicMock()
+        usuario.id = uuid.uuid4()
+        usuario.correo = correo
+        usuario.activo = activo
+        usuario.rol = MagicMock(codigo=rol_codigo)
+        usuario.rol_id = rol_codigo  # alcanza para las comparaciones de igualdad de este módulo
+        return usuario
+
+    def _fake_rol(self, codigo):
+        rol = MagicMock()
+        rol.id = codigo
+        rol.codigo = codigo
+        return rol
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_cambio_normal_guarda_y_crea_entrada_de_bitacora(self, _mock_usuario_model):
+        from usuarios.gestion_roles import cambiar_rol_usuario
+        from usuarios.models import BitacoraCambioRol
+
+        usuario = self._fake_usuario(rol_codigo="PRODUCTOR", correo="ana@example.com")
+        nuevo_rol = self._fake_rol("COMPRADOR")
+
+        usuario_resultado, entrada = cambiar_rol_usuario(
+            usuario, nuevo_rol, realizado_por=None, ip_address="127.0.0.1"
+        )
+
+        self.assertIs(usuario_resultado, usuario)
+        self.assertIsNotNone(entrada)
+        usuario.save.assert_called_once_with(update_fields=["rol"])
+        self.assertEqual(usuario.rol, nuevo_rol)
+
+        self.assertEqual(BitacoraCambioRol.objects.count(), 1)
+        registro = BitacoraCambioRol.objects.first()
+        self.assertEqual(registro.usuario_correo, "ana@example.com")
+        self.assertEqual(registro.rol_anterior, "PRODUCTOR")
+        self.assertEqual(registro.rol_nuevo, "COMPRADOR")
+        self.assertEqual(registro.ip_address, "127.0.0.1")
+        self.assertIsNone(registro.realizado_por_correo)
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_cambio_registra_quien_lo_realizo(self, _mock_usuario_model):
+        from usuarios.gestion_roles import cambiar_rol_usuario
+        from usuarios.models import BitacoraCambioRol
+
+        usuario = self._fake_usuario(rol_codigo="PRODUCTOR")
+        nuevo_rol = self._fake_rol("COMPRADOR")
+        admin = self._fake_usuario(rol_codigo="ADMINISTRADOR", correo="admin@example.com")
+
+        cambiar_rol_usuario(usuario, nuevo_rol, realizado_por=admin)
+
+        registro = BitacoraCambioRol.objects.first()
+        self.assertEqual(registro.realizado_por_correo, "admin@example.com")
+        self.assertEqual(registro.realizado_por_id, admin.id)
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_cambio_al_mismo_rol_no_hace_nada(self, _mock_usuario_model):
+        from usuarios.gestion_roles import cambiar_rol_usuario
+        from usuarios.models import BitacoraCambioRol
+
+        rol_actual = self._fake_rol("PRODUCTOR")
+        usuario = self._fake_usuario(rol_codigo="PRODUCTOR")
+        usuario.rol_id = rol_actual.id
+
+        usuario_resultado, entrada = cambiar_rol_usuario(usuario, rol_actual)
+
+        self.assertIsNone(entrada)
+        usuario.save.assert_not_called()
+        self.assertEqual(BitacoraCambioRol.objects.count(), 0)
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_bloquea_dejar_el_sistema_sin_administradores(self, mock_usuario_model):
+        from usuarios.gestion_roles import CambioRolInvalido, cambiar_rol_usuario
+        from usuarios.models import BitacoraCambioRol
+
+        usuario = self._fake_usuario(rol_codigo="ADMINISTRADOR", activo=True)
+        nuevo_rol = self._fake_rol("PRODUCTOR")
+
+        # No queda ningún otro administrador activo aparte de `usuario`.
+        mock_usuario_model.objects.filter.return_value.exclude.return_value.exists.return_value = False
+
+        with self.assertRaises(CambioRolInvalido):
+            cambiar_rol_usuario(usuario, nuevo_rol)
+
+        usuario.save.assert_not_called()
+        self.assertEqual(BitacoraCambioRol.objects.count(), 0)
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_permite_reasignar_administrador_si_hay_otro_activo(self, mock_usuario_model):
+        from usuarios.gestion_roles import cambiar_rol_usuario
+
+        usuario = self._fake_usuario(rol_codigo="ADMINISTRADOR", activo=True, correo="admin1@example.com")
+        nuevo_rol = self._fake_rol("PRODUCTOR")
+
+        mock_usuario_model.objects.filter.return_value.exclude.return_value.exists.return_value = True
+
+        usuario_resultado, entrada = cambiar_rol_usuario(usuario, nuevo_rol)
+
+        self.assertIsNotNone(entrada)
+        usuario.save.assert_called_once()
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_administrador_inactivo_no_bloquea_el_cambio(self, mock_usuario_model):
+        from usuarios.gestion_roles import cambiar_rol_usuario
+
+        usuario = self._fake_usuario(rol_codigo="ADMINISTRADOR", activo=False, correo="admin2@example.com")
+        nuevo_rol = self._fake_rol("PRODUCTOR")
+
+        usuario_resultado, entrada = cambiar_rol_usuario(usuario, nuevo_rol)
+
+        self.assertIsNotNone(entrada)
+        # La función ni siquiera debería haber consultado Usuario.objects:
+        # el chequeo de 'activo' corta antes de llegar ahí.
+        mock_usuario_model.objects.filter.assert_not_called()
+
+
+class ActualizarRolUsuarioApiTests(TestCase):
+    """
+    Pruebas para HU04-ST5 (SCRUM-120): endpoint de API
+    PUT/PATCH /api/users/<id>/role.
+    """
+
+    def _patch_auth(self, role_code="ADMINISTRADOR", email="admin@example.com"):
+        fake_user = MagicMock(email=email)
+        fake_token = {"role_code": role_code}
+        return patch(
+            "usuarios.permissions.JWTAuthentication.authenticate",
+            return_value=(fake_user, fake_token),
+        )
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_put_exitoso_devuelve_200_con_datos_actualizados(
+        self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol
+    ):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        usuario_existente = MagicMock(id="u1", correo="ana@example.com")
+        usuario_existente.rol.codigo = "COMPRADOR"
+        nuevo_rol = MagicMock(codigo="COMPRADOR")
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
+        mock_usuario.objects.filter.return_value.first.return_value = MagicMock()  # realizado_por
+        mock_rol.objects.filter.return_value.first.return_value = nuevo_rol
+        mock_cambiar_rol.return_value = (usuario_existente, MagicMock(id=5))
+
+        with self._patch_auth():
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({"rol": "comprador"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertEqual(body["usuario"]["rol"], "COMPRADOR")
+        self.assertEqual(body["auditoria_id"], 5)
+        # El código se normaliza a mayúsculas antes de buscar el rol.
+        mock_rol.objects.filter.assert_called_once_with(codigo="COMPRADOR", activo=True, requiere_cuenta=True)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Usuario")
+    def test_usuario_inexistente_devuelve_404(self, mock_usuario, _mock_check):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = None
+
+        with self._patch_auth():
+            request = RequestFactory().put(
+                "/api/users/no-existe/role", data=json.dumps({"rol": "COMPRADOR"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="no-existe")
+
+        self.assertEqual(response.status_code, 404)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_rol_invalido_devuelve_400(self, mock_usuario, mock_rol, _mock_check):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = MagicMock()
+        mock_rol.objects.filter.return_value.first.return_value = None
+
+        with self._patch_auth():
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({"rol": "NO_EXISTE"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 400)
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_dejaria_sin_administradores_devuelve_409(self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol):
+        from django.test import RequestFactory
+        from usuarios.gestion_roles import CambioRolInvalido
+        from usuarios.views import actualizar_rol_usuario_api
+
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = MagicMock()
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock()
+        mock_cambiar_rol.side_effect = CambioRolInvalido("sin administradores")
+
+        with self._patch_auth():
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({"rol": "PRODUCTOR"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 409)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_sin_permiso_devuelve_403(self, mock_check):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        mock_check.return_value = False
+
+        with self._patch_auth(role_code="COMPRADOR"):
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({"rol": "ADMINISTRADOR"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_metodo_get_no_permitido(self):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        request = RequestFactory().get("/api/users/u1/role")
+        response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 405)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_cuerpo_sin_rol_devuelve_400(self, _mock_check):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        with self._patch_auth():
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 400)
+
+
+# ==============================================================================
+# HU04-ST6 (SCRUM-127): Pruebas de seguridad y escalamiento de privilegios
+# ==============================================================================
+#
+# A diferencia del resto del archivo — donde cada subtarea mockea
+# `usuario_tiene_permiso` para aislar la pieza que está probando — las
+# pruebas de esta sección deliberadamente NO lo mockean: dejan correr
+# la función real y solo mockean su dependencia de más bajo nivel
+# (`RolPermiso`, la tabla de la matriz RBAC), simulando la matriz TAL
+# COMO está sembrada hoy en Supabase (HU04-ST1). Así se ejercita la
+# cadena completa de autorización de punta a punta — vista → decorador
+# → usuario_tiene_permiso → consulta a la matriz — igual que en
+# producción, en vez de solo confiar en que cada pieza por separado
+# está bien.
+
+# Fotografía de la matriz RBAC vigente en Supabase al momento de esta
+# prueba (consultada por SQL contra rol_permisos/roles/permisos). Si la
+# matriz cambia en Supabase (HU04-ST1 la administra ahí, no aquí), esta
+# constante debe actualizarse junto con el seed real para que la prueba
+# siga siendo representativa.
+MATRIZ_RBAC_VIGENTE = {
+    "ADMINISTRADOR": {
+        "asociaciones.gestionar", "auditoria.consultar", "busqueda_global.usar",
+        "catalogo.ver_publico", "catalogos_maestros.administrar", "catalogos_maestros.consultar",
+        "ficha_digital.ver_completa", "ficha_digital.ver_publica", "fincas.actualizar",
+        "fincas.consultar", "fincas.crear", "indicadores.ver_dashboard", "perfil.editar_propio",
+        "perfil.ver_propio", "productores.actualizar", "productores.consultar", "productores.crear",
+        "productores.inactivar", "reportes.generar", "usuarios.administrar",
+    },
+    "ASOCIACION": {
+        "busqueda_global.usar", "catalogo.publicar_lote", "catalogo.ver_publico",
+        "catalogos_maestros.administrar", "catalogos_maestros.consultar", "cosechas.consultar",
+        "ficha_digital.ver_completa", "ficha_digital.ver_publica", "fincas.actualizar",
+        "fincas.consultar", "fincas.crear", "indicadores.ver_dashboard", "lotes.cambiar_estado",
+        "lotes.consultar", "negociaciones.gestionar", "perfil.editar_propio", "perfil.ver_propio",
+        "productores.actualizar", "productores.consultar", "productores.crear",
+        "productores.inactivar", "reportes.generar", "ventas.registrar",
+    },
+    "COMPRADOR": {
+        "catalogo.ver_publico", "catalogos_maestros.consultar", "ficha_digital.ver_publica",
+        "manifestaciones_interes.crear", "perfil.editar_propio", "perfil.ver_propio",
+    },
+    "CONSULTA_PUBLICA": {
+        "catalogo.ver_publico", "catalogos_maestros.consultar", "ficha_digital.ver_publica",
+    },
+    "OPERARIO_CAMPO": {
+        "catalogos_maestros.consultar", "cosechas.consultar", "cosechas.crear", "lotes.consultar",
+        "lotes.crear", "perfil.editar_propio", "perfil.ver_propio", "trazabilidad.registrar_calidad",
+        "trazabilidad.registrar_etapa",
+    },
+    "PRODUCTOR": {
+        "busqueda_global.usar", "catalogo.publicar_lote", "catalogo.ver_publico",
+        "catalogos_maestros.consultar", "cosechas.consultar", "cosechas.crear",
+        "ficha_digital.ver_completa", "ficha_digital.ver_publica", "fincas.actualizar",
+        "fincas.consultar", "fincas.crear", "indicadores.ver_dashboard", "lotes.cambiar_estado",
+        "lotes.consultar", "lotes.crear", "negociaciones.gestionar", "perfil.editar_propio",
+        "perfil.ver_propio", "productores.actualizar", "productores.consultar", "productores.crear",
+        "reportes.generar", "trazabilidad.registrar_calidad", "trazabilidad.registrar_etapa",
+        "ventas.registrar",
+    },
+}
+
+ROLES_RESTRINGIDOS = ["PRODUCTOR", "ASOCIACION", "COMPRADOR", "OPERARIO_CAMPO", "CONSULTA_PUBLICA"]
+
+TODOS_LOS_PERMISOS = sorted({permiso for permisos in MATRIZ_RBAC_VIGENTE.values() for permiso in permisos})
+
+
+def _mockear_matriz_real(mock_rol_permiso, matriz=MATRIZ_RBAC_VIGENTE):
+    """
+    Hace que `RolPermiso.objects.filter(...).exists()` responda igual
+    que lo haría contra la tabla real de Supabase para la `matriz`
+    dada, sin tocar ninguna base de datos — permite probar
+    `usuario_tiene_permiso()` (y todo lo que depende de ella) de
+    extremo a extremo con datos de RBAC realistas.
+    """
+
+    def filtro_falso(**kwargs):
+        rol_codigo = kwargs.get("rol__codigo")
+        codigos_permiso = kwargs.get("permiso__codigo__in", [])
+        permisos_del_rol = matriz.get(rol_codigo, set())
+        resultado = MagicMock()
+        resultado.exists.return_value = any(c in permisos_del_rol for c in codigos_permiso)
+        return resultado
+
+    mock_rol_permiso.objects.filter.side_effect = filtro_falso
+
+
+class MatrizPermisosSecurityTests(TestCase):
+    """
+    HU04-ST6 (SCRUM-127), parte 1: confirmar que los permisos asignados
+    se aplican correctamente a cada perfil (RNF06).
+
+    Recorre TODA la matriz rol × permiso vigente en Supabase (6 roles,
+    31 permisos = 186 combinaciones) y verifica que
+    `usuario_tiene_permiso()` concede exactamente lo que la matriz real
+    concede — ni más (fuga de privilegios) ni menos (una funcionalidad
+    legítima bloqueada por error).
+    """
+
+    @patch("usuarios.models.RolPermiso")
+    def test_usuario_tiene_permiso_coincide_con_la_matriz_real_para_cada_rol_y_permiso(self, mock_rol_permiso):
+        from usuarios.permissions import usuario_tiene_permiso
+
+        _mockear_matriz_real(mock_rol_permiso)
+
+        for rol_codigo, permisos_concedidos in MATRIZ_RBAC_VIGENTE.items():
+            for permiso_codigo in TODOS_LOS_PERMISOS:
+                with self.subTest(rol=rol_codigo, permiso=permiso_codigo):
+                    esperado = permiso_codigo in permisos_concedidos
+                    self.assertEqual(usuario_tiene_permiso(rol_codigo, permiso_codigo), esperado)
+
+    @patch("usuarios.models.RolPermiso")
+    def test_solo_administrador_tiene_usuarios_administrar(self, mock_rol_permiso):
+        """
+        El permiso que protege todo HU04-ST4/ST5 (gestión de usuarios y
+        roles) es, hoy, exclusivo de ADMINISTRADOR. Esta prueba lo deja
+        explícito y por separado del recorrido general de arriba,
+        porque es justo la condición de la que depende toda la
+        prevención de escalamiento de privilegios de esta subtarea.
+        """
+        from usuarios.permissions import usuario_tiene_permiso
+
+        _mockear_matriz_real(mock_rol_permiso)
+
+        self.assertTrue(usuario_tiene_permiso("ADMINISTRADOR", "usuarios.administrar"))
+        for rol_restringido in ROLES_RESTRINGIDOS:
+            with self.subTest(rol=rol_restringido):
+                self.assertFalse(usuario_tiene_permiso(rol_restringido, "usuarios.administrar"))
+
+
+class EscalamientoPrivilegiosSecurityTests(TestCase):
+    """
+    HU04-ST6 (SCRUM-127), parte 2: verificar que un usuario con un rol
+    restringido no pueda forzar el acceso a los módulos administrativos
+    de HU04-ST4/ST5 (RNF21) — ni por la pantalla web ni por la API —,
+    aunque intente pedir directamente el rol de Administrador.
+    """
+
+    def _fake_request_sesion(self, rol, path="/admin/usuarios/"):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        request = RequestFactory().get(path)
+        request.user = MagicMock(is_authenticated=True)
+        request.session = {"rol": rol}
+        request._messages = FallbackStorage(request)
+        return request
+
+    def _patch_auth_jwt(self, rol_codigo, email="usuario@example.com"):
+        fake_user = MagicMock(email=email)
+        fake_token = {"role_code": rol_codigo}
+        return patch(
+            "usuarios.permissions.JWTAuthentication.authenticate",
+            return_value=(fake_user, fake_token),
+        )
+
+    # --- Pantalla web de HU04-ST4 (panel_administracion_usuarios) ---
+
+    @patch("usuarios.models.RolPermiso")
+    def test_rol_restringido_no_accede_al_panel_de_administracion(self, mock_rol_permiso):
+        from usuarios.views import panel_administracion_usuarios
+
+        _mockear_matriz_real(mock_rol_permiso)
+
+        for rol_restringido in ROLES_RESTRINGIDOS:
+            with self.subTest(rol=rol_restringido):
+                request = self._fake_request_sesion(rol_restringido)
+                response = panel_administracion_usuarios(request)
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.url, reverse("home"))
+
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.models.RolPermiso")
+    def test_administrador_si_accede_al_panel_de_administracion(self, mock_rol_permiso, mock_usuario, mock_rol):
+        from usuarios.views import panel_administracion_usuarios
+
+        _mockear_matriz_real(mock_rol_permiso)
+        lista_vacia = MagicMock()
+        lista_vacia.__iter__.return_value = iter([])
+        lista_vacia.count.return_value = 0
+        mock_usuario.objects.select_related.return_value.order_by.return_value = lista_vacia
+        mock_rol.objects.filter.return_value.order_by.return_value = []
+
+        request = self._fake_request_sesion("ADMINISTRADOR")
+        with patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso") as mock_check_menu:
+            mock_check_menu.side_effect = lambda rol, permiso: rol == "ADMINISTRADOR"
+            response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 200)
+
+    # --- Endpoint de API de HU04-ST5 (actualizar_rol_usuario_api) ---
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.models.RolPermiso")
+    def test_rol_restringido_no_puede_autoasignarse_administrador_via_api(self, mock_rol_permiso, mock_cambiar_rol):
+        """
+        El intento de escalamiento más directo: una cuenta con un rol
+        restringido llama al endpoint de reasignación pidiendo
+        'ADMINISTRADOR'. Debe rechazarse en la capa de autorización,
+        antes de que la petición llegue siquiera a mirar el usuario o
+        el rol destino — por eso se verifica que `cambiar_rol_usuario`
+        nunca se invoca.
+        """
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        _mockear_matriz_real(mock_rol_permiso)
+
+        for rol_restringido in ROLES_RESTRINGIDOS:
+            with self.subTest(rol=rol_restringido):
+                with self._patch_auth_jwt(rol_restringido):
+                    request = RequestFactory().put(
+                        "/api/users/cualquier-id/role",
+                        data=json.dumps({"rol": "ADMINISTRADOR"}),
+                        content_type="application/json",
+                    )
+                    response = actualizar_rol_usuario_api(request, user_id="cualquier-id")
+
+                self.assertEqual(response.status_code, 403)
+
+        mock_cambiar_rol.assert_not_called()
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.models.RolPermiso")
+    def test_administrador_si_puede_reasignar_roles_via_api(
+        self, mock_rol_permiso, mock_usuario, mock_rol, mock_cambiar_rol
+    ):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        _mockear_matriz_real(mock_rol_permiso)
+        usuario_existente = MagicMock(id="u1", correo="otro@example.com")
+        usuario_existente.rol.codigo = "COMPRADOR"
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
+        mock_usuario.objects.filter.return_value.first.return_value = MagicMock()
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo="COMPRADOR")
+        mock_cambiar_rol.return_value = (usuario_existente, MagicMock(id=1))
+
+        with self._patch_auth_jwt("ADMINISTRADOR"):
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({"rol": "COMPRADOR"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 200)
+        mock_cambiar_rol.assert_called_once()
+
+    @patch("usuarios.models.RolPermiso")
+    def test_rol_falsificado_en_el_cuerpo_no_otorga_acceso(self, mock_rol_permiso):
+        """
+        Defensa en profundidad: la autorización depende exclusivamente
+        del claim 'role_code' firmado dentro del JWT (resuelto por
+        `permiso_requerido` vía `request.auth`), nunca de nada que
+        venga en el cuerpo de la petición. Un cliente con un token de
+        COMPRADOR no gana nada incluyendo datos adicionales en el JSON
+        — el rechazo ocurre antes de que la vista siquiera lea el
+        cuerpo de la petición.
+        """
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        _mockear_matriz_real(mock_rol_permiso)
+
+        with self._patch_auth_jwt("COMPRADOR"):
+            request = RequestFactory().put(
+                "/api/users/u1/role",
+                data=json.dumps({"rol": "ADMINISTRADOR", "role_code": "ADMINISTRADOR", "es_admin": True}),
+                content_type="application/json",
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 403)
+
+
+class RegistroAutorregistroRolesTests(TestCase):
+    """
+    Según CU10 del documento de Casos de Uso, una Asociación no se
+    autorregistra: la crea el Administrador del Sistema junto con su
+    propia cuenta administradora (RN02). Antes de este ajuste,
+    `_ROLES_NO_AUTORREGISTRABLES` en registro_api() solo excluía a
+    ADMINISTRADOR; ahora también excluye a ASOCIACION — el formulario
+    público (templates/usuarios/registro.html) ya no ofrece esa opción,
+    pero sin este rechazo en el backend cualquiera podría seguir
+    autoasignándose el rol llamando directamente al endpoint.
+    """
+
+    def _cuerpo_valido(self, rol):
+        return json.dumps({
+            "correo": "nuevo@example.com",
+            "contraseña": "ClaveSegura123",
+            "nombres": "Ana",
+            "apellidos": "Gómez",
+            "tipo_documento": "CC",
+            "numero_documento": "123456789",
+            "rol": rol,
+        })
+
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_asociacion_no_puede_autorregistrarse(self, mock_tipo_doc, mock_rol):
+        from django.test import RequestFactory
+        from usuarios.views import registro_api
+
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(codigo="CC")
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo="ASOCIACION")
+
+        request = RequestFactory().post(
+            "/api/auth/register", data=self._cuerpo_valido("ASOCIACION"), content_type="application/json"
+        )
+        response = registro_api(request)
+
+        self.assertEqual(response.status_code, 400)
+        body = json.loads(response.content)
+        self.assertIn("rol", body.get("campos", {}))
+
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_administrador_sigue_sin_poder_autorregistrarse(self, mock_tipo_doc, mock_rol):
+        """Confirma que el ajuste no debilitó la restricción que ya existía para ADMINISTRADOR."""
+        from django.test import RequestFactory
+        from usuarios.views import registro_api
+
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(codigo="CC")
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo="ADMINISTRADOR")
+
+        request = RequestFactory().post(
+            "/api/auth/register", data=self._cuerpo_valido("ADMINISTRADOR"), content_type="application/json"
+        )
+        response = registro_api(request)
+
+        self.assertEqual(response.status_code, 400)
+        body = json.loads(response.content)
+        self.assertIn("rol", body.get("campos", {}))
+
+
+def _fake_usuario_registrado(user_id, correo, nombres="Ana", apellidos="Gómez",
+                              tipo_documento_codigo="CC", numero_documento="123456789",
+                              telefono="3101234567", rol_codigo="PRODUCTOR", activo=True):
+    """Doble de `Usuario` tal como quedaría tras el trigger de Supabase (ver registro_api, paso 10)."""
+    perfil = MagicMock()
+    perfil.id = user_id
+    perfil.correo = correo
+    perfil.nombres = nombres
+    perfil.apellidos = apellidos
+    perfil.numero_documento = numero_documento
+    perfil.telefono = telefono
+    perfil.activo = activo
+    perfil.tipo_documento.codigo = tipo_documento_codigo
+    perfil.rol.codigo = rol_codigo
+    perfil.creado_en = timezone.now()
+    return perfil
+
+
+class RegistroUsuarioApiTests(TestCase):
+    """
+    HU01-ST6 (SCRUM-63): pruebas unitarias e integrales del flujo de
+    registro de usuarios (POST /api/auth/register, ver registro_api()).
+
+    Cubre los criterios de aceptación de HU-01:
+      - "Se valida que el correo sea único" -> duplicado en BD propia y
+        duplicado detectado por Supabase Auth (condición de carrera).
+      - "La contraseña se almacena cifrada" -> por diseño (ver docstring
+        de usuarios/views.py) Django nunca guarda la contraseña: se
+        reenvía únicamente a Supabase Auth, que la hashea con bcrypt.
+        Se verifica aquí que (a) el modelo `Usuario` no tiene ningún
+        campo de contraseña y (b) la respuesta de la API nunca la repite.
+      - "Se confirma el registro" -> alta exitosa responde 201 con los
+        datos reales leídos de vuelta desde `usuarios`.
+      - Escenarios fallidos explícitos de la subtarea: correo duplicado,
+        campos vacíos, contraseñas débiles.
+
+    Se mockean `Rol`, `TipoDocumento`, `Usuario` y `get_supabase_client`
+    porque los tres primeros son modelos `managed = False` (no existen
+    en la base de datos de pruebas) y el cuarto es un servicio externo
+    real (Supabase Auth) — mismo patrón que `AuthCredentialVerificationTests`
+    y `RegistroAutorregistroRolesTests` en este mismo archivo.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse('api_registro')
+        self.user_id = "22222222-2222-2222-2222-222222222222"
+
+    def _cuerpo_valido(self, **overrides):
+        """
+        Payload con los MISMOS nombres de campo que envía el formulario
+        real (templates/usuarios/registro.html + static/js/registro.js):
+        first_name, last_name, email, phone, role, password — en inglés,
+        salvo tipo_documento/numero_documento que sí van en español. Así
+        la prueba ejercita de verdad la capa de alias (_ALIAS_CAMPO) que
+        conecta el formulario HU01-ST2 con el endpoint HU01-ST3.
+        """
+        cuerpo = {
+            "first_name": "Ana",
+            "last_name": "Gómez",
+            "email": "ana.gomez@example.com",
+            "phone": "3101234567",
+            "tipo_documento": "CC",
+            "numero_documento": "123456789",
+            "role": "PRODUCTOR",
+            "password": "ClaveSegura123",
+        }
+        cuerpo.update(overrides)
+        return json.dumps(cuerpo)
+
+    def _mock_catalogos_validos(self, mock_tipo_doc, mock_rol, mock_usuario,
+                                 tipo_documento_codigo="CC", rol_codigo="PRODUCTOR"):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(
+            codigo=tipo_documento_codigo
+        )
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo=rol_codigo)
+        mock_usuario.objects.filter.return_value.exists.return_value = False
+
+    # ------------------------------------------------------------------
+    # Escenario exitoso — "alta de usuario correcta" / "se confirma el registro"
+    # ------------------------------------------------------------------
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_exitoso_retorna_201_y_confirma_los_datos(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "ana.gomez@example.com"),
+            session=MagicMock(),  # sesión ya activa: no requiere verificación de correo
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = (
+            _fake_usuario_registrado(self.user_id, "ana.gomez@example.com")
+        )
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["usuario"]["correo"], "ana.gomez@example.com")
+        self.assertEqual(body["usuario"]["rol"], "PRODUCTOR")
+        self.assertEqual(body["usuario"]["tipo_documento"], "CC")
+        self.assertFalse(body["requiere_verificacion_correo"])
+
+        # La contraseña viaja a Supabase (quien la hashea), nunca se guarda
+        # ni se repite en la respuesta propia.
+        mock_get_client.return_value.auth.sign_up.assert_called_once()
+        payload_enviado = mock_get_client.return_value.auth.sign_up.call_args[0][0]
+        self.assertEqual(payload_enviado["password"], "ClaveSegura123")
+        self.assertNotIn("contraseña", body["usuario"])
+        self.assertNotIn("password", body["usuario"])
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_exitoso_requiere_verificacion_si_supabase_no_da_sesion(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """Si Supabase exige confirmar el correo, sign_up() responde sin `session`."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "ana.gomez@example.com"),
+            session=None,
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = (
+            _fake_usuario_registrado(self.user_id, "ana.gomez@example.com")
+        )
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.json()["requiere_verificacion_correo"])
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_acepta_nombres_de_campo_canonicos_en_espanol(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """La API también debe aceptar los nombres de campo canónicos (correo, contraseña, nombres, apellidos, rol)."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "canonico@example.com"), session=MagicMock()
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = (
+            _fake_usuario_registrado(self.user_id, "canonico@example.com")
+        )
+
+        cuerpo = json.dumps({
+            "correo": "canonico@example.com",
+            "contraseña": "ClaveSegura123",
+            "nombres": "Ana",
+            "apellidos": "Gómez",
+            "tipo_documento": "CC",
+            "numero_documento": "987654321",
+            "rol": "PRODUCTOR",
+        })
+        response = self.client.post(self.url, data=cuerpo, content_type="application/json")
+        self.assertEqual(response.status_code, 201)
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_alias_comercializador_se_mapea_a_productor(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """Compatibilidad hacia atrás: clientes que aún envíen "COMERCIALIZADOR" deben mapearse a PRODUCTOR."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "ana.gomez@example.com"), session=MagicMock()
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = (
+            _fake_usuario_registrado(self.user_id, "ana.gomez@example.com")
+        )
+
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(role="COMERCIALIZADOR"), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 201)
+        # El código de rol consultado en el catálogo debió ser PRODUCTOR, no COMERCIALIZADOR.
+        codigos_consultados = [
+            llamada.kwargs.get("codigo") for llamada in mock_rol.objects.filter.call_args_list
+        ]
+        self.assertIn("PRODUCTOR", codigos_consultados)
+
+    # ------------------------------------------------------------------
+    # RNF04 — "La contraseña se almacena cifrada"
+    # ------------------------------------------------------------------
+
+    def test_modelo_usuario_no_tiene_campo_de_contrasena(self):
+        """
+        Guarda estructural del criterio de aceptación: Django nunca debe
+        llegar a tener un campo propio para la contraseña en texto plano
+        ni en ninguna otra forma — se delega por completo a Supabase Auth
+        (ver docstring de HU01-ST4 en usuarios/views.py).
+        """
+        nombres_de_campos = {campo.name for campo in Usuario._meta.get_fields()}
+        self.assertNotIn("contraseña", nombres_de_campos)
+        self.assertNotIn("password", nombres_de_campos)
+        self.assertNotIn("contrasena", nombres_de_campos)
+
+    # ------------------------------------------------------------------
+    # "Se valida que el correo sea único"
+    # ------------------------------------------------------------------
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_correo_duplicado_en_bd_propia_retorna_409(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(codigo="CC")
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo="PRODUCTOR")
+        mock_usuario.objects.filter.return_value.exists.return_value = True  # correo ya registrado
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("correo", response.json()["error"].lower())
+        # No debe llamarse a Supabase si ya se detectó el duplicado localmente.
+        mock_get_client.return_value.auth.sign_up.assert_not_called()
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_correo_duplicado_detectado_por_supabase_retorna_409(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """Condición de carrera: pasa la validación local pero Supabase Auth ya tiene ese correo."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.side_effect = AuthApiError(
+            "User already registered", 422, "user_already_exists"
+        )
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("correo", response.json()["error"].lower())
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_numero_documento_duplicado_retorna_409(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(codigo="CC")
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo="PRODUCTOR")
+        # Primera llamada (correo): no existe. Segunda llamada (documento): sí existe.
+        mock_usuario.objects.filter.return_value.exists.side_effect = [False, True]
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("documento", response.json()["error"].lower())
+        mock_get_client.return_value.auth.sign_up.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # "Campos vacíos"
+    # ------------------------------------------------------------------
+
+    def test_registro_campo_faltante_retorna_400_con_detalle(self):
+        """Falta `numero_documento`: debe rechazarse con 400 antes de tocar cualquier modelo o Supabase."""
+        cuerpo = json.loads(self._cuerpo_valido())
+        del cuerpo["numero_documento"]
+
+        response = self.client.post(self.url, data=json.dumps(cuerpo), content_type="application/json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("numero_documento", response.json()["campos"])
+        self.assertNotIn("tipo_documento", response.json()["campos"])
+
+    def test_registro_campos_vacios_en_blanco_retorna_400(self):
+        """Campos presentes pero en blanco ("") deben tratarse igual que ausentes."""
+        response = self.client.post(
+            self.url,
+            data=self._cuerpo_valido(first_name="", last_name="", email="", password=""),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        campos = response.json()["campos"]
+        self.assertIn("nombres", campos)
+        self.assertIn("apellidos", campos)
+        self.assertIn("correo", campos)
+        self.assertIn("contraseña", campos)
+
+    def test_registro_cuerpo_completamente_vacio_retorna_400_con_todos_los_campos(self):
+        response = self.client.post(self.url, data=json.dumps({}), content_type="application/json")
+
+        self.assertEqual(response.status_code, 400)
+        campos = response.json()["campos"]
+        for campo_requerido in ("correo", "contraseña", "nombres", "apellidos", "tipo_documento", "numero_documento", "rol"):
+            self.assertIn(campo_requerido, campos)
+
+    def test_registro_cuerpo_no_es_json_valido_retorna_400(self):
+        response = self.client.post(self.url, data="esto no es json", content_type="application/json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_registro_cuerpo_json_no_es_un_objeto_retorna_400(self):
+        response = self.client.post(self.url, data=json.dumps(["no", "es", "un", "objeto"]), content_type="application/json")
+        self.assertEqual(response.status_code, 400)
+
+    # ------------------------------------------------------------------
+    # "Contraseñas débiles"
+    # ------------------------------------------------------------------
+
+    def test_registro_contrasena_corta_rechazada_localmente_retorna_400(self):
+        """Política local orientativa: mínimo 6 caracteres (paso 3 de registro_api)."""
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(password="abc12"), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("contraseña", response.json()["campos"])
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_contrasena_debil_segun_supabase_retorna_400(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """Cumple el mínimo local (6+) pero Supabase Auth la rechaza por su propia política de seguridad."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.side_effect = AuthApiError(
+            "Password is too weak", 422, "weak_password"
+        )
+
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(password="123456"), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("contraseña", response.json()["campos"])
+
+    # ------------------------------------------------------------------
+    # Otras validaciones del flujo (formato, catálogos, método HTTP, disponibilidad)
+    # ------------------------------------------------------------------
+
+    def test_registro_correo_con_formato_invalido_retorna_400(self):
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(email="no-es-un-correo"), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("correo", response.json()["campos"])
+
+    def test_registro_telefono_con_formato_invalido_retorna_400(self):
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(phone="no-es-un-telefono"), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("telefono", response.json()["campos"])
+
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_tipo_documento_inexistente_retorna_400(self, mock_tipo_doc):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = None
+
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(tipo_documento="XX"), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("tipo_documento", response.json()["campos"])
+
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_rol_inexistente_en_catalogo_retorna_400(self, mock_tipo_doc, mock_rol):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(codigo="CC")
+        mock_rol.objects.filter.return_value.first.return_value = None
+
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(role="ROL_QUE_NO_EXISTE"), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("rol", response.json()["campos"])
+
+    def test_registro_metodo_get_no_permitido(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 405)
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_con_supabase_no_configurado_retorna_503(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """Si faltan SUPABASE_URL/SUPABASE_ANON_KEY, get_supabase_client() lanza RuntimeError (ver supabase_client.py)."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.side_effect = RuntimeError("Faltan credenciales de Supabase")
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 503)
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_trigger_de_supabase_no_sincronizo_perfil_retorna_500(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """
+        Caso borde de HU01-ST5 (manejo de errores): el alta en auth.users
+        se completó pero el trigger `on_auth_user_created` no alcanzó a
+        crear la fila en `usuarios` (paso 10 de registro_api).
+        """
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "ana.gomez@example.com"), session=MagicMock()
+        )
+        mock_usuario.DoesNotExist = Exception
+        mock_usuario.objects.select_related.return_value.get.side_effect = mock_usuario.DoesNotExist
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 500)
 

@@ -68,3 +68,31 @@ class RegistroIntentoLoginAdmin(admin.ModelAdmin):
         filas = queryset.update(failed_attempts=0, locked_until=None)
         self.message_user(request, f"Se han desbloqueado {filas} cuenta(s) exitosamente.")
 
+
+from .models import BitacoraCambioRol
+
+
+@admin.register(BitacoraCambioRol)
+class BitacoraCambioRolAdmin(admin.ModelAdmin):
+    """Bitácora de auditoría de HU04-ST5 (RF28): solo lectura, nunca se edita a mano."""
+
+    list_display = ("usuario_correo", "rol_anterior", "rol_nuevo", "realizado_por_correo", "creado_en")
+    search_fields = ("usuario_correo", "realizado_por_correo")
+    list_filter = ("rol_anterior", "rol_nuevo")
+    readonly_fields = (
+        "usuario_id",
+        "usuario_correo",
+        "rol_anterior",
+        "rol_nuevo",
+        "realizado_por_id",
+        "realizado_por_correo",
+        "ip_address",
+        "creado_en",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+

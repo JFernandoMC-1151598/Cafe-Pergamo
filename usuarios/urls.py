@@ -45,6 +45,14 @@ urlpatterns = [
     # franciscogallo (su urls.py no la tenía); se restaura aquí porque
     # templates/usuarios/registro.html depende de ella (api_registro).
     path('api/auth/register', views.registro_api, name='api_registro'),
+
+    # HU04-ST4 (SCRUM-119): panel de administración de usuarios y roles.
+    path('admin/usuarios/', views.panel_administracion_usuarios, name='admin_usuarios'),
+
+    # HU04-ST5 (SCRUM-120): endpoint de API para reasignar el rol de un
+    # usuario, con auditoría (RF28).
+    path('api/users/<uuid:user_id>/role', views.actualizar_rol_usuario_api, name='api_actualizar_rol_usuario_raw'),
+    path('api/users/<uuid:user_id>/role/', views.actualizar_rol_usuario_api, name='api_actualizar_rol_usuario'),
 ]
 
 
