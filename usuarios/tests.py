@@ -17,8 +17,11 @@ from django.contrib.auth.models import User
 from django.http import JsonResponse
 from django.test import Client, TestCase
 from django.urls import reverse
+from django.utils import timezone
 
 from supabase_auth.errors import AuthApiError
+
+from usuarios.models import Usuario
 
 
 def _fake_auth_user(user_id, email):
@@ -1583,4 +1586,432 @@ class RegistroAutorregistroRolesTests(TestCase):
         self.assertIn("rol", body.get("campos", {}))
 
 
+def _fake_usuario_registrado(user_id, correo, nombres="Ana", apellidos="Gómez",
+                              tipo_documento_codigo="CC", numero_documento="123456789",
+                              telefono="3101234567", rol_codigo="PRODUCTOR", activo=True):
+    """Doble de `Usuario` tal como quedaría tras el trigger de Supabase (ver registro_api, paso 10)."""
+    perfil = MagicMock()
+    perfil.id = user_id
+    perfil.correo = correo
+    perfil.nombres = nombres
+    perfil.apellidos = apellidos
+    perfil.numero_documento = numero_documento
+    perfil.telefono = telefono
+    perfil.activo = activo
+    perfil.tipo_documento.codigo = tipo_documento_codigo
+    perfil.rol.codigo = rol_codigo
+    perfil.creado_en = timezone.now()
+    return perfil
+
+
+class RegistroUsuarioApiTests(TestCase):
+    """
+    HU01-ST6 (SCRUM-63): pruebas unitarias e integrales del flujo de
+    registro de usuarios (POST /api/auth/register, ver registro_api()).
+
+    Cubre los criterios de aceptación de HU-01:
+      - "Se valida que el correo sea único" -> duplicado en BD propia y
+        duplicado detectado por Supabase Auth (condición de carrera).
+      - "La contraseña se almacena cifrada" -> por diseño (ver docstring
+        de usuarios/views.py) Django nunca guarda la contraseña: se
+        reenvía únicamente a Supabase Auth, que la hashea con bcrypt.
+        Se verifica aquí que (a) el modelo `Usuario` no tiene ningún
+        campo de contraseña y (b) la respuesta de la API nunca la repite.
+      - "Se confirma el registro" -> alta exitosa responde 201 con los
+        datos reales leídos de vuelta desde `usuarios`.
+      - Escenarios fallidos explícitos de la subtarea: correo duplicado,
+        campos vacíos, contraseñas débiles.
+
+    Se mockean `Rol`, `TipoDocumento`, `Usuario` y `get_supabase_client`
+    porque los tres primeros son modelos `managed = False` (no existen
+    en la base de datos de pruebas) y el cuarto es un servicio externo
+    real (Supabase Auth) — mismo patrón que `AuthCredentialVerificationTests`
+    y `RegistroAutorregistroRolesTests` en este mismo archivo.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse('api_registro')
+        self.user_id = "22222222-2222-2222-2222-222222222222"
+
+    def _cuerpo_valido(self, **overrides):
+        """
+        Payload con los MISMOS nombres de campo que envía el formulario
+        real (templates/usuarios/registro.html + static/js/registro.js):
+        first_name, last_name, email, phone, role, password — en inglés,
+        salvo tipo_documento/numero_documento que sí van en español. Así
+        la prueba ejercita de verdad la capa de alias (_ALIAS_CAMPO) que
+        conecta el formulario HU01-ST2 con el endpoint HU01-ST3.
+        """
+        cuerpo = {
+            "first_name": "Ana",
+            "last_name": "Gómez",
+            "email": "ana.gomez@example.com",
+            "phone": "3101234567",
+            "tipo_documento": "CC",
+            "numero_documento": "123456789",
+            "role": "PRODUCTOR",
+            "password": "ClaveSegura123",
+        }
+        cuerpo.update(overrides)
+        return json.dumps(cuerpo)
+
+    def _mock_catalogos_validos(self, mock_tipo_doc, mock_rol, mock_usuario,
+                                 tipo_documento_codigo="CC", rol_codigo="PRODUCTOR"):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(
+            codigo=tipo_documento_codigo
+        )
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo=rol_codigo)
+        mock_usuario.objects.filter.return_value.exists.return_value = False
+
+    # ------------------------------------------------------------------
+    # Escenario exitoso — "alta de usuario correcta" / "se confirma el registro"
+    # ------------------------------------------------------------------
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_exitoso_retorna_201_y_confirma_los_datos(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "ana.gomez@example.com"),
+            session=MagicMock(),  # sesión ya activa: no requiere verificación de correo
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = (
+            _fake_usuario_registrado(self.user_id, "ana.gomez@example.com")
+        )
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["usuario"]["correo"], "ana.gomez@example.com")
+        self.assertEqual(body["usuario"]["rol"], "PRODUCTOR")
+        self.assertEqual(body["usuario"]["tipo_documento"], "CC")
+        self.assertFalse(body["requiere_verificacion_correo"])
+
+        # La contraseña viaja a Supabase (quien la hashea), nunca se guarda
+        # ni se repite en la respuesta propia.
+        mock_get_client.return_value.auth.sign_up.assert_called_once()
+        payload_enviado = mock_get_client.return_value.auth.sign_up.call_args[0][0]
+        self.assertEqual(payload_enviado["password"], "ClaveSegura123")
+        self.assertNotIn("contraseña", body["usuario"])
+        self.assertNotIn("password", body["usuario"])
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_exitoso_requiere_verificacion_si_supabase_no_da_sesion(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """Si Supabase exige confirmar el correo, sign_up() responde sin `session`."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "ana.gomez@example.com"),
+            session=None,
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = (
+            _fake_usuario_registrado(self.user_id, "ana.gomez@example.com")
+        )
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.json()["requiere_verificacion_correo"])
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_acepta_nombres_de_campo_canonicos_en_espanol(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """La API también debe aceptar los nombres de campo canónicos (correo, contraseña, nombres, apellidos, rol)."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "canonico@example.com"), session=MagicMock()
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = (
+            _fake_usuario_registrado(self.user_id, "canonico@example.com")
+        )
+
+        cuerpo = json.dumps({
+            "correo": "canonico@example.com",
+            "contraseña": "ClaveSegura123",
+            "nombres": "Ana",
+            "apellidos": "Gómez",
+            "tipo_documento": "CC",
+            "numero_documento": "987654321",
+            "rol": "PRODUCTOR",
+        })
+        response = self.client.post(self.url, data=cuerpo, content_type="application/json")
+        self.assertEqual(response.status_code, 201)
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_alias_comercializador_se_mapea_a_productor(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """Compatibilidad hacia atrás: clientes que aún envíen "COMERCIALIZADOR" deben mapearse a PRODUCTOR."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "ana.gomez@example.com"), session=MagicMock()
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = (
+            _fake_usuario_registrado(self.user_id, "ana.gomez@example.com")
+        )
+
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(role="COMERCIALIZADOR"), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 201)
+        # El código de rol consultado en el catálogo debió ser PRODUCTOR, no COMERCIALIZADOR.
+        codigos_consultados = [
+            llamada.kwargs.get("codigo") for llamada in mock_rol.objects.filter.call_args_list
+        ]
+        self.assertIn("PRODUCTOR", codigos_consultados)
+
+    # ------------------------------------------------------------------
+    # RNF04 — "La contraseña se almacena cifrada"
+    # ------------------------------------------------------------------
+
+    def test_modelo_usuario_no_tiene_campo_de_contrasena(self):
+        """
+        Guarda estructural del criterio de aceptación: Django nunca debe
+        llegar a tener un campo propio para la contraseña en texto plano
+        ni en ninguna otra forma — se delega por completo a Supabase Auth
+        (ver docstring de HU01-ST4 en usuarios/views.py).
+        """
+        nombres_de_campos = {campo.name for campo in Usuario._meta.get_fields()}
+        self.assertNotIn("contraseña", nombres_de_campos)
+        self.assertNotIn("password", nombres_de_campos)
+        self.assertNotIn("contrasena", nombres_de_campos)
+
+    # ------------------------------------------------------------------
+    # "Se valida que el correo sea único"
+    # ------------------------------------------------------------------
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_correo_duplicado_en_bd_propia_retorna_409(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(codigo="CC")
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo="PRODUCTOR")
+        mock_usuario.objects.filter.return_value.exists.return_value = True  # correo ya registrado
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("correo", response.json()["error"].lower())
+        # No debe llamarse a Supabase si ya se detectó el duplicado localmente.
+        mock_get_client.return_value.auth.sign_up.assert_not_called()
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_correo_duplicado_detectado_por_supabase_retorna_409(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """Condición de carrera: pasa la validación local pero Supabase Auth ya tiene ese correo."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.side_effect = AuthApiError(
+            "User already registered", 422, "user_already_exists"
+        )
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("correo", response.json()["error"].lower())
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_numero_documento_duplicado_retorna_409(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(codigo="CC")
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo="PRODUCTOR")
+        # Primera llamada (correo): no existe. Segunda llamada (documento): sí existe.
+        mock_usuario.objects.filter.return_value.exists.side_effect = [False, True]
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("documento", response.json()["error"].lower())
+        mock_get_client.return_value.auth.sign_up.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # "Campos vacíos"
+    # ------------------------------------------------------------------
+
+    def test_registro_campo_faltante_retorna_400_con_detalle(self):
+        """Falta `numero_documento`: debe rechazarse con 400 antes de tocar cualquier modelo o Supabase."""
+        cuerpo = json.loads(self._cuerpo_valido())
+        del cuerpo["numero_documento"]
+
+        response = self.client.post(self.url, data=json.dumps(cuerpo), content_type="application/json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("numero_documento", response.json()["campos"])
+        self.assertNotIn("tipo_documento", response.json()["campos"])
+
+    def test_registro_campos_vacios_en_blanco_retorna_400(self):
+        """Campos presentes pero en blanco ("") deben tratarse igual que ausentes."""
+        response = self.client.post(
+            self.url,
+            data=self._cuerpo_valido(first_name="", last_name="", email="", password=""),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        campos = response.json()["campos"]
+        self.assertIn("nombres", campos)
+        self.assertIn("apellidos", campos)
+        self.assertIn("correo", campos)
+        self.assertIn("contraseña", campos)
+
+    def test_registro_cuerpo_completamente_vacio_retorna_400_con_todos_los_campos(self):
+        response = self.client.post(self.url, data=json.dumps({}), content_type="application/json")
+
+        self.assertEqual(response.status_code, 400)
+        campos = response.json()["campos"]
+        for campo_requerido in ("correo", "contraseña", "nombres", "apellidos", "tipo_documento", "numero_documento", "rol"):
+            self.assertIn(campo_requerido, campos)
+
+    def test_registro_cuerpo_no_es_json_valido_retorna_400(self):
+        response = self.client.post(self.url, data="esto no es json", content_type="application/json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_registro_cuerpo_json_no_es_un_objeto_retorna_400(self):
+        response = self.client.post(self.url, data=json.dumps(["no", "es", "un", "objeto"]), content_type="application/json")
+        self.assertEqual(response.status_code, 400)
+
+    # ------------------------------------------------------------------
+    # "Contraseñas débiles"
+    # ------------------------------------------------------------------
+
+    def test_registro_contrasena_corta_rechazada_localmente_retorna_400(self):
+        """Política local orientativa: mínimo 6 caracteres (paso 3 de registro_api)."""
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(password="abc12"), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("contraseña", response.json()["campos"])
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_contrasena_debil_segun_supabase_retorna_400(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """Cumple el mínimo local (6+) pero Supabase Auth la rechaza por su propia política de seguridad."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.side_effect = AuthApiError(
+            "Password is too weak", 422, "weak_password"
+        )
+
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(password="123456"), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("contraseña", response.json()["campos"])
+
+    # ------------------------------------------------------------------
+    # Otras validaciones del flujo (formato, catálogos, método HTTP, disponibilidad)
+    # ------------------------------------------------------------------
+
+    def test_registro_correo_con_formato_invalido_retorna_400(self):
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(email="no-es-un-correo"), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("correo", response.json()["campos"])
+
+    def test_registro_telefono_con_formato_invalido_retorna_400(self):
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(phone="no-es-un-telefono"), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("telefono", response.json()["campos"])
+
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_tipo_documento_inexistente_retorna_400(self, mock_tipo_doc):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = None
+
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(tipo_documento="XX"), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("tipo_documento", response.json()["campos"])
+
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_rol_inexistente_en_catalogo_retorna_400(self, mock_tipo_doc, mock_rol):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(codigo="CC")
+        mock_rol.objects.filter.return_value.first.return_value = None
+
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(role="ROL_QUE_NO_EXISTE"), content_type="application/json"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("rol", response.json()["campos"])
+
+    def test_registro_metodo_get_no_permitido(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 405)
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_con_supabase_no_configurado_retorna_503(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """Si faltan SUPABASE_URL/SUPABASE_ANON_KEY, get_supabase_client() lanza RuntimeError (ver supabase_client.py)."""
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.side_effect = RuntimeError("Faltan credenciales de Supabase")
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 503)
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_registro_trigger_de_supabase_no_sincronizo_perfil_retorna_500(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """
+        Caso borde de HU01-ST5 (manejo de errores): el alta en auth.users
+        se completó pero el trigger `on_auth_user_created` no alcanzó a
+        crear la fila en `usuarios` (paso 10 de registro_api).
+        """
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "ana.gomez@example.com"), session=MagicMock()
+        )
+        mock_usuario.DoesNotExist = Exception
+        mock_usuario.objects.select_related.return_value.get.side_effect = mock_usuario.DoesNotExist
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 500)
 
