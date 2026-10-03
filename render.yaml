@@ -1,0 +1,50 @@
+# Blueprint de despliegue para Render (https://render.com/docs/blueprint-spec).
+#
+# Este archivo documenta explícitamente cómo debe desplegarse CAFÉ PÉRGAMO,
+# para que la configuración del servicio no dependa solo de lo que alguien
+# haya escrito a mano en el panel de Render (que nadie más del equipo puede
+# ver ni auditar). Si el servicio en Render ya existe pero se creó como
+# "Web Service" manual (no como Blueprint), este archivo por sí solo NO
+# cambia su configuración — quien administra Render debe entrar a
+# Settings > Build & Deploy de ese servicio y igualar manualmente el
+# "Build Command" / "Start Command" de abajo, y revisar las variables de
+# entorno en Settings > Environment. La alternativa es borrar ese servicio
+# y crear uno nuevo con "New > Blueprint" apuntando a este repo, para que
+# Render lo configure automáticamente a partir de este archivo.
+#
+# Variables de entorno requeridas (Settings > Environment en Render) — los
+# nombres deben coincidir EXACTO con los que lee cafe_pergamo/settings.py:
+#   SECRET_KEY        -> clave secreta de Django (una distinta a la local)
+#   DEBUG              -> "False" en producción (NUNCA "True")
+#   ALLOWED_HOSTS       -> dominio de Render, ej: cafe-pergamo.onrender.com
+#   DATABASE_URL       -> cadena de conexión al pooler de Supabase (la misma
+#                          que usan en local en su .env, variable DATABASE_URL)
+#   SUPABASE_URL        -> URL del proyecto de Supabase
+#   SUPABASE_ANON_KEY    -> publishable/anon key de Supabase (NUNCA la service_role)
+#
+# Si alguna de estas falta o tiene un valor viejo, el servidor desplegado
+# no podrá conectarse a Supabase aunque el código esté actualizado — es la
+# causa más probable del mensaje "no está conectado a Supa".
+
+services:
+  - type: web
+    name: cafe-pergamo
+    runtime: python
+    plan: free
+    branch: main
+    buildCommand: "pip install -r requirements.txt && python manage.py collectstatic --noinput"
+    preDeployCommand: "python manage.py migrate"
+    startCommand: "gunicorn cafe_pergamo.wsgi:application"
+    envVars:
+      - key: SECRET_KEY
+        sync: false
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
