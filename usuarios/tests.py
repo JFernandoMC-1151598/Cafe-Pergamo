@@ -714,4 +714,116 @@ class AuthorizationRBACTests(TestCase):
         self.assertTrue(body["user"])
 
 
+class RoleMenuRenderingTests(TestCase):
+    """
+    Pruebas para HU04-ST3 (SCRUM-109), parte 1: exponer el rol de la
+    sesión a las plantillas (rol_actual) y el filtro que consulta la
+    matriz RBAC para decidir qué mostrar (tiene_permiso).
+    """
+
+    def test_rol_actual_toma_el_rol_de_la_sesion(self):
+        from usuarios.context_processors import rol_actual
+
+        request = MagicMock()
+        request.session = {"rol": "ADMINISTRADOR"}
+
+        self.assertEqual(rol_actual(request), {"rol_actual": "ADMINISTRADOR"})
+
+    def test_rol_actual_vacio_sin_sesion_iniciada(self):
+        from usuarios.context_processors import rol_actual
+
+        request = MagicMock()
+        request.session = {}
+
+        self.assertEqual(rol_actual(request), {"rol_actual": ""})
+
+    @patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso")
+    def test_filtro_tiene_permiso_delega_en_usuario_tiene_permiso(self, mock_check):
+        from usuarios.templatetags.rbac_tags import tiene_permiso
+
+        mock_check.return_value = True
+        self.assertTrue(tiene_permiso("ADMINISTRADOR", "usuarios.administrar"))
+        mock_check.assert_called_once_with("ADMINISTRADOR", "usuarios.administrar")
+
+
+class WebNavigationGuardTests(TestCase):
+    """
+    Pruebas para HU04-ST3 (SCRUM-109), parte 2: el guard de navegación
+    para páginas web basadas en sesión (permiso_requerido_sesion), que
+    debe comportarse igual de "fail-closed" que su equivalente de JWT
+    (HU04-ST2), pero con la UX del resto del sitio (mensaje flash +
+    redirección, no un código de error crudo).
+    """
+
+    def _fake_request(self, path="/alguna-pantalla/", autenticado=True, rol=""):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        request = RequestFactory().get(path)
+        request.user = MagicMock(is_authenticated=autenticado)
+        request.session = {"rol": rol} if rol else {}
+        request._messages = FallbackStorage(request)
+        return request
+
+    def test_sin_sesion_iniciada_redirige_a_login_con_next(self):
+        from usuarios.permissions import permiso_requerido_sesion
+
+        @permiso_requerido_sesion("usuarios.administrar")
+        def vista_protegida(request):
+            return JsonResponse({"ok": True})
+
+        request = self._fake_request(path="/panel-admin/", autenticado=False)
+        response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+        self.assertIn("next=/panel-admin/", response.url)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_autenticado_sin_permiso_redirige_a_home(self, mock_check):
+        from usuarios.permissions import permiso_requerido_sesion
+
+        mock_check.return_value = False
+
+        @permiso_requerido_sesion("usuarios.administrar")
+        def vista_protegida(request):
+            return JsonResponse({"ok": True})
+
+        request = self._fake_request(autenticado=True, rol="COMPRADOR")
+        response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("home"))
+
+    def test_sin_rol_en_sesion_deniega_sin_consultar_la_matriz(self):
+        """Sesión autenticada pero sin 'rol' asignado -> deniega (fail-closed)."""
+        from usuarios.permissions import permiso_requerido_sesion
+
+        @permiso_requerido_sesion("usuarios.administrar")
+        def vista_protegida(request):
+            return JsonResponse({"ok": True})
+
+        request = self._fake_request(autenticado=True, rol="")
+        response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("home"))
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_autenticado_con_permiso_deja_pasar(self, mock_check):
+        from usuarios.permissions import permiso_requerido_sesion
+
+        mock_check.return_value = True
+
+        @permiso_requerido_sesion("usuarios.administrar")
+        def vista_protegida(request):
+            return JsonResponse({"ok": True})
+
+        request = self._fake_request(autenticado=True, rol="ADMINISTRADOR")
+        response = vista_protegida(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(json.loads(response.content)["ok"])
+
+
 

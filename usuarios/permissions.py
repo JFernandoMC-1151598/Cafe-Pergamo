@@ -1,48 +1,54 @@
 """
-Autorización RBAC por claims de JWT - CAFÉ PÉRGAMO
+Autorización RBAC por rol - CAFÉ PÉRGAMO
 Subtarea: SCRUM-108 / HU04-ST2: Autorización y Validación de JWT (RNF06).
+Subtarea: SCRUM-109 / HU04-ST3: Control de rutas y menú según Rol (RNF21).
 
 HU04-ST1 (SCRUM-101) ya construyó el esquema de tablas y la matriz RBAC
 (`usuarios/models.py`: Rol, Permiso, RolPermiso) y la sembró en Supabase.
-Esta subtarea construye la pieza que falta: el componente que, en cada
-petición autenticada con JWT, lee el claim de rol del token y decide si
-ese rol tiene el permiso necesario para consumir el endpoint solicitado,
-consultando esa misma matriz.
-
-Esta pieza NO reinventa el catálogo de permisos ni asigna permisos a
-roles "a mano" en Python — eso ya vive en la base de datos (tabla
-`rol_permisos`) y se administra ahí. Aquí solo se consulta.
-
-Se ofrecen dos formas de uso, para cubrir tanto vistas basadas en clase
-(DRF, como CustomTokenObtainPairView) como vistas basadas en función
-(el estilo que usa el resto de `usuarios/views.py`):
+Este archivo reúne las piezas que, a partir de esa matriz, deciden si
+una petición concreta tiene permiso para seguir adelante — sin importar
+si llega autenticada con JWT (API) o con la sesión normal de Django
+(páginas web renderizadas por el servidor):
 
 1. `TienePermisoRBAC` — permission_class de Django REST Framework para
-   vistas basadas en clase:
+   vistas basadas en clase (HU04-ST2):
 
        class AlgunaVistaAdmin(APIView):
            permission_classes = [TienePermisoRBAC]
            required_permission = "usuarios.administrar"
            ...
 
-2. `permiso_requerido(codigo_permiso)` — decorador para vistas basadas
-   en función (requiere JWT en el header Authorization: Bearer <token>,
-   igual que las vistas de DRF; no reemplaza la sesión web de Django):
+2. `permiso_requerido(codigo_permiso)` — decorador para vistas de API
+   basadas en función (HU04-ST2), que valida el JWT del header
+   Authorization igual que lo haría DRF:
 
        @permiso_requerido("usuarios.administrar")
        def alguna_vista_admin(request):
            ...
 
-Ambos caminos terminan en `usuario_tiene_permiso()`, que es la única
-función que realmente consulta la matriz RolPermiso — así la regla de
-autorización se evalúa siempre de la misma forma sin importar por
-dónde entró la petición.
+3. `permiso_requerido_sesion(codigo_permiso)` — "guard" de navegación
+   para páginas web normales (HU04-ST3), que lee el rol de
+   `request.session['rol']` (el mismo que ya deja `login_view` al
+   iniciar sesión) en vez de un JWT:
+
+       @permiso_requerido_sesion("usuarios.administrar")
+       def alguna_pantalla_admin(request):
+           ...
+
+Esta pieza NO reinventa el catálogo de permisos ni asigna permisos a
+roles "a mano" en Python — eso ya vive en la base de datos (tabla
+`rol_permisos`) y se administra ahí. Aquí solo se consulta, siempre a
+través de la misma función (`usuario_tiene_permiso()`), así la regla de
+autorización se evalúa igual sin importar por dónde entró la petición.
 """
 
 from functools import wraps
 from typing import Iterable, Union
 
+from django.contrib import messages
 from django.http import JsonResponse
+from django.shortcuts import redirect
+from django.urls import reverse
 from rest_framework.permissions import BasePermission
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
@@ -184,6 +190,52 @@ def permiso_requerido(permiso_codigo: CodigoPermiso):
 
             request.user = usuario_django
             request.auth = token
+            return vista(request, *args, **kwargs)
+
+        return envoltura
+
+    return decorador
+
+
+def permiso_requerido_sesion(permiso_codigo: CodigoPermiso):
+    """
+    "Guard" de navegación RBAC para páginas web renderizadas por el
+    servidor (HU04-ST3), apoyado en la sesión de Django en vez de un
+    JWT. `login_view` ya deja el código del rol en
+    `request.session['rol']` al autenticar, así que este decorador
+    solo necesita leerlo de ahí y repetir la misma verificación contra
+    la matriz RBAC que usan `TienePermisoRBAC` y `permiso_requerido`.
+
+    A diferencia de esos dos (pensados para endpoints de API, que
+    responden JSON), esta vista es para páginas que un usuario navega
+    directamente, así que responde de forma consistente con el resto
+    del sitio (ver login_view/registro_view): un mensaje flash con
+    `django.contrib.messages` y una redirección, no un código de error
+    HTTP crudo.
+
+      - Sin sesión iniciada: redirige a 'login' conservando la URL
+        original en '?next=' para volver ahí después de autenticarse.
+      - Con sesión pero sin el permiso requerido: redirige a 'home'
+        con un mensaje de error.
+
+    Ejemplo:
+        @permiso_requerido_sesion("usuarios.administrar")
+        def panel_administracion_usuarios(request):
+            ...
+    """
+
+    def decorador(vista):
+        @wraps(vista)
+        def envoltura(request, *args, **kwargs):
+            if not request.user.is_authenticated:
+                messages.error(request, "Debe iniciar sesión para acceder a esta sección.")
+                return redirect(f"{reverse('login')}?next={request.path}")
+
+            role_code = request.session.get("rol", "")
+            if not role_code or not usuario_tiene_permiso(role_code, permiso_codigo):
+                messages.error(request, "No tiene permiso para acceder a esta sección.")
+                return redirect("home")
+
             return vista(request, *args, **kwargs)
 
         return envoltura
