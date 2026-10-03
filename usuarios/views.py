@@ -601,6 +601,27 @@ def api_logout_view(request: HttpRequest) -> JsonResponse:
 
 
 
+def home_view(request: HttpRequest) -> HttpResponse:
+    """
+    Renderiza la página de inicio principal (HOME) de Café Pérgamo.
+    Presenta la propuesta de valor, hero section y pilares del sistema.
+    """
+    return render(request, "home.html")
+
+
+def catalogo_view(request: HttpRequest) -> HttpResponse:
+    """
+    Renderiza la vitrina comercial y catálogo público de lotes de café (HU04).
+    Muestra los lotes disponibles o redirige con notificación informativa
+    mientras se despliegan los lotes de la cosecha activa.
+    """
+    messages.info(
+        request,
+        "El Catálogo Comercial de Lotes de Norte de Santander se encuentra en actualización con los lotes de la cosecha activa."
+    )
+    return redirect("/#pilares")
+
+
 def registro_view(request: HttpRequest) -> HttpResponse:
     """Renderiza la pantalla de registro de usuarios (HU01-ST2)."""
     return render(request, "usuarios/registro.html")

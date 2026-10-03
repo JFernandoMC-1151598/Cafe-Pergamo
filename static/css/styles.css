@@ -1,34 +1,50 @@
 /* ==========================================================================
    Café Pérgamo - Hoja de Estilos Global (styles.css)
+   Tokens de Color Oficiales e Identidad Visual Cafetera
    ========================================================================== */
 
 :root {
-    --pergamo-primary: #3d2314;
-    --pergamo-primary-hover: #2b180d;
-    --pergamo-accent: #b07d4b;
-    --pergamo-accent-hover: #96673a;
-    --pergamo-cream: #fbf8f5;
-    --pergamo-surface: #ffffff;
-    --pergamo-border: #e8ded4;
-    --pergamo-text-muted: #6c757d;
-    --pergamo-focus-ring: rgba(176, 125, 75, 0.25);
+    /* Paleta Oficial de Café Pérgamo (Norte de Santander) */
+    --pergamo-primary: #4A2C2A;          /* Café tostado profundo: encabezados y botones principales */
+    --pergamo-primary-hover: #361F1E;    /* Interacción hover primaria */
+    --pergamo-secondary: #2D5A27;        /* Verde hoja / cosecha: acentos de éxito y trazabilidad */
+    --pergamo-secondary-hover: #22441D;  /* Interacción hover secundaria */
+    --pergamo-bg-light: #F8F9FA;         /* Gris cálido / crema claro: tarjetas y bloque Hero */
+    
+    /* Tokens complementarios de superficie y contraste */
+    --pergamo-surface: #FFFFFF;
+    --pergamo-border: #E8DED4;
+    --pergamo-text-dark: #2B2B2B;
+    --pergamo-text-muted: #6C757D;
+    --pergamo-accent: #B07D4B;           /* Grano tostado / pergamino dorado */
+    --pergamo-focus-ring: rgba(74, 44, 42, 0.25);
 }
 
-/* --- Tipografía y Estructura Base --- */
+/* ==========================================================================
+   Estructura Base y Tipografía
+   ========================================================================== */
 body {
-    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
-    background-color: #f8f5f0;
-    color: #2b2b2b;
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: var(--pergamo-surface);
+    color: var(--pergamo-text-dark);
     min-height: 100vh;
     display: flex;
     flex-direction: column;
 }
 
-/* --- Barra de Navegación (Navbar) --- */
+main {
+    flex: 1 0 auto;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ==========================================================================
+   Sección A: Encabezado Adaptativo (Navbar Global)
+   ========================================================================== */
 .navbar-pergamo {
     background-color: var(--pergamo-surface);
     border-bottom: 1px solid var(--pergamo-border);
-    box-shadow: 0 2px 10px rgba(61, 35, 20, 0.05);
+    box-shadow: 0 2px 10px rgba(74, 44, 42, 0.05);
     padding: 0.85rem 0;
 }
 
@@ -37,60 +53,70 @@ body {
     color: var(--pergamo-primary) !important;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    font-size: 1.25rem;
+    gap: 0.55rem;
+    font-size: 1.3rem;
 }
 
 .navbar-brand i {
-    color: var(--pergamo-accent);
-    font-size: 1.5rem;
+    color: var(--pergamo-secondary);
+    font-size: 1.45rem;
 }
 
-.nav-link {
+.navbar-pergamo .nav-link {
     font-weight: 500;
-    color: #4a4a4a !important;
+    color: #4A4A4A !important;
+    padding: 0.5rem 0.9rem !important;
     transition: color 0.2s ease;
 }
 
-.nav-link:hover, .nav-link.active {
-    color: var(--pergamo-accent) !important;
+.navbar-pergamo .nav-link:hover, 
+.navbar-pergamo .nav-link.active {
+    color: var(--pergamo-secondary) !important;
 }
 
-/* --- Insignia de Usuario Autenticado --- */
+/* Insignia de Usuario Autenticado */
 .user-badge {
-    background-color: var(--pergamo-cream);
+    background-color: var(--pergamo-bg-light);
     border: 1px solid var(--pergamo-border);
     color: var(--pergamo-primary);
-    padding: 0.35rem 0.8rem;
+    padding: 0.35rem 0.85rem;
     border-radius: 50rem;
     font-weight: 600;
     font-size: 0.875rem;
     display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: 0.45rem;
 }
 
-/* --- Botones del Sistema --- */
+.user-badge i {
+    color: var(--pergamo-secondary);
+}
+
+/* ==========================================================================
+   Botones y Elementos de Interacción
+   ========================================================================== */
 .btn-pergamo {
-    background-color: var(--pergamo-accent);
-    color: #ffffff;
+    background-color: var(--pergamo-primary);
+    color: #FFFFFF !important;
     font-weight: 600;
-    border: none;
+    border: 1px solid var(--pergamo-primary);
     border-radius: 0.65rem;
     padding: 0.5rem 1.25rem;
     transition: all 0.2s ease;
 }
 
 .btn-pergamo:hover {
-    background-color: var(--pergamo-accent-hover);
-    color: #ffffff;
+    background-color: var(--pergamo-primary-hover);
+    border-color: var(--pergamo-primary-hover);
+    color: #FFFFFF !important;
     transform: translateY(-1px);
-    box-shadow: 0 4px 10px rgba(150, 103, 58, 0.25);
+    box-shadow: 0 4px 12px rgba(74, 44, 42, 0.25);
 }
 
 .btn-outline-pergamo {
-    color: var(--pergamo-accent);
-    border: 1.5px solid var(--pergamo-accent);
+    color: var(--pergamo-primary) !important;
+    background-color: transparent;
+    border: 1.5px solid var(--pergamo-primary);
     font-weight: 600;
     border-radius: 0.65rem;
     padding: 0.45rem 1.15rem;
@@ -98,11 +124,29 @@ body {
 }
 
 .btn-outline-pergamo:hover {
-    background-color: var(--pergamo-accent);
-    color: #ffffff;
+    background-color: var(--pergamo-primary);
+    color: #FFFFFF !important;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(74, 44, 42, 0.15);
 }
 
-/* --- Botón de Cierre de Sesión (Logout) --- */
+/* Botón transparente para Iniciar Sesión en Navbar */
+.btn-login-transparent {
+    color: var(--pergamo-primary) !important;
+    background-color: transparent;
+    border: 1px solid transparent;
+    font-weight: 600;
+    border-radius: 0.65rem;
+    padding: 0.45rem 1rem;
+    transition: all 0.2s ease;
+}
+
+.btn-login-transparent:hover {
+    background-color: rgba(74, 44, 42, 0.08);
+    color: var(--pergamo-primary-hover) !important;
+}
+
+/* Botón de Cierre de Sesión (Logout) */
 .btn-logout {
     border-radius: 0.55rem;
     font-weight: 600;
@@ -116,3 +160,234 @@ body {
     transform: translateY(-1px);
     box-shadow: 0 2px 8px rgba(220, 53, 69, 0.25);
 }
+
+/* ==========================================================================
+   Sección B: Bloque Principal (Hero Section)
+   ========================================================================== */
+.hero-section {
+    background-color: var(--pergamo-bg-light);
+    border-bottom: 1px solid var(--pergamo-border);
+    position: relative;
+    overflow: hidden;
+}
+
+.hero-badge {
+    background-color: rgba(45, 90, 39, 0.12);
+    color: var(--pergamo-secondary);
+    font-weight: 600;
+    font-size: 0.85rem;
+    padding: 0.45rem 0.95rem;
+    border-radius: 50rem;
+    display: inline-flex;
+    align-items: center;
+}
+
+.hero-title {
+    color: var(--pergamo-primary);
+    line-height: 1.22;
+    letter-spacing: -0.02em;
+}
+
+.hero-lead {
+    color: #4A4A4A;
+    font-size: 1.15rem;
+    line-height: 1.65;
+}
+
+.hero-image-wrapper {
+    position: relative;
+    border-radius: 1.25rem;
+}
+
+.hero-image {
+    width: 100%;
+    height: 380px;
+    object-fit: cover;
+    border-radius: 1.25rem;
+    border: 4px solid var(--pergamo-surface);
+}
+
+.hero-floating-card {
+    position: absolute;
+    bottom: -18px;
+    left: 18px;
+    background-color: var(--pergamo-surface);
+    border: 1px solid var(--pergamo-border);
+}
+
+.hero-floating-icon {
+    width: 44px;
+    height: 44px;
+    background-color: var(--pergamo-secondary);
+    flex-shrink: 0;
+}
+
+.hero-floating-title {
+    color: var(--pergamo-primary);
+}
+
+.hero-floating-subtitle {
+    font-size: 0.78rem;
+}
+
+.hero-stats {
+    border-color: var(--pergamo-border) !important;
+}
+
+.hero-stat-number {
+    font-size: 1.35rem;
+    color: var(--pergamo-primary);
+}
+
+.hero-stat-label {
+    font-size: 0.8rem;
+    color: var(--pergamo-text-muted);
+}
+
+/* ==========================================================================
+   Sección C: Pilares del Sistema (Cards de Trazabilidad y Comercio)
+   ========================================================================== */
+.pilares-section {
+    background-color: var(--pergamo-surface);
+}
+
+.section-badge {
+    background-color: rgba(74, 44, 42, 0.08);
+    color: var(--pergamo-primary);
+    font-weight: 600;
+    font-size: 0.85rem;
+    padding: 0.4rem 0.9rem;
+    border-radius: 50rem;
+    display: inline-flex;
+    align-items: center;
+}
+
+.section-title {
+    color: var(--pergamo-primary);
+    font-size: 2.1rem;
+    letter-spacing: -0.01em;
+}
+
+.section-subtitle {
+    max-width: 680px;
+    font-size: 1.05rem;
+    line-height: 1.6;
+}
+
+.pilar-card {
+    background-color: var(--pergamo-bg-light);
+    border-radius: 1rem;
+    overflow: hidden;
+    transition: transform 0.25s ease, box-shadow 0.25s ease;
+    border: 1px solid var(--pergamo-border) !important;
+}
+
+.pilar-card:hover {
+    transform: translateY(-6px);
+    box-shadow: 0 12px 24px rgba(74, 44, 42, 0.12) !important;
+}
+
+.card-img-wrapper {
+    height: 220px;
+    position: relative;
+    background-color: #EAE6E1;
+}
+
+.pilar-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.4s ease;
+}
+
+.pilar-card:hover .pilar-img {
+    transform: scale(1.05);
+}
+
+.pilar-badge-icon {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    width: 44px;
+    height: 44px;
+    background-color: var(--pergamo-secondary);
+    color: #FFFFFF;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+}
+
+.pilar-tag {
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--pergamo-secondary);
+}
+
+.pilar-title {
+    color: var(--pergamo-primary);
+    font-size: 1.25rem;
+    line-height: 1.35;
+}
+
+.pilar-text {
+    font-size: 0.95rem;
+    line-height: 1.6;
+}
+
+/* ==========================================================================
+   Sección D: Pie de Página Institucional (Footer)
+   ========================================================================== */
+.footer-pergamo {
+    background-color: var(--pergamo-primary);
+    color: #F8F9FA;
+    border-top: 3px solid var(--pergamo-secondary);
+}
+
+.footer-brand {
+    color: #FFFFFF;
+    display: flex;
+    align-items: center;
+}
+
+.footer-brand i {
+    color: #E2B176;
+    font-size: 1.5rem;
+}
+
+.footer-heading {
+    color: #FFFFFF;
+    font-weight: 700;
+    font-size: 0.95rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.footer-links a {
+    color: #D1D5DB;
+    text-decoration: none;
+    font-size: 0.9rem;
+    transition: color 0.2s ease, transform 0.2s ease;
+    display: inline-block;
+}
+
+.footer-links a:hover {
+    color: #FFFFFF;
+    transform: translateX(3px);
+}
+
+.text-footer-muted {
+    color: #D1D5DB;
+    font-size: 0.9rem;
+    line-height: 1.55;
+}
+
+.text-footer-copyright {
+    color: #9CA3AF;
+    font-size: 0.85rem;
+}
+

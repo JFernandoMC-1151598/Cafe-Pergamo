@@ -1,0 +1,167 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Café Pérgamo — Trazabilidad y Comercialización del Café de Origen{% endblock %}
+
+{% block content %}
+<!-- ==========================================================================
+     Sección B: Bloque Principal (Hero Section)
+     ========================================================================== -->
+<section class="hero-section py-5">
+    <div class="container py-lg-4">
+        <div class="row align-items-center g-5">
+            <!-- Columna de Texto y Llamados a la Acción (CTA) -->
+            <div class="col-lg-7 text-center text-lg-start">
+                <span class="badge hero-badge mb-3">
+                    <i class="bi bi-geo-alt-fill me-1"></i> Norte de Santander, Colombia
+                </span>
+
+                <h1 class="hero-title display-5 fw-bold mb-4">
+                    Café Pérgamo — Trazabilidad y Comercialización del Café
+                </h1>
+
+                <p class="hero-lead lead mb-4">
+                    Conectamos a los pequeños productores y asociaciones de Norte de Santander directamente con el
+                    mercado. Transparencia desde la finca hasta la taza.
+                </p>
+
+                <div class="d-flex flex-column flex-sm-row justify-content-center justify-content-lg-start gap-3 mb-4">
+                    <a href="{% url 'catalogo' %}" class="btn btn-pergamo btn-lg px-4 shadow-sm"
+                        id="btnExplorarCatalogo">
+                        <i class="bi bi-grid-3x3-gap-fill me-2"></i>Explorar Catálogo de Lotes
+                    </a>
+                    <a href="{% url 'registro' %}" class="btn btn-outline-pergamo btn-lg px-4"
+                        id="btnRegistroProductor">
+                        <i class="bi bi-person-plus-fill me-2"></i>Registrarme como Productor
+                    </a>
+                </div>
+
+                <!-- Métricas y Valores Destacados -->
+                <div class="row pt-4 mt-2 hero-stats border-top">
+                    <div class="col-4">
+                        <div class="hero-stat-number fw-bold">100%</div>
+                        <div class="hero-stat-label">Origen Garantizado</div>
+                    </div>
+                    <div class="col-4">
+                        <div class="hero-stat-number fw-bold">QR Único</div>
+                        <div class="hero-stat-label">Trazabilidad Total</div>
+                    </div>
+                    <div class="col-4">
+                        <div class="hero-stat-number fw-bold">Directo</div>
+                        <div class="hero-stat-label">Sin Intermediarios</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Columna Visual con Imagen Representativa de Café -->
+            <div class="col-lg-5">
+                <div class="hero-image-wrapper position-relative">
+                    <img src="{% static 'img/hero-coffee.jpg' %}"
+                        alt="Cultivo de café y café pergamino de Norte de Santander"
+                        class="img-fluid rounded-4 shadow hero-image">
+
+                    <div class="hero-floating-card p-3 rounded-3 shadow-sm">
+                        <div class="d-flex align-items-center gap-3">
+                            <div
+                                class="hero-floating-icon text-white rounded-circle d-flex align-items-center justify-content-center">
+                                <i class="bi bi-patch-check-fill fs-5"></i>
+                            </div>
+                            <div>
+                                <div class="fw-bold small hero-floating-title">Comercio Justo</div>
+                                <div class="text-muted smaller hero-floating-subtitle">Valorización del caficultor</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ==========================================================================
+     Sección C: Pilares del Sistema (Las 3 Tarjetas / Cards)
+     ========================================================================== -->
+<section id="pilares" class="pilares-section py-5">
+    <div class="container py-lg-4">
+        <!-- Encabezado de la Sección de Pilares -->
+        <div class="text-center mb-5">
+            <span class="badge section-badge mb-2">
+                <i class="bi bi-shield-check me-1"></i> Pilares del Sistema
+            </span>
+            <h2 class="section-title fw-bold">Transparencia y Valor en Cada Etapa</h2>
+            <p class="section-subtitle text-muted mx-auto">
+                Diseñado para fortalecer la cadena de valor del café de especialidad mediante tecnología de registro
+                inmutable y visibilidad comercial.
+            </p>
+        </div>
+
+        <!-- Rejilla Adaptativa Bootstrap 5: row-cols-1 row-cols-md-3 g-4 -->
+        <div class="row row-cols-1 row-cols-md-3 g-4">
+
+            <!-- Tarjeta 1: Origen y Fincas -->
+            <div class="col">
+                <div class="card h-100 pilar-card border-0 shadow-sm">
+                    <div class="card-img-wrapper position-relative overflow-hidden">
+                        <img src="{% static 'img/card-finca.jpg' %}" class="card-img-top pilar-img"
+                            alt="Origen y Fincas Cafeteras de Norte de Santander">
+                        <span class="pilar-badge-icon" aria-label="Icono de Ubicación y Origen">
+                            <i class="bi bi-geo-alt-fill"></i>
+                        </span>
+                    </div>
+                    <div class="card-body p-4 d-flex flex-column">
+                        <div class="pilar-tag mb-2">Pilar 01 &bull; Predios y Cultivos</div>
+                        <h3 class="card-title pilar-title h4 fw-bold mb-3">Origen Garantizado</h3>
+                        <p class="card-text pilar-text text-muted mb-0">
+                            Digitalizamos la información de los pequeños caficultores y sus predios en Norte de
+                            Santander, permitiendo ubicar geográficamente cada cosecha y variedad cultivada.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tarjeta 2: Trazabilidad del Beneficio -->
+            <div class="col">
+                <div class="card h-100 pilar-card border-0 shadow-sm">
+                    <div class="card-img-wrapper position-relative overflow-hidden">
+                        <img src="{% static 'img/card-trazabilidad.jpg' %}" class="card-img-top pilar-img"
+                            alt="Trazabilidad y Etapas del Beneficio del Café">
+                        <span class="pilar-badge-icon" aria-label="Icono de Historial Inmutable y Código QR">
+                            <i class="bi bi-qr-code-scan"></i>
+                        </span>
+                    </div>
+                    <div class="card-body p-4 d-flex flex-column">
+                        <div class="pilar-tag mb-2">Pilar 02 &bull; Beneficio y Registro</div>
+                        <h3 class="card-title pilar-title h4 fw-bold mb-3">Historial Inmutable</h3>
+                        <p class="card-text pilar-text text-muted mb-0">
+                            Registramos cada etapa del beneficio (despulpado, fermentación, lavado y secado) generando
+                            una ficha digital y código QR único pegado en cada saco de café.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tarjeta 3: Catálogo Comercial -->
+            <div class="col">
+                <div class="card h-100 pilar-card border-0 shadow-sm">
+                    <div class="card-img-wrapper position-relative overflow-hidden">
+                        <img src="{% static 'img/card-catalogo.jpg' %}" class="card-img-top pilar-img"
+                            alt="Catálogo Comercial y Venta Directa de Café de Especialidad">
+                        <span class="pilar-badge-icon" aria-label="Icono de Vitrina y Comercio">
+                            <i class="bi bi-shop"></i>
+                        </span>
+                    </div>
+                    <div class="card-body p-4 d-flex flex-column">
+                        <div class="pilar-tag mb-2">Pilar 03 &bull; Comercialización</div>
+                        <h3 class="card-title pilar-title h4 fw-bold mb-3">Venta Directa sin Intermediarios</h3>
+                        <p class="card-text pilar-text text-muted mb-0">
+                            Vitrina comercial pública filtrable por municipio, variedad y perfil de taza, que permite a
+                            compradores manifestar interés directo por los lotes disponibles.
+                        </p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</section>
+{% endblock %}
