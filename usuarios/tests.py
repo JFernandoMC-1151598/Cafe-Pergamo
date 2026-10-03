@@ -1245,4 +1245,281 @@ class ActualizarRolUsuarioApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
 
+# ==============================================================================
+# HU04-ST6 (SCRUM-127): Pruebas de seguridad y escalamiento de privilegios
+# ==============================================================================
+#
+# A diferencia del resto del archivo — donde cada subtarea mockea
+# `usuario_tiene_permiso` para aislar la pieza que está probando — las
+# pruebas de esta sección deliberadamente NO lo mockean: dejan correr
+# la función real y solo mockean su dependencia de más bajo nivel
+# (`RolPermiso`, la tabla de la matriz RBAC), simulando la matriz TAL
+# COMO está sembrada hoy en Supabase (HU04-ST1). Así se ejercita la
+# cadena completa de autorización de punta a punta — vista → decorador
+# → usuario_tiene_permiso → consulta a la matriz — igual que en
+# producción, en vez de solo confiar en que cada pieza por separado
+# está bien.
+
+# Fotografía de la matriz RBAC vigente en Supabase al momento de esta
+# prueba (consultada por SQL contra rol_permisos/roles/permisos). Si la
+# matriz cambia en Supabase (HU04-ST1 la administra ahí, no aquí), esta
+# constante debe actualizarse junto con el seed real para que la prueba
+# siga siendo representativa.
+MATRIZ_RBAC_VIGENTE = {
+    "ADMINISTRADOR": {
+        "asociaciones.gestionar", "auditoria.consultar", "busqueda_global.usar",
+        "catalogo.ver_publico", "catalogos_maestros.administrar", "catalogos_maestros.consultar",
+        "ficha_digital.ver_completa", "ficha_digital.ver_publica", "fincas.actualizar",
+        "fincas.consultar", "fincas.crear", "indicadores.ver_dashboard", "perfil.editar_propio",
+        "perfil.ver_propio", "productores.actualizar", "productores.consultar", "productores.crear",
+        "productores.inactivar", "reportes.generar", "usuarios.administrar",
+    },
+    "ASOCIACION": {
+        "busqueda_global.usar", "catalogo.publicar_lote", "catalogo.ver_publico",
+        "catalogos_maestros.administrar", "catalogos_maestros.consultar", "cosechas.consultar",
+        "ficha_digital.ver_completa", "ficha_digital.ver_publica", "fincas.actualizar",
+        "fincas.consultar", "fincas.crear", "indicadores.ver_dashboard", "lotes.cambiar_estado",
+        "lotes.consultar", "negociaciones.gestionar", "perfil.editar_propio", "perfil.ver_propio",
+        "productores.actualizar", "productores.consultar", "productores.crear",
+        "productores.inactivar", "reportes.generar", "ventas.registrar",
+    },
+    "COMPRADOR": {
+        "catalogo.ver_publico", "catalogos_maestros.consultar", "ficha_digital.ver_publica",
+        "manifestaciones_interes.crear", "perfil.editar_propio", "perfil.ver_propio",
+    },
+    "CONSULTA_PUBLICA": {
+        "catalogo.ver_publico", "catalogos_maestros.consultar", "ficha_digital.ver_publica",
+    },
+    "OPERARIO_CAMPO": {
+        "catalogos_maestros.consultar", "cosechas.consultar", "cosechas.crear", "lotes.consultar",
+        "lotes.crear", "perfil.editar_propio", "perfil.ver_propio", "trazabilidad.registrar_calidad",
+        "trazabilidad.registrar_etapa",
+    },
+    "PRODUCTOR": {
+        "busqueda_global.usar", "catalogo.publicar_lote", "catalogo.ver_publico",
+        "catalogos_maestros.consultar", "cosechas.consultar", "cosechas.crear",
+        "ficha_digital.ver_completa", "ficha_digital.ver_publica", "fincas.actualizar",
+        "fincas.consultar", "fincas.crear", "indicadores.ver_dashboard", "lotes.cambiar_estado",
+        "lotes.consultar", "lotes.crear", "negociaciones.gestionar", "perfil.editar_propio",
+        "perfil.ver_propio", "productores.actualizar", "productores.consultar", "productores.crear",
+        "reportes.generar", "trazabilidad.registrar_calidad", "trazabilidad.registrar_etapa",
+        "ventas.registrar",
+    },
+}
+
+ROLES_RESTRINGIDOS = ["PRODUCTOR", "ASOCIACION", "COMPRADOR", "OPERARIO_CAMPO", "CONSULTA_PUBLICA"]
+
+TODOS_LOS_PERMISOS = sorted({permiso for permisos in MATRIZ_RBAC_VIGENTE.values() for permiso in permisos})
+
+
+def _mockear_matriz_real(mock_rol_permiso, matriz=MATRIZ_RBAC_VIGENTE):
+    """
+    Hace que `RolPermiso.objects.filter(...).exists()` responda igual
+    que lo haría contra la tabla real de Supabase para la `matriz`
+    dada, sin tocar ninguna base de datos — permite probar
+    `usuario_tiene_permiso()` (y todo lo que depende de ella) de
+    extremo a extremo con datos de RBAC realistas.
+    """
+
+    def filtro_falso(**kwargs):
+        rol_codigo = kwargs.get("rol__codigo")
+        codigos_permiso = kwargs.get("permiso__codigo__in", [])
+        permisos_del_rol = matriz.get(rol_codigo, set())
+        resultado = MagicMock()
+        resultado.exists.return_value = any(c in permisos_del_rol for c in codigos_permiso)
+        return resultado
+
+    mock_rol_permiso.objects.filter.side_effect = filtro_falso
+
+
+class MatrizPermisosSecurityTests(TestCase):
+    """
+    HU04-ST6 (SCRUM-127), parte 1: confirmar que los permisos asignados
+    se aplican correctamente a cada perfil (RNF06).
+
+    Recorre TODA la matriz rol × permiso vigente en Supabase (6 roles,
+    31 permisos = 186 combinaciones) y verifica que
+    `usuario_tiene_permiso()` concede exactamente lo que la matriz real
+    concede — ni más (fuga de privilegios) ni menos (una funcionalidad
+    legítima bloqueada por error).
+    """
+
+    @patch("usuarios.models.RolPermiso")
+    def test_usuario_tiene_permiso_coincide_con_la_matriz_real_para_cada_rol_y_permiso(self, mock_rol_permiso):
+        from usuarios.permissions import usuario_tiene_permiso
+
+        _mockear_matriz_real(mock_rol_permiso)
+
+        for rol_codigo, permisos_concedidos in MATRIZ_RBAC_VIGENTE.items():
+            for permiso_codigo in TODOS_LOS_PERMISOS:
+                with self.subTest(rol=rol_codigo, permiso=permiso_codigo):
+                    esperado = permiso_codigo in permisos_concedidos
+                    self.assertEqual(usuario_tiene_permiso(rol_codigo, permiso_codigo), esperado)
+
+    @patch("usuarios.models.RolPermiso")
+    def test_solo_administrador_tiene_usuarios_administrar(self, mock_rol_permiso):
+        """
+        El permiso que protege todo HU04-ST4/ST5 (gestión de usuarios y
+        roles) es, hoy, exclusivo de ADMINISTRADOR. Esta prueba lo deja
+        explícito y por separado del recorrido general de arriba,
+        porque es justo la condición de la que depende toda la
+        prevención de escalamiento de privilegios de esta subtarea.
+        """
+        from usuarios.permissions import usuario_tiene_permiso
+
+        _mockear_matriz_real(mock_rol_permiso)
+
+        self.assertTrue(usuario_tiene_permiso("ADMINISTRADOR", "usuarios.administrar"))
+        for rol_restringido in ROLES_RESTRINGIDOS:
+            with self.subTest(rol=rol_restringido):
+                self.assertFalse(usuario_tiene_permiso(rol_restringido, "usuarios.administrar"))
+
+
+class EscalamientoPrivilegiosSecurityTests(TestCase):
+    """
+    HU04-ST6 (SCRUM-127), parte 2: verificar que un usuario con un rol
+    restringido no pueda forzar el acceso a los módulos administrativos
+    de HU04-ST4/ST5 (RNF21) — ni por la pantalla web ni por la API —,
+    aunque intente pedir directamente el rol de Administrador.
+    """
+
+    def _fake_request_sesion(self, rol, path="/admin/usuarios/"):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        request = RequestFactory().get(path)
+        request.user = MagicMock(is_authenticated=True)
+        request.session = {"rol": rol}
+        request._messages = FallbackStorage(request)
+        return request
+
+    def _patch_auth_jwt(self, rol_codigo, email="usuario@example.com"):
+        fake_user = MagicMock(email=email)
+        fake_token = {"role_code": rol_codigo}
+        return patch(
+            "usuarios.permissions.JWTAuthentication.authenticate",
+            return_value=(fake_user, fake_token),
+        )
+
+    # --- Pantalla web de HU04-ST4 (panel_administracion_usuarios) ---
+
+    @patch("usuarios.models.RolPermiso")
+    def test_rol_restringido_no_accede_al_panel_de_administracion(self, mock_rol_permiso):
+        from usuarios.views import panel_administracion_usuarios
+
+        _mockear_matriz_real(mock_rol_permiso)
+
+        for rol_restringido in ROLES_RESTRINGIDOS:
+            with self.subTest(rol=rol_restringido):
+                request = self._fake_request_sesion(rol_restringido)
+                response = panel_administracion_usuarios(request)
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.url, reverse("home"))
+
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.models.RolPermiso")
+    def test_administrador_si_accede_al_panel_de_administracion(self, mock_rol_permiso, mock_usuario, mock_rol):
+        from usuarios.views import panel_administracion_usuarios
+
+        _mockear_matriz_real(mock_rol_permiso)
+        lista_vacia = MagicMock()
+        lista_vacia.__iter__.return_value = iter([])
+        lista_vacia.count.return_value = 0
+        mock_usuario.objects.select_related.return_value.order_by.return_value = lista_vacia
+        mock_rol.objects.filter.return_value.order_by.return_value = []
+
+        request = self._fake_request_sesion("ADMINISTRADOR")
+        with patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso") as mock_check_menu:
+            mock_check_menu.side_effect = lambda rol, permiso: rol == "ADMINISTRADOR"
+            response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 200)
+
+    # --- Endpoint de API de HU04-ST5 (actualizar_rol_usuario_api) ---
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.models.RolPermiso")
+    def test_rol_restringido_no_puede_autoasignarse_administrador_via_api(self, mock_rol_permiso, mock_cambiar_rol):
+        """
+        El intento de escalamiento más directo: una cuenta con un rol
+        restringido llama al endpoint de reasignación pidiendo
+        'ADMINISTRADOR'. Debe rechazarse en la capa de autorización,
+        antes de que la petición llegue siquiera a mirar el usuario o
+        el rol destino — por eso se verifica que `cambiar_rol_usuario`
+        nunca se invoca.
+        """
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        _mockear_matriz_real(mock_rol_permiso)
+
+        for rol_restringido in ROLES_RESTRINGIDOS:
+            with self.subTest(rol=rol_restringido):
+                with self._patch_auth_jwt(rol_restringido):
+                    request = RequestFactory().put(
+                        "/api/users/cualquier-id/role",
+                        data=json.dumps({"rol": "ADMINISTRADOR"}),
+                        content_type="application/json",
+                    )
+                    response = actualizar_rol_usuario_api(request, user_id="cualquier-id")
+
+                self.assertEqual(response.status_code, 403)
+
+        mock_cambiar_rol.assert_not_called()
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.models.RolPermiso")
+    def test_administrador_si_puede_reasignar_roles_via_api(
+        self, mock_rol_permiso, mock_usuario, mock_rol, mock_cambiar_rol
+    ):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        _mockear_matriz_real(mock_rol_permiso)
+        usuario_existente = MagicMock(id="u1", correo="otro@example.com")
+        usuario_existente.rol.codigo = "COMPRADOR"
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
+        mock_usuario.objects.filter.return_value.first.return_value = MagicMock()
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo="COMPRADOR")
+        mock_cambiar_rol.return_value = (usuario_existente, MagicMock(id=1))
+
+        with self._patch_auth_jwt("ADMINISTRADOR"):
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({"rol": "COMPRADOR"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 200)
+        mock_cambiar_rol.assert_called_once()
+
+    @patch("usuarios.models.RolPermiso")
+    def test_rol_falsificado_en_el_cuerpo_no_otorga_acceso(self, mock_rol_permiso):
+        """
+        Defensa en profundidad: la autorización depende exclusivamente
+        del claim 'role_code' firmado dentro del JWT (resuelto por
+        `permiso_requerido` vía `request.auth`), nunca de nada que
+        venga en el cuerpo de la petición. Un cliente con un token de
+        COMPRADOR no gana nada incluyendo datos adicionales en el JSON
+        — el rechazo ocurre antes de que la vista siquiera lea el
+        cuerpo de la petición.
+        """
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        _mockear_matriz_real(mock_rol_permiso)
+
+        with self._patch_auth_jwt("COMPRADOR"):
+            request = RequestFactory().put(
+                "/api/users/u1/role",
+                data=json.dumps({"rol": "ADMINISTRADOR", "role_code": "ADMINISTRADOR", "es_admin": True}),
+                content_type="application/json",
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 403)
+
+
 
