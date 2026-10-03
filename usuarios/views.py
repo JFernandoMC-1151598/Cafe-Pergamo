@@ -70,6 +70,7 @@ from django.views.decorators.http import require_POST
 from supabase_auth.errors import AuthApiError
 
 from .models import Rol, TipoDocumento, Usuario
+from .permissions import permiso_requerido_sesion
 from .supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
@@ -633,6 +634,77 @@ def restablecer_contrasena_view(request: HttpRequest, token: str) -> HttpRespons
     rompa el sitio mientras esa funcionalidad se termina.
     """
     return render(request, "usuarios/restablecer_contrasena.html", {"token": token})
+
+
+# ---------------------------------------------------------------------------
+# HU04-ST4 (SCRUM-119): Administración de Usuarios y Roles — Frontend.
+# ---------------------------------------------------------------------------
+
+@permiso_requerido_sesion("usuarios.administrar")
+def panel_administracion_usuarios(request: HttpRequest) -> HttpResponse:
+    """
+    Pantalla de administración de usuarios (HU04-ST4): lista los usuarios
+    del sistema, permite filtrarlos por rol y por estado, y ofrece un
+    formulario para reasignar el rol de una cuenta.
+
+    El guard `permiso_requerido_sesion` ya exige el permiso
+    "usuarios.administrar" (hoy solo lo tiene ADMINISTRADOR en la matriz
+    RBAC sembrada en HU04-ST1), así que esta vista no vuelve a repetir esa
+    verificación.
+
+    NOTA: el cambio de rol que procesa el POST todavía no queda registrado
+    en una bitácora de auditoría ni respeta la regla de "no dejar el
+    sistema sin administradores" — eso es RF28 y queda para HU04-ST5
+    (SCRUM-120), que es la subtarea pensada específicamente para
+    endurecer esta operación. Por ahora el cambio de rol sí se guarda,
+    para que la pantalla sea funcional de punta a punta.
+    """
+    if request.method == "POST":
+        usuario_id = request.POST.get("usuario_id")
+        nuevo_rol_codigo = request.POST.get("nuevo_rol")
+
+        usuario = Usuario.objects.filter(id=usuario_id).select_related("rol").first()
+        nuevo_rol = Rol.objects.filter(codigo=nuevo_rol_codigo, activo=True).first()
+
+        if usuario is None or nuevo_rol is None:
+            messages.error(request, "No se pudo actualizar el rol: usuario o rol inválido.")
+        elif usuario.rol_id == nuevo_rol.id:
+            messages.info(request, f"{usuario.nombres} ya tenía asignado el rol {nuevo_rol.nombre}.")
+        else:
+            usuario.rol = nuevo_rol
+            usuario.save(update_fields=["rol"])
+            messages.success(
+                request,
+                f"Rol de {usuario.nombres} {usuario.apellidos} actualizado a {nuevo_rol.nombre}.",
+            )
+
+        return redirect("admin_usuarios")
+
+    rol_filtro = request.GET.get("rol", "")
+    estado_filtro = request.GET.get("estado", "")
+
+    usuarios = Usuario.objects.select_related("rol", "tipo_documento").order_by("nombres", "apellidos")
+    if rol_filtro:
+        usuarios = usuarios.filter(rol__codigo=rol_filtro)
+    if estado_filtro == "activo":
+        usuarios = usuarios.filter(activo=True)
+    elif estado_filtro == "inactivo":
+        usuarios = usuarios.filter(activo=False)
+
+    # Solo roles que admiten cuenta (RF del catálogo de HU04-ST1) tiene
+    # sentido ofrecerlos como destino de una reasignación.
+    roles_asignables = Rol.objects.filter(activo=True, requiere_cuenta=True).order_by("nombre")
+
+    return render(
+        request,
+        "usuarios/admin_usuarios.html",
+        {
+            "usuarios": usuarios,
+            "roles_asignables": roles_asignables,
+            "rol_filtro": rol_filtro,
+            "estado_filtro": estado_filtro,
+        },
+    )
 
 
 # ==============================================================================

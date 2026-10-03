@@ -43,6 +43,9 @@ urlpatterns = [
     # franciscogallo (su urls.py no la tenía); se restaura aquí porque
     # templates/usuarios/registro.html depende de ella (api_registro).
     path('api/auth/register', views.registro_api, name='api_registro'),
+
+    # HU04-ST4 (SCRUM-119): panel de administración de usuarios y roles.
+    path('admin/usuarios/', views.panel_administracion_usuarios, name='admin_usuarios'),
 ]
 
 

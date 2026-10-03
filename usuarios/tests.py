@@ -826,4 +826,112 @@ class WebNavigationGuardTests(TestCase):
         self.assertTrue(json.loads(response.content)["ok"])
 
 
+class AdminUsuariosPanelTests(TestCase):
+    """
+    Pruebas para HU04-ST4 (SCRUM-119): pantalla de administración de
+    usuarios y reasignación de roles.
+
+    El guard de acceso (permiso_requerido_sesion) ya tiene sus propias
+    pruebas en WebNavigationGuardTests, así que aquí se mockea
+    `usuario_tiene_permiso` para dejarlo pasar y concentrarse en lo que
+    hace la vista: filtrar/listar y procesar la reasignación de rol.
+    Usuario y Rol son managed=False (ver docstring del módulo), así que
+    se mockean en vez de tocar la base de datos de pruebas.
+    """
+
+    def _fake_request_autenticado(self, method="get", path="/admin/usuarios/", data=None, rol="ADMINISTRADOR"):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        factory = RequestFactory()
+        request = factory.post(path, data or {}) if method == "post" else factory.get(path, data or {})
+        request.user = MagicMock(is_authenticated=True)
+        request.session = {"rol": rol}
+        request._messages = FallbackStorage(request)
+        return request
+
+    @patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_listado_filtra_por_rol_y_estado(self, mock_usuario, mock_rol, _mock_check, _mock_check_menu):
+        from usuarios.views import panel_administracion_usuarios
+
+        # La lista final solo necesita comportarse como iterable (para el
+        # {% for %} de la plantilla) y responder a .count (usado en el
+        # encabezado), no como un queryset real.
+        lista_final = MagicMock()
+        lista_final.__iter__.return_value = iter([])
+        lista_final.count.return_value = 0
+
+        queryset_base = MagicMock()
+        mock_usuario.objects.select_related.return_value.order_by.return_value = queryset_base
+        queryset_base.filter.return_value.filter.return_value = lista_final
+        mock_rol.objects.filter.return_value.order_by.return_value = []
+
+        request = self._fake_request_autenticado(data={"rol": "PRODUCTOR", "estado": "activo"})
+        response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 200)
+        queryset_base.filter.assert_called_once_with(rol__codigo="PRODUCTOR")
+        queryset_base.filter.return_value.filter.assert_called_once_with(activo=True)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_reasignar_rol_actualiza_y_redirige(self, mock_usuario, mock_rol, _mock_check):
+        from usuarios.views import panel_administracion_usuarios
+
+        usuario_existente = MagicMock(id="u1", rol_id=1, nombres="Ana", apellidos="Gómez")
+        nuevo_rol = MagicMock(id=2, nombre="Administrador")
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
+        mock_rol.objects.filter.return_value.first.return_value = nuevo_rol
+
+        request = self._fake_request_autenticado(
+            method="post", data={"usuario_id": "u1", "nuevo_rol": "ADMINISTRADOR"}
+        )
+        response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("admin_usuarios"))
+        self.assertEqual(usuario_existente.rol, nuevo_rol)
+        usuario_existente.save.assert_called_once_with(update_fields=["rol"])
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_reasignar_al_mismo_rol_no_guarda_de_nuevo(self, mock_usuario, mock_rol, _mock_check):
+        from usuarios.views import panel_administracion_usuarios
+
+        usuario_existente = MagicMock(id="u1", rol_id=1, nombres="Ana", apellidos="Gómez")
+        rol_sin_cambios = MagicMock(id=1, nombre="Productor")
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
+        mock_rol.objects.filter.return_value.first.return_value = rol_sin_cambios
+
+        request = self._fake_request_autenticado(
+            method="post", data={"usuario_id": "u1", "nuevo_rol": "PRODUCTOR"}
+        )
+        response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 302)
+        usuario_existente.save.assert_not_called()
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_reasignar_con_usuario_o_rol_invalido_no_rompe(self, mock_usuario, mock_rol, _mock_check):
+        from usuarios.views import panel_administracion_usuarios
+
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = None
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock()
+
+        request = self._fake_request_autenticado(
+            method="post", data={"usuario_id": "no-existe", "nuevo_rol": "ADMINISTRADOR"}
+        )
+        response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("admin_usuarios"))
+
+
 
