@@ -391,3 +391,129 @@ main {
     font-size: 0.85rem;
 }
 
+/* ==========================================================================
+   Módulo de Autenticación y Formularios Globales (Login, Registro, Recuperación)
+   ========================================================================== */
+.auth-wrapper {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2.5rem 1rem;
+    background: linear-gradient(135deg, #F8F4EE 0%, #EDE3D7 100%);
+    min-height: calc(100vh - 72px);
+}
+
+.auth-container {
+    width: 100%;
+    max-width: 480px;
+}
+
+.auth-container-wide {
+    width: 100%;
+    max-width: 680px;
+}
+
+.auth-card {
+    background-color: var(--pergamo-surface);
+    border-radius: 1.25rem;
+    border: 1px solid var(--pergamo-border);
+    box-shadow: 0 15px 35px rgba(74, 44, 42, 0.08);
+    width: 100%;
+    overflow: hidden;
+}
+
+.auth-header {
+    background: linear-gradient(135deg, var(--pergamo-primary) 0%, #5D3835 100%);
+    color: #FFFFFF;
+    padding: 2.25rem 2rem;
+    text-align: center;
+}
+
+.auth-header .brand-icon {
+    font-size: 2.5rem;
+    color: #F1CAA3;
+    margin-bottom: 0.5rem;
+}
+
+.auth-header h1 {
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    margin-bottom: 0.25rem;
+    color: #FFFFFF;
+}
+
+.auth-header p {
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 0.95rem;
+    margin-bottom: 0;
+}
+
+.auth-body {
+    padding: 2.25rem;
+}
+
+@media (max-width: 576px) {
+    .auth-body {
+        padding: 1.5rem;
+    }
+    .auth-header {
+        padding: 1.75rem 1.25rem;
+    }
+}
+
+.form-label {
+    font-weight: 600;
+    font-size: 0.875rem;
+    color: var(--pergamo-primary);
+    margin-bottom: 0.4rem;
+}
+
+.form-control,
+.form-select {
+    border: 1.5px solid var(--pergamo-border);
+    border-radius: 0.65rem;
+    padding: 0.68rem 0.95rem;
+    font-size: 0.95rem;
+    transition: all 0.2s ease-in-out;
+}
+
+.form-control:focus,
+.form-select:focus {
+    border-color: var(--pergamo-accent);
+    box-shadow: 0 0 0 0.25rem var(--pergamo-focus-ring);
+}
+
+.input-group-text {
+    background-color: var(--pergamo-bg-light);
+    border: 1.5px solid var(--pergamo-border);
+    border-right: none;
+    color: var(--pergamo-accent);
+    border-radius: 0.65rem 0 0 0.65rem;
+}
+
+.input-group .form-control {
+    border-left: none;
+    border-radius: 0 0.65rem 0.65rem 0;
+}
+
+.input-group .form-control:focus {
+    border-left: none;
+}
+
+.login-link,
+.auth-link {
+    color: var(--pergamo-primary);
+    text-decoration: none;
+    font-weight: 600;
+    transition: color 0.2s ease;
+}
+
+.login-link:hover,
+.auth-link:hover {
+    text-decoration: underline;
+    color: var(--pergamo-primary-hover);
+}
+
+
