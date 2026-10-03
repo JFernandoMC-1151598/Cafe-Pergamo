@@ -1522,4 +1522,65 @@ class EscalamientoPrivilegiosSecurityTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
 
+class RegistroAutorregistroRolesTests(TestCase):
+    """
+    Según CU10 del documento de Casos de Uso, una Asociación no se
+    autorregistra: la crea el Administrador del Sistema junto con su
+    propia cuenta administradora (RN02). Antes de este ajuste,
+    `_ROLES_NO_AUTORREGISTRABLES` en registro_api() solo excluía a
+    ADMINISTRADOR; ahora también excluye a ASOCIACION — el formulario
+    público (templates/usuarios/registro.html) ya no ofrece esa opción,
+    pero sin este rechazo en el backend cualquiera podría seguir
+    autoasignándose el rol llamando directamente al endpoint.
+    """
+
+    def _cuerpo_valido(self, rol):
+        return json.dumps({
+            "correo": "nuevo@example.com",
+            "contraseña": "ClaveSegura123",
+            "nombres": "Ana",
+            "apellidos": "Gómez",
+            "tipo_documento": "CC",
+            "numero_documento": "123456789",
+            "rol": rol,
+        })
+
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_asociacion_no_puede_autorregistrarse(self, mock_tipo_doc, mock_rol):
+        from django.test import RequestFactory
+        from usuarios.views import registro_api
+
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(codigo="CC")
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo="ASOCIACION")
+
+        request = RequestFactory().post(
+            "/api/auth/register", data=self._cuerpo_valido("ASOCIACION"), content_type="application/json"
+        )
+        response = registro_api(request)
+
+        self.assertEqual(response.status_code, 400)
+        body = json.loads(response.content)
+        self.assertIn("rol", body.get("campos", {}))
+
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_administrador_sigue_sin_poder_autorregistrarse(self, mock_tipo_doc, mock_rol):
+        """Confirma que el ajuste no debilitó la restricción que ya existía para ADMINISTRADOR."""
+        from django.test import RequestFactory
+        from usuarios.views import registro_api
+
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(codigo="CC")
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo="ADMINISTRADOR")
+
+        request = RequestFactory().post(
+            "/api/auth/register", data=self._cuerpo_valido("ADMINISTRADOR"), content_type="application/json"
+        )
+        response = registro_api(request)
+
+        self.assertEqual(response.status_code, 400)
+        body = json.loads(response.content)
+        self.assertIn("rol", body.get("campos", {}))
+
+
 

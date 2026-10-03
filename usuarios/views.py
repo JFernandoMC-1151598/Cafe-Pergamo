@@ -91,16 +91,26 @@ _TELEFONO_REGEX = re.compile(r"^\+?[0-9 ]{7,15}$")
 
 # Roles que un usuario puede elegir al autoregistrarse. ADMINISTRADOR
 # queda deliberadamente excluido: un endpoint público de registro nunca
-# debe permitir que alguien se autoasigne el rol de administrador. Los
+# debe permitir que alguien se autoasigne el rol de administrador.
+# ASOCIACION también queda excluido (CU10 del documento de Casos de
+# Uso): una asociación no se autorregistra, la da de alta el
+# Administrador del Sistema junto con la cuenta de su propio
+# administrador (ver RN02 de CU10). Esta restricción es la que de
+# verdad protege el registro — que el formulario ya no ofrezca
+# "Asociación" como opción (ver templates/usuarios/registro.html) es
+# solo la otra mitad; sin esto, cualquiera podría seguir
+# autoasignándose ese rol llamando directamente a este endpoint. Los
 # roles con `requiere_cuenta = False` (p.ej. CONSULTA_PUBLICA) tampoco
 # aplican aquí, porque por definición no tienen cuenta/registro.
-_ROLES_NO_AUTORREGISTRABLES = {"ADMINISTRADOR"}
+_ROLES_NO_AUTORREGISTRABLES = {"ADMINISTRADOR", "ASOCIACION"}
 
 # La UI de registro (HU01-ST2, ver templates/usuarios/registro.html)
-# ofrece "COMERCIALIZADOR" como opción separada, pero en el catálogo de
-# roles (HU04-ST1) "Productor" y "Comercializador" se modelaron como un
-# solo rol combinado (`PRODUCTOR`, nombre "Productor / Comercializador").
-# Este alias evita que ese detalle de UI rompa el registro.
+# históricamente ofrecía "COMERCIALIZADOR" como opción separada, pero
+# en el catálogo de roles (HU04-ST1) "Productor" y "Comercializador" se
+# modelaron siempre como un solo rol combinado (`PRODUCTOR`, nombre
+# "Productor / Comercializador") — el formulario ya se actualizó para
+# mostrar una sola opción, pero este alias se deja para no romper
+# ningún cliente de la API que todavía envíe "COMERCIALIZADOR".
 _ALIAS_ROL = {
     "COMERCIALIZADOR": "PRODUCTOR",
 }
