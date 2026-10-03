@@ -10,7 +10,9 @@ from . import views
 from .password_reset import password_reset_request_api, password_reset_supabase_redirect
 
 urlpatterns = [
-    # Vistas de interfaz Web
+    # Vistas de interfaz Web principales
+    path('', views.home_view, name='home'),
+    path('catalogo/', views.catalogo_view, name='catalogo'),
     path('login/', views.login_view, name='login'),
     path('logout/', views.logout_view, name='logout'),
     path('registro/', views.registro_view, name='registro'),
