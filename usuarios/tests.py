@@ -10,6 +10,7 @@ de pruebas que Django crea automáticamente para cada `TestCase`.
 """
 
 import json
+import uuid
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
@@ -876,16 +877,26 @@ class AdminUsuariosPanelTests(TestCase):
         queryset_base.filter.assert_called_once_with(rol__codigo="PRODUCTOR")
         queryset_base.filter.return_value.filter.assert_called_once_with(activo=True)
 
+    @patch("usuarios.views.cambiar_rol_usuario")
     @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
     @patch("usuarios.views.Rol")
     @patch("usuarios.views.Usuario")
-    def test_reasignar_rol_actualiza_y_redirige(self, mock_usuario, mock_rol, _mock_check):
+    def test_reasignar_rol_delega_en_cambiar_rol_usuario_y_redirige(
+        self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol
+    ):
+        """
+        Desde HU04-ST5 (SCRUM-120), la vista ya no actualiza el rol
+        directamente: delega en `gestion_roles.cambiar_rol_usuario`, que
+        es quien aplica la regla de "no dejar el sistema sin
+        administradores" y registra la bitácora de auditoría (RF28).
+        """
         from usuarios.views import panel_administracion_usuarios
 
         usuario_existente = MagicMock(id="u1", rol_id=1, nombres="Ana", apellidos="Gómez")
         nuevo_rol = MagicMock(id=2, nombre="Administrador")
         mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
         mock_rol.objects.filter.return_value.first.return_value = nuevo_rol
+        mock_cambiar_rol.return_value = (usuario_existente, MagicMock(id=99))
 
         request = self._fake_request_autenticado(
             method="post", data={"usuario_id": "u1", "nuevo_rol": "ADMINISTRADOR"}
@@ -894,19 +905,24 @@ class AdminUsuariosPanelTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, reverse("admin_usuarios"))
-        self.assertEqual(usuario_existente.rol, nuevo_rol)
-        usuario_existente.save.assert_called_once_with(update_fields=["rol"])
+        mock_cambiar_rol.assert_called_once()
+        args, kwargs = mock_cambiar_rol.call_args
+        self.assertEqual(args[0], usuario_existente)
+        self.assertEqual(args[1], nuevo_rol)
 
+    @patch("usuarios.views.cambiar_rol_usuario")
     @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
     @patch("usuarios.views.Rol")
     @patch("usuarios.views.Usuario")
-    def test_reasignar_al_mismo_rol_no_guarda_de_nuevo(self, mock_usuario, mock_rol, _mock_check):
+    def test_reasignar_al_mismo_rol_no_rompe(self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol):
+        """Cuando `cambiar_rol_usuario` detecta que no hubo cambio real, devuelve bitácora None."""
         from usuarios.views import panel_administracion_usuarios
 
         usuario_existente = MagicMock(id="u1", rol_id=1, nombres="Ana", apellidos="Gómez")
         rol_sin_cambios = MagicMock(id=1, nombre="Productor")
         mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
         mock_rol.objects.filter.return_value.first.return_value = rol_sin_cambios
+        mock_cambiar_rol.return_value = (usuario_existente, None)
 
         request = self._fake_request_autenticado(
             method="post", data={"usuario_id": "u1", "nuevo_rol": "PRODUCTOR"}
@@ -914,12 +930,14 @@ class AdminUsuariosPanelTests(TestCase):
         response = panel_administracion_usuarios(request)
 
         self.assertEqual(response.status_code, 302)
-        usuario_existente.save.assert_not_called()
 
+    @patch("usuarios.views.cambiar_rol_usuario")
     @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
     @patch("usuarios.views.Rol")
     @patch("usuarios.views.Usuario")
-    def test_reasignar_con_usuario_o_rol_invalido_no_rompe(self, mock_usuario, mock_rol, _mock_check):
+    def test_reasignar_con_usuario_o_rol_invalido_no_rompe(
+        self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol
+    ):
         from usuarios.views import panel_administracion_usuarios
 
         mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = None
@@ -932,6 +950,299 @@ class AdminUsuariosPanelTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.url, reverse("admin_usuarios"))
+        mock_cambiar_rol.assert_not_called()
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_reasignar_cuando_quedaria_sin_administradores_muestra_error(
+        self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol
+    ):
+        """RF28: si cambiar_rol_usuario rechaza el cambio, la vista no debe romperse (500)."""
+        from usuarios.gestion_roles import CambioRolInvalido
+        from usuarios.views import panel_administracion_usuarios
+
+        usuario_existente = MagicMock(id="admin-1", rol_id=1, nombres="Carlos", apellidos="Pérez")
+        otro_rol = MagicMock(id=2, nombre="Productor / Comercializador")
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
+        mock_rol.objects.filter.return_value.first.return_value = otro_rol
+        mock_cambiar_rol.side_effect = CambioRolInvalido("el sistema se quedaría sin administradores")
+
+        request = self._fake_request_autenticado(
+            method="post", data={"usuario_id": "admin-1", "nuevo_rol": "PRODUCTOR"}
+        )
+        response = panel_administracion_usuarios(request)
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("admin_usuarios"))
+
+
+class GestionRolesTests(TestCase):
+    """
+    Pruebas para HU04-ST5 (SCRUM-120): `gestion_roles.cambiar_rol_usuario`,
+    la función que centraliza la reasignación de rol, la restricción de
+    "no dejar el sistema sin administradores" (RF28) y el registro en
+    la bitácora de auditoría.
+
+    `Usuario` y `Rol` son managed=False y se mockean (igual que en el
+    resto del archivo). `BitacoraCambioRol` sí es managed=True — aquí
+    se deja escribir de verdad en la base de datos de pruebas, para
+    confirmar que la auditoría efectivamente queda registrada.
+    """
+
+    def _fake_usuario(self, rol_codigo, activo=True, correo="usuario@example.com"):
+        usuario = MagicMock()
+        usuario.id = uuid.uuid4()
+        usuario.correo = correo
+        usuario.activo = activo
+        usuario.rol = MagicMock(codigo=rol_codigo)
+        usuario.rol_id = rol_codigo  # alcanza para las comparaciones de igualdad de este módulo
+        return usuario
+
+    def _fake_rol(self, codigo):
+        rol = MagicMock()
+        rol.id = codigo
+        rol.codigo = codigo
+        return rol
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_cambio_normal_guarda_y_crea_entrada_de_bitacora(self, _mock_usuario_model):
+        from usuarios.gestion_roles import cambiar_rol_usuario
+        from usuarios.models import BitacoraCambioRol
+
+        usuario = self._fake_usuario(rol_codigo="PRODUCTOR", correo="ana@example.com")
+        nuevo_rol = self._fake_rol("COMPRADOR")
+
+        usuario_resultado, entrada = cambiar_rol_usuario(
+            usuario, nuevo_rol, realizado_por=None, ip_address="127.0.0.1"
+        )
+
+        self.assertIs(usuario_resultado, usuario)
+        self.assertIsNotNone(entrada)
+        usuario.save.assert_called_once_with(update_fields=["rol"])
+        self.assertEqual(usuario.rol, nuevo_rol)
+
+        self.assertEqual(BitacoraCambioRol.objects.count(), 1)
+        registro = BitacoraCambioRol.objects.first()
+        self.assertEqual(registro.usuario_correo, "ana@example.com")
+        self.assertEqual(registro.rol_anterior, "PRODUCTOR")
+        self.assertEqual(registro.rol_nuevo, "COMPRADOR")
+        self.assertEqual(registro.ip_address, "127.0.0.1")
+        self.assertIsNone(registro.realizado_por_correo)
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_cambio_registra_quien_lo_realizo(self, _mock_usuario_model):
+        from usuarios.gestion_roles import cambiar_rol_usuario
+        from usuarios.models import BitacoraCambioRol
+
+        usuario = self._fake_usuario(rol_codigo="PRODUCTOR")
+        nuevo_rol = self._fake_rol("COMPRADOR")
+        admin = self._fake_usuario(rol_codigo="ADMINISTRADOR", correo="admin@example.com")
+
+        cambiar_rol_usuario(usuario, nuevo_rol, realizado_por=admin)
+
+        registro = BitacoraCambioRol.objects.first()
+        self.assertEqual(registro.realizado_por_correo, "admin@example.com")
+        self.assertEqual(registro.realizado_por_id, admin.id)
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_cambio_al_mismo_rol_no_hace_nada(self, _mock_usuario_model):
+        from usuarios.gestion_roles import cambiar_rol_usuario
+        from usuarios.models import BitacoraCambioRol
+
+        rol_actual = self._fake_rol("PRODUCTOR")
+        usuario = self._fake_usuario(rol_codigo="PRODUCTOR")
+        usuario.rol_id = rol_actual.id
+
+        usuario_resultado, entrada = cambiar_rol_usuario(usuario, rol_actual)
+
+        self.assertIsNone(entrada)
+        usuario.save.assert_not_called()
+        self.assertEqual(BitacoraCambioRol.objects.count(), 0)
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_bloquea_dejar_el_sistema_sin_administradores(self, mock_usuario_model):
+        from usuarios.gestion_roles import CambioRolInvalido, cambiar_rol_usuario
+        from usuarios.models import BitacoraCambioRol
+
+        usuario = self._fake_usuario(rol_codigo="ADMINISTRADOR", activo=True)
+        nuevo_rol = self._fake_rol("PRODUCTOR")
+
+        # No queda ningún otro administrador activo aparte de `usuario`.
+        mock_usuario_model.objects.filter.return_value.exclude.return_value.exists.return_value = False
+
+        with self.assertRaises(CambioRolInvalido):
+            cambiar_rol_usuario(usuario, nuevo_rol)
+
+        usuario.save.assert_not_called()
+        self.assertEqual(BitacoraCambioRol.objects.count(), 0)
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_permite_reasignar_administrador_si_hay_otro_activo(self, mock_usuario_model):
+        from usuarios.gestion_roles import cambiar_rol_usuario
+
+        usuario = self._fake_usuario(rol_codigo="ADMINISTRADOR", activo=True, correo="admin1@example.com")
+        nuevo_rol = self._fake_rol("PRODUCTOR")
+
+        mock_usuario_model.objects.filter.return_value.exclude.return_value.exists.return_value = True
+
+        usuario_resultado, entrada = cambiar_rol_usuario(usuario, nuevo_rol)
+
+        self.assertIsNotNone(entrada)
+        usuario.save.assert_called_once()
+
+    @patch("usuarios.gestion_roles.Usuario")
+    def test_administrador_inactivo_no_bloquea_el_cambio(self, mock_usuario_model):
+        from usuarios.gestion_roles import cambiar_rol_usuario
+
+        usuario = self._fake_usuario(rol_codigo="ADMINISTRADOR", activo=False, correo="admin2@example.com")
+        nuevo_rol = self._fake_rol("PRODUCTOR")
+
+        usuario_resultado, entrada = cambiar_rol_usuario(usuario, nuevo_rol)
+
+        self.assertIsNotNone(entrada)
+        # La función ni siquiera debería haber consultado Usuario.objects:
+        # el chequeo de 'activo' corta antes de llegar ahí.
+        mock_usuario_model.objects.filter.assert_not_called()
+
+
+class ActualizarRolUsuarioApiTests(TestCase):
+    """
+    Pruebas para HU04-ST5 (SCRUM-120): endpoint de API
+    PUT/PATCH /api/users/<id>/role.
+    """
+
+    def _patch_auth(self, role_code="ADMINISTRADOR", email="admin@example.com"):
+        fake_user = MagicMock(email=email)
+        fake_token = {"role_code": role_code}
+        return patch(
+            "usuarios.permissions.JWTAuthentication.authenticate",
+            return_value=(fake_user, fake_token),
+        )
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_put_exitoso_devuelve_200_con_datos_actualizados(
+        self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol
+    ):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        usuario_existente = MagicMock(id="u1", correo="ana@example.com")
+        usuario_existente.rol.codigo = "COMPRADOR"
+        nuevo_rol = MagicMock(codigo="COMPRADOR")
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = usuario_existente
+        mock_usuario.objects.filter.return_value.first.return_value = MagicMock()  # realizado_por
+        mock_rol.objects.filter.return_value.first.return_value = nuevo_rol
+        mock_cambiar_rol.return_value = (usuario_existente, MagicMock(id=5))
+
+        with self._patch_auth():
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({"rol": "comprador"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertEqual(body["usuario"]["rol"], "COMPRADOR")
+        self.assertEqual(body["auditoria_id"], 5)
+        # El código se normaliza a mayúsculas antes de buscar el rol.
+        mock_rol.objects.filter.assert_called_once_with(codigo="COMPRADOR", activo=True, requiere_cuenta=True)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Usuario")
+    def test_usuario_inexistente_devuelve_404(self, mock_usuario, _mock_check):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = None
+
+        with self._patch_auth():
+            request = RequestFactory().put(
+                "/api/users/no-existe/role", data=json.dumps({"rol": "COMPRADOR"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="no-existe")
+
+        self.assertEqual(response.status_code, 404)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_rol_invalido_devuelve_400(self, mock_usuario, mock_rol, _mock_check):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = MagicMock()
+        mock_rol.objects.filter.return_value.first.return_value = None
+
+        with self._patch_auth():
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({"rol": "NO_EXISTE"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 400)
+
+    @patch("usuarios.views.cambiar_rol_usuario")
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.Usuario")
+    def test_dejaria_sin_administradores_devuelve_409(self, mock_usuario, mock_rol, _mock_check, mock_cambiar_rol):
+        from django.test import RequestFactory
+        from usuarios.gestion_roles import CambioRolInvalido
+        from usuarios.views import actualizar_rol_usuario_api
+
+        mock_usuario.objects.filter.return_value.select_related.return_value.first.return_value = MagicMock()
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock()
+        mock_cambiar_rol.side_effect = CambioRolInvalido("sin administradores")
+
+        with self._patch_auth():
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({"rol": "PRODUCTOR"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 409)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso")
+    def test_sin_permiso_devuelve_403(self, mock_check):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        mock_check.return_value = False
+
+        with self._patch_auth(role_code="COMPRADOR"):
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({"rol": "ADMINISTRADOR"}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_metodo_get_no_permitido(self):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        request = RequestFactory().get("/api/users/u1/role")
+        response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 405)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_cuerpo_sin_rol_devuelve_400(self, _mock_check):
+        from django.test import RequestFactory
+        from usuarios.views import actualizar_rol_usuario_api
+
+        with self._patch_auth():
+            request = RequestFactory().put(
+                "/api/users/u1/role", data=json.dumps({}), content_type="application/json"
+            )
+            response = actualizar_rol_usuario_api(request, user_id="u1")
+
+        self.assertEqual(response.status_code, 400)
 
 
 

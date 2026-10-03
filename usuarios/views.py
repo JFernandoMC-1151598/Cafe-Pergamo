@@ -65,12 +65,14 @@ from django.core.validators import validate_email
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_POST, require_http_methods
 
 from supabase_auth.errors import AuthApiError
 
+from .gestion_roles import CambioRolInvalido, cambiar_rol_usuario
 from .models import Rol, TipoDocumento, Usuario
-from .permissions import permiso_requerido_sesion
+from .permissions import permiso_requerido, permiso_requerido_sesion
+from .security import obtener_ip_cliente
 from .supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
@@ -673,27 +675,40 @@ def panel_administracion_usuarios(request: HttpRequest) -> HttpResponse:
     RBAC sembrada en HU04-ST1), así que esta vista no vuelve a repetir esa
     verificación.
 
-    NOTA: el cambio de rol que procesa el POST todavía no queda registrado
-    en una bitácora de auditoría ni respeta la regla de "no dejar el
-    sistema sin administradores" — eso es RF28 y queda para HU04-ST5
-    (SCRUM-120), que es la subtarea pensada específicamente para
-    endurecer esta operación. Por ahora el cambio de rol sí se guarda,
-    para que la pantalla sea funcional de punta a punta.
+    El cambio de rol que procesa el POST delega en
+    `gestion_roles.cambiar_rol_usuario` (HU04-ST5 / SCRUM-120), que es
+    quien aplica la restricción de no dejar el sistema sin
+    administradores y quien deja constancia del cambio en la bitácora
+    de auditoría (RF28) — la misma función que usa el endpoint de API
+    `/api/users/<id>/role`, para que ambos caminos respeten la regla
+    igual.
     """
     if request.method == "POST":
         usuario_id = request.POST.get("usuario_id")
         nuevo_rol_codigo = request.POST.get("nuevo_rol")
 
         usuario = Usuario.objects.filter(id=usuario_id).select_related("rol").first()
-        nuevo_rol = Rol.objects.filter(codigo=nuevo_rol_codigo, activo=True).first()
+        nuevo_rol = Rol.objects.filter(codigo=nuevo_rol_codigo, activo=True, requiere_cuenta=True).first()
 
         if usuario is None or nuevo_rol is None:
             messages.error(request, "No se pudo actualizar el rol: usuario o rol inválido.")
-        elif usuario.rol_id == nuevo_rol.id:
+            return redirect("admin_usuarios")
+
+        # Quién hace el cambio, para la bitácora — el mismo perfil que
+        # login_view ya deja identificado en la sesión.
+        realizado_por = Usuario.objects.filter(id=request.session.get("usuario_id")).first()
+
+        try:
+            usuario, entrada_bitacora = cambiar_rol_usuario(
+                usuario, nuevo_rol, realizado_por=realizado_por, ip_address=obtener_ip_cliente(request)
+            )
+        except CambioRolInvalido as exc:
+            messages.error(request, str(exc))
+            return redirect("admin_usuarios")
+
+        if entrada_bitacora is None:
             messages.info(request, f"{usuario.nombres} ya tenía asignado el rol {nuevo_rol.nombre}.")
         else:
-            usuario.rol = nuevo_rol
-            usuario.save(update_fields=["rol"])
             messages.success(
                 request,
                 f"Rol de {usuario.nombres} {usuario.apellidos} actualizado a {nuevo_rol.nombre}.",
@@ -725,6 +740,75 @@ def panel_administracion_usuarios(request: HttpRequest) -> HttpResponse:
             "rol_filtro": rol_filtro,
             "estado_filtro": estado_filtro,
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# HU04-ST5 (SCRUM-120): Actualización de Roles y auditoría — Backend.
+# ---------------------------------------------------------------------------
+
+@csrf_exempt  # Endpoint de API autenticado por JWT, no por sesión/cookie.
+@require_http_methods(["PUT", "PATCH"])
+@permiso_requerido("usuarios.administrar")
+def actualizar_rol_usuario_api(request: HttpRequest, user_id) -> JsonResponse:
+    """
+    Endpoint de API para reasignar el rol de un usuario: PUT/PATCH
+    /api/users/<id>/role (HU04-ST5).
+
+    Cuerpo esperado: {"rol": "CODIGO_DEL_ROL"} (también acepta "role"
+    como alias en inglés). Toda la regla de negocio — no dejar el
+    sistema sin administradores (RF28) — y el registro en la bitácora
+    de auditoría viven en `gestion_roles.cambiar_rol_usuario`, la misma
+    función que usa la pantalla web de HU04-ST4; este endpoint solo se
+    encarga de la autenticación/autorización (vía `permiso_requerido`,
+    que ya exige el permiso "usuarios.administrar") y de traducir el
+    resultado a una respuesta JSON.
+    """
+    try:
+        data = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "El cuerpo de la petición debe ser JSON válido."}, status=400)
+
+    nuevo_rol_codigo = ((data.get("rol") or data.get("role") or "")).strip().upper()
+    if not nuevo_rol_codigo:
+        return JsonResponse({"error": "Debe indicar el campo 'rol'."}, status=400)
+
+    usuario = Usuario.objects.filter(id=user_id).select_related("rol").first()
+    if usuario is None:
+        return JsonResponse({"error": "No existe un usuario con ese id."}, status=404)
+
+    nuevo_rol = Rol.objects.filter(codigo=nuevo_rol_codigo, activo=True, requiere_cuenta=True).first()
+    if nuevo_rol is None:
+        return JsonResponse({"error": "Rol inválido para asignar."}, status=400)
+
+    # El decorador permiso_requerido ya dejó request.user con el usuario
+    # Django "espejo" de quien hace la petición; se resuelve su perfil
+    # de negocio (igual que obtener_rol_usuario en serializers.py) solo
+    # para dejar constancia de quién ejecutó el cambio en la bitácora.
+    realizado_por = Usuario.objects.filter(correo__iexact=request.user.email).first()
+
+    try:
+        usuario, entrada_bitacora = cambiar_rol_usuario(
+            usuario, nuevo_rol, realizado_por=realizado_por, ip_address=obtener_ip_cliente(request)
+        )
+    except CambioRolInvalido as exc:
+        return JsonResponse({"error": str(exc)}, status=409)
+
+    usuario_payload = {"id": str(usuario.id), "correo": usuario.correo, "rol": usuario.rol.codigo}
+
+    if entrada_bitacora is None:
+        return JsonResponse(
+            {"mensaje": f"El usuario ya tenía asignado el rol {nuevo_rol.codigo}.", "usuario": usuario_payload},
+            status=200,
+        )
+
+    return JsonResponse(
+        {
+            "mensaje": f"Rol actualizado a {nuevo_rol.codigo}.",
+            "usuario": usuario_payload,
+            "auditoria_id": entrada_bitacora.id,
+        },
+        status=200,
     )
 
 

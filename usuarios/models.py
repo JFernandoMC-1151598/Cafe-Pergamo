@@ -269,4 +269,52 @@ class RegistroIntentoLogin(models.Model):
         return max(1, int(delta.total_seconds() / 60) + 1)
 
 
+# ==============================================================================
+# BITÁCORA DE CAMBIOS DE ROL (SCRUM-120 / HU04-ST5 - RF28)
+# ==============================================================================
+
+
+class BitacoraCambioRol(models.Model):
+    """
+    Bitácora de auditoría de reasignaciones de rol (RF28).
+
+    Igual que `RegistroIntentoLogin`, esta tabla es propia de Django
+    (`managed = True`), no del esquema RBAC administrado por Supabase:
+    es un registro de auditoría de la aplicación, no parte del dominio
+    de negocio. Por eso guarda una "foto" de los datos relevantes
+    (correo, códigos de rol) en vez de llaves foráneas hacia `Usuario`
+    — así el historial de auditoría sigue siendo legible aunque la
+    cuenta involucrada cambie de correo o sea eliminada más adelante.
+    """
+
+    usuario_id = models.UUIDField(
+        help_text="id (de auth.users / public.usuarios) de la cuenta cuyo rol cambió.",
+    )
+    usuario_correo = models.EmailField(
+        help_text="Correo de la cuenta en el momento del cambio.",
+    )
+    rol_anterior = models.CharField(max_length=50)
+    rol_nuevo = models.CharField(max_length=50)
+    realizado_por_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="id del administrador que ejecutó el cambio, si se pudo determinar.",
+    )
+    realizado_por_correo = models.EmailField(
+        null=True,
+        blank=True,
+        help_text="Correo del administrador que ejecutó el cambio.",
+    )
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        managed = True
+        db_table = "usuarios_bitacora_cambio_rol"
+        verbose_name = "Entrada de bitácora de cambio de rol"
+        verbose_name_plural = "Bitácora de cambios de rol"
+        ordering = ["-creado_en"]
+
+    def __str__(self):
+        return f"{self.usuario_correo}: {self.rol_anterior} → {self.rol_nuevo} ({self.creado_en:%Y-%m-%d %H:%M})"
 
