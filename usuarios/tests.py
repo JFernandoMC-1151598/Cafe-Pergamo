@@ -148,7 +148,7 @@ class AuthCredentialVerificationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data.get("status"), "success")
-        self.assertEqual(data["user"]["email"], self.email)
+        self.assertEqual(data["user"]["correo"], self.correo)
 
 
 class JwtSessionTokenGenerationTests(TestCase):
@@ -380,8 +380,13 @@ class AccountLockoutSecurityTests(TestCase):
         self.assertTrue(data_n1.get("locked"))
         self.assertIn("bloqueada temporalmente", data_n1.get("error", ""))
 
-    def test_successful_login_resets_counter(self):
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.get_supabase_client")
+    def test_successful_login_resets_counter(self, mock_get_client, mock_usuario_model):
         """3. Prueba que reinicia el contador de fallos a 0 tras un inicio de sesión exitoso."""
+        mock_get_client.return_value.auth.sign_in_with_password.side_effect = AuthApiError(
+            "Invalid login credentials", 400, "invalid_credentials"
+        )
         # Generar 3 intentos fallidos previos
         for i in range(3):
             self.client.post(
@@ -394,6 +399,13 @@ class AccountLockoutSecurityTests(TestCase):
         self.assertEqual(registro.failed_attempts, 3)
 
         # Inicio de sesión exitoso con credenciales correctas
+        mock_get_client.return_value.auth.sign_in_with_password.side_effect = None
+        mock_get_client.return_value.auth.sign_in_with_password.return_value.user = _fake_auth_user(
+            str(self.user.id), self.email
+        )
+        mock_usuario_model.objects.select_related.return_value.get.return_value = _fake_perfil(
+            str(self.user.id), self.email
+        )
         response = self.client.post(
             self.api_login_url,
             data=json.dumps({"email": self.email, "password": self.password}),
@@ -452,10 +464,19 @@ class AccountLockoutSecurityTests(TestCase):
         data = res_blocked.json()
         self.assertIn("bloqueada temporalmente", str(data))
 
-    def test_lockout_cooloff_automatic_expiration(self):
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.get_supabase_client")
+    def test_lockout_cooloff_automatic_expiration(self, mock_get_client, mock_usuario_model):
         """6. Prueba que la cuenta se desbloquea automáticamente cuando el período de bloqueo expira."""
         from django.utils import timezone
         from datetime import timedelta
+
+        mock_get_client.return_value.auth.sign_in_with_password.return_value.user = _fake_auth_user(
+            str(self.user.id), self.email
+        )
+        mock_usuario_model.objects.select_related.return_value.get.return_value = _fake_perfil(
+            str(self.user.id), self.email
+        )
 
         # Simular una cuenta bloqueada cuyo tiempo de bloqueo ya expiró (en el pasado)
         registro, _ = self.RegistroIntentoLogin.objects.get_or_create(
@@ -2014,4 +2035,433 @@ class RegistroUsuarioApiTests(TestCase):
         response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
 
         self.assertEqual(response.status_code, 500)
+
+
+# ==============================================================================
+# PRUEBAS HU02-ST6: SEGURIDAD DE SESIÓN Y PERSISTENCIA (QA)
+# ==============================================================================
+
+class SessionSecurityAndPersistenceTests(TestCase):
+    """
+    Pruebas automatizadas de QA y Seguridad para HU02-ST6:
+    Seguridad de sesión y persistencia.
+
+    Matriz de Cobertura de Criterios:
+    1. Acceso a rutas privadas sin token válido:
+       - Rechazo 401 si no hay cabecera Authorization en API protegida.
+       - Rechazo 401 con esquema de autenticación distinto a Bearer.
+       - Rechazo 401 con token malformado o payload ilegible.
+       - Rechazo 401 con token firmado con clave secreta errónea / firma alterada.
+       - Rechazo 403 Forbidden cuando el token es válido pero el rol carece del permiso RBAC.
+       - Redirección 302 a login al intentar acceder a pantalla web protegida sin sesión.
+       - Redirección 302 a home al acceder a pantalla web protegida con rol sin permisos.
+
+    2. Caducidad del token (Expiration):
+       - Access token con timestamp 'exp' vencido rechazado con 401.
+       - Refresh token con timestamp 'exp' vencido rechazado con 401 ('token_not_valid').
+       - Verificación de cumplimiento de tiempos de vida de tokens (ACCESS_TOKEN_LIFETIME = 60 min,
+         REFRESH_TOKEN_LIFETIME = 1 día, BLACKLIST_AFTER_ROTATION = True).
+
+    3. Cierre de sesión y persistencia:
+       - Cierre de sesión web vía POST /logout/ destruye sesión de Django, limpia cookies
+         e impide el acceso posterior a rutas protegidas.
+       - Cierre de sesión web vía GET es rechazado de forma segura preservando la sesión (anti-CSRF).
+       - Cierre de sesión API vía POST /api/auth/logout/ registra el refresh token en la
+         lista negra (BlacklistedToken) e impide volver a refrescar tokens con él.
+       - Persistencia de sesión web: verificación de expiración con y sin remember_me.
+
+    4. Respuesta ante credenciales erróneas:
+       - Contraseña incorrecta en POST /api/auth/login/ retorna 401 con mensaje genérico y sin tokens.
+       - Correo inexistente en POST /api/auth/login/ retorna 401 con respuesta genérica idéntica (anti-enumeración RNF07).
+       - Intentos fallidos incrementan progresivamente el registro de persistencia (RegistroIntentoLogin).
+       - Quinto intento fallido activa el bloqueo temporal de cuenta (403 con 'locked': True).
+       - Solicitud de login con campos vacíos retorna 400 Bad Request sin consultar backend.
+    """
+
+    def setUp(self):
+        import jwt
+        self.jwt = jwt
+        self.client = Client()
+
+        # URLs
+        self.login_url = reverse("login")
+        self.logout_url = reverse("logout")
+        self.api_login_url = reverse("api_auth_login")
+        self.api_logout_url = reverse("api_auth_logout")
+        self.token_obtain_url = reverse("token_obtain_pair")
+        self.token_refresh_url = reverse("token_refresh")
+        self.admin_usuarios_url = reverse("admin_usuarios")
+        self.test_user_id = "11111111-2222-3333-4444-555555555555"
+        self.api_role_url = reverse("api_actualizar_rol_usuario", kwargs={"user_id": self.test_user_id})
+
+        # Usuario de prueba en auth_user
+        self.username = "seguridad_qa_user"
+        self.email = "seguridad.qa@cafepergamo.com"
+        self.password = "Pergamo2026*QA_Secure!"
+        self.django_user = User.objects.create_user(
+            username=self.username,
+            email=self.email,
+            password=self.password,
+            first_name="Validador",
+            last_name="Seguridad",
+        )
+
+    # --------------------------------------------------------------------------
+    # 1. Rutas privadas sin token válido
+    # --------------------------------------------------------------------------
+
+    def test_private_api_route_without_authorization_header_returns_401(self):
+        """Verifica que invocar una API protegida sin header Authorization devuelva 401 Unauthorized."""
+        response = self.client.put(
+            self.api_role_url,
+            data=json.dumps({"rol": "ADMINISTRADOR"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json().get("error"),
+            "Se requiere un token de autenticación válido.",
+        )
+
+    def test_private_api_route_with_non_bearer_scheme_returns_401(self):
+        """Verifica que un esquema de autenticación no soportado (ej. Basic o Token) sea rechazado con 401."""
+        response = self.client.put(
+            self.api_role_url,
+            data=json.dumps({"rol": "ADMINISTRADOR"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Basic dXNlcm5hbWU6cGFzc3dvcmQ=",
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_private_api_route_with_malformed_token_returns_401(self):
+        """Verifica que un token JWT sintácticamente corrupto o truncado sea rechazado con 401."""
+        response = self.client.put(
+            self.api_role_url,
+            data=json.dumps({"rol": "ADMINISTRADOR"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer token.malformado.invalido123",
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json().get("error"),
+            "Se requiere un token de autenticación válido.",
+        )
+
+    def test_private_api_route_with_tampered_signature_returns_401(self):
+        """Verifica que un token firmado con una clave secreta ilegítima sea rechazado con 401."""
+        import time
+        payload = {
+            "token_type": "access",
+            "user_id": str(self.django_user.id),
+            "role_code": "ADMINISTRADOR",
+            "exp": int(time.time()) + 3600,
+            "iat": int(time.time()),
+            "jti": str(uuid.uuid4()),
+        }
+        tampered_token = self.jwt.encode(payload, "clave-secreta-totalmente-falsa", algorithm="HS256")
+        response = self.client.put(
+            self.api_role_url,
+            data=json.dumps({"rol": "ADMINISTRADOR"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {tampered_token}",
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json().get("error"),
+            "Se requiere un token de autenticación válido.",
+        )
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=False)
+    def test_private_api_route_with_valid_token_lacking_rbac_permission_returns_403(self, mock_rbac):
+        """Verifica que un token legítimo cuyo rol no posee el permiso exigido retorne 403 Forbidden."""
+        from rest_framework_simplejwt.tokens import AccessToken
+        token = AccessToken.for_user(self.django_user)
+        token["role_code"] = "PRODUCTOR"
+        response = self.client.put(
+            self.api_role_url,
+            data=json.dumps({"rol": "ADMINISTRADOR"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {str(token)}",
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.json().get("error"),
+            "No tiene permiso para acceder a este recurso.",
+        )
+
+    def test_private_web_route_without_session_redirects_to_login(self):
+        """Verifica que acceder a una vista web protegida sin sesión activa redirija al login con ?next=."""
+        response = self.client.get(self.admin_usuarios_url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(self.login_url, response.url)
+        self.assertIn(f"next={self.admin_usuarios_url}", response.url)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=False)
+    def test_private_web_route_with_session_lacking_permission_redirects_to_home(self, mock_rbac):
+        """Verifica que una sesión activa sin el permiso RBAC sea redirigida a home (RNF21)."""
+        self.client.force_login(self.django_user)
+        session = self.client.session
+        session["rol"] = "PRODUCTOR"
+        session.save()
+
+        response = self.client.get(self.admin_usuarios_url)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("home"))
+
+    # --------------------------------------------------------------------------
+    # 2. Caducidad del token (Expiration)
+    # --------------------------------------------------------------------------
+
+    def test_expired_access_token_rejected_on_private_route_returns_401(self):
+        """Verifica que un access token expirado sea rechazado inmediatamente con 401 en rutas privadas."""
+        import time
+        from django.conf import settings
+        payload = {
+            "token_type": "access",
+            "user_id": str(self.django_user.id),
+            "role_code": "ADMINISTRADOR",
+            "exp": int(time.time()) - 3600,  # Expiró hace 1 hora
+            "iat": int(time.time()) - 7200,
+            "jti": str(uuid.uuid4()),
+        }
+        expired_token = self.jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
+        response = self.client.put(
+            self.api_role_url,
+            data=json.dumps({"rol": "ADMINISTRADOR"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=f"Bearer {expired_token}",
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(
+            response.json().get("error"),
+            "Se requiere un token de autenticación válido.",
+        )
+
+    def test_expired_refresh_token_rejected_on_token_refresh_returns_401(self):
+        """Verifica que un refresh token expirado sea rechazado con 401 ('token_not_valid') al intentar refrescar."""
+        import time
+        from django.conf import settings
+        payload = {
+            "token_type": "refresh",
+            "user_id": str(self.django_user.id),
+            "exp": int(time.time()) - 3600,  # Expiró hace 1 hora
+            "iat": int(time.time()) - 7200,
+            "jti": str(uuid.uuid4()),
+        }
+        expired_refresh = self.jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
+        response = self.client.post(
+            self.token_refresh_url,
+            data=json.dumps({"refresh": expired_refresh}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+        data = response.json()
+        self.assertEqual(data.get("code"), "token_not_valid")
+
+    def test_jwt_lifetime_settings_compliance(self):
+        """Verifica que la configuración de SimpleJWT cumpla las directivas de seguridad del sistema."""
+        from datetime import timedelta
+        from django.conf import settings
+        simple_jwt = settings.SIMPLE_JWT
+
+        self.assertEqual(simple_jwt["ACCESS_TOKEN_LIFETIME"], timedelta(minutes=60))
+        self.assertEqual(simple_jwt["REFRESH_TOKEN_LIFETIME"], timedelta(days=1))
+        self.assertTrue(simple_jwt["BLACKLIST_AFTER_ROTATION"])
+        self.assertIn("Bearer", simple_jwt["AUTH_HEADER_TYPES"])
+
+    # --------------------------------------------------------------------------
+    # 3. Cierre de sesión y persistencia
+    # --------------------------------------------------------------------------
+
+    def test_web_logout_destroys_session_and_cleans_cookie(self):
+        """Verifica que POST /logout/ destruya la sesión, borre la cookie e impida acceder a rutas privadas."""
+        from django.conf import settings
+        self.client.force_login(self.django_user)
+        session = self.client.session
+        session["rol"] = "ADMINISTRADOR"
+        session.save()
+        self.assertIn("_auth_user_id", self.client.session)
+
+        response = self.client.post(self.logout_url)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self.login_url)
+
+        # La sesión queda destruida
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+        # La cookie de sesión se elimina o marca para expirar
+        cookie = response.cookies.get(settings.SESSION_COOKIE_NAME)
+        if cookie:
+            self.assertEqual(cookie.value, "")
+
+        # Petición posterior a ruta privada es rechazada y redirigida a login
+        protected_response = self.client.get(self.admin_usuarios_url)
+        self.assertEqual(protected_response.status_code, 302)
+        self.assertIn(self.login_url, protected_response.url)
+
+    def test_web_logout_via_get_is_rejected_safely(self):
+        """Verifica que una petición GET a /logout/ no cierre la sesión (protección contra ataques CSRF)."""
+        self.client.force_login(self.django_user)
+        response = self.client.get(self.logout_url)
+        self.assertEqual(response.status_code, 302)
+        # La sesión permanece intacta
+        self.assertIn("_auth_user_id", self.client.session)
+
+    def test_api_logout_blacklists_refresh_token_preventing_reuse(self):
+        """Verifica que el logout por API persista el refresh token en la lista negra e impida reusarlo."""
+        from rest_framework_simplejwt.tokens import RefreshToken
+        from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+
+        refresh = RefreshToken.for_user(self.django_user)
+        logout_res = self.client.post(
+            self.api_logout_url,
+            data=json.dumps({"refresh": str(refresh)}),
+            content_type="application/json",
+        )
+        self.assertEqual(logout_res.status_code, 200)
+        self.assertEqual(logout_res.json().get("status"), "success")
+
+        # El token queda registrado en la lista negra
+        self.assertTrue(
+            BlacklistedToken.objects.filter(token__token=str(refresh)).exists()
+        )
+
+        # Intentar refrescar tokens con el refresh token revocado es rechazado
+        refresh_res = self.client.post(
+            self.token_refresh_url,
+            data=json.dumps({"refresh": str(refresh)}),
+            content_type="application/json",
+        )
+        self.assertEqual(refresh_res.status_code, 401)
+        self.assertEqual(refresh_res.json().get("code"), "token_not_valid")
+
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.get_supabase_client")
+    def test_session_persistence_remember_me_policies(self, mock_get_client, mock_usuario):
+        """Verifica la persistencia de sesión: 2 semanas con remember_me, o borrado al cerrar navegador sin él."""
+        mock_get_client.return_value.auth.sign_in_with_password.return_value.user = _fake_auth_user(
+            str(self.django_user.id), self.email
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = _fake_perfil(
+            str(self.django_user.id), self.email, rol_codigo="ADMINISTRADOR"
+        )
+
+        # Caso A: con remember_me activado
+        client_remember = Client()
+        res_remember = client_remember.post(self.login_url, {
+            "email": self.email,
+            "password": self.password,
+            "remember_me": "on",
+        })
+        self.assertEqual(res_remember.status_code, 302)
+        self.assertEqual(client_remember.session.get_expiry_age(), 1209600)
+
+        # Caso B: sin remember_me (cierre de navegador)
+        client_normal = Client()
+        res_normal = client_normal.post(self.login_url, {
+            "email": self.email,
+            "password": self.password,
+        })
+        self.assertEqual(res_normal.status_code, 302)
+        self.assertTrue(client_normal.session.get_expire_at_browser_close())
+
+    # --------------------------------------------------------------------------
+    # 4. Respuesta ante credenciales erróneas
+    # --------------------------------------------------------------------------
+
+    @patch("usuarios.views.get_supabase_client")
+    def test_login_wrong_password_returns_401_generic_error_and_no_token(self, mock_get_client):
+        """Verifica que una contraseña incorrecta devuelva 401 con mensaje genérico y sin emitir tokens."""
+        mock_get_client.return_value.auth.sign_in_with_password.side_effect = AuthApiError(
+            "Invalid login credentials", 400, "invalid_credentials"
+        )
+        response = self.client.post(
+            self.api_login_url,
+            data=json.dumps({"email": self.email, "password": "WrongPassword123!"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+        data = response.json()
+        self.assertEqual(
+            data.get("error"),
+            "Correo electrónico o contraseña incorrectos. Por favor verifique sus datos.",
+        )
+        self.assertNotIn("access", data)
+        self.assertNotIn("refresh", data)
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    @patch("usuarios.views.get_supabase_client")
+    def test_login_nonexistent_email_returns_identical_generic_error_rnf07(self, mock_get_client):
+        """Verifica que un correo inexistente retorne el mensaje idéntico para evitar enumeración (RNF07)."""
+        mock_get_client.return_value.auth.sign_in_with_password.side_effect = AuthApiError(
+            "Invalid login credentials", 400, "invalid_credentials"
+        )
+        res_pwd = self.client.post(
+            self.api_login_url,
+            data=json.dumps({"email": self.email, "password": "BadPassword!"}),
+            content_type="application/json",
+        )
+        res_email = self.client.post(
+            self.api_login_url,
+            data=json.dumps({"email": "inexistente.total.999@cafepergamo.com", "password": "AnyPassword123!"}),
+            content_type="application/json",
+        )
+        self.assertEqual(res_pwd.status_code, 401)
+        self.assertEqual(res_email.status_code, 401)
+        self.assertEqual(res_pwd.json()["error"], res_email.json()["error"])
+        self.assertIn("incorrectos", res_pwd.json()["error"])
+
+    @patch("usuarios.views.get_supabase_client")
+    def test_login_failed_attempts_increment_persistence_and_trigger_lockout(self, mock_get_client):
+        """Verifica que intentos fallidos incrementen el registro y al 5to intento se bloquee la cuenta (RN03/EX-3)."""
+        from usuarios.models import RegistroIntentoLogin
+        mock_get_client.return_value.auth.sign_in_with_password.side_effect = AuthApiError(
+            "Invalid login credentials", 400, "invalid_credentials"
+        )
+        target_email = "lockout.qa@cafepergamo.com"
+
+        for i in range(1, 5):
+            res = self.client.post(
+                self.api_login_url,
+                data=json.dumps({"email": target_email, "password": f"BadPassword_{i}"}),
+                content_type="application/json",
+            )
+            self.assertEqual(res.status_code, 401)
+            reg = RegistroIntentoLogin.objects.get(identificador=target_email.lower())
+            self.assertEqual(reg.failed_attempts, i)
+            self.assertFalse(reg.is_locked)
+
+        # 5to intento consecutivo debe activar el bloqueo
+        res_lock = self.client.post(
+            self.api_login_url,
+            data=json.dumps({"email": target_email, "password": "BadPassword_5"}),
+            content_type="application/json",
+        )
+        self.assertEqual(res_lock.status_code, 403)
+        data_lock = res_lock.json()
+        self.assertTrue(data_lock.get("locked"))
+        self.assertIn("demasiados intentos", data_lock.get("error", ""))
+
+        reg = RegistroIntentoLogin.objects.get(identificador=target_email.lower())
+        self.assertEqual(reg.failed_attempts, 5)
+        self.assertTrue(reg.is_locked)
+
+    def test_login_empty_credentials_returns_400(self):
+        """Verifica que omitir credenciales sea rechazado con 400 Bad Request."""
+        res_empty_email = self.client.post(
+            self.api_login_url,
+            data=json.dumps({"email": "", "password": self.password}),
+            content_type="application/json",
+        )
+        self.assertEqual(res_empty_email.status_code, 400)
+        self.assertIn("obligatorios", res_empty_email.json().get("error", ""))
+
+        res_empty_password = self.client.post(
+            self.api_login_url,
+            data=json.dumps({"email": self.email, "password": ""}),
+            content_type="application/json",
+        )
+        self.assertEqual(res_empty_password.status_code, 400)
+        self.assertIn("obligatorios", res_empty_password.json().get("error", ""))
+
 
