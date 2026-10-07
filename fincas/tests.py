@@ -1,22 +1,149 @@
 """
 Pruebas Unitarias para HU-07: Registro de Georreferenciación - CAFÉ PÉRGAMO
 Subtarea: SCRUM-95 / HU07-ST1: Diseñar el campo opcional de coordenadas para georreferenciación.
+Subtarea: SCRUM-98 / HU07-ST5: Actualizar el modelo o esquema de datos para georreferenciación.
 
 Criterios de Aceptación Verificados:
-- Campos de latitud y longitud son opcionales en el formulario.
-- Inputs poseen placeholders indicativos de coordenadas decimales.
-- El formulario acepta envíos sin coordenadas (comportamiento cuando el campo no es informado).
-- La plantilla renderiza la nota de opcionalidad y las ayudas de entrada.
+- Campos `latitud` y `longitud` tipo DecimalField opcionales en el modelo Finca.
+- Nulabilidad a nivel de base de datos (null=True, blank=True).
+- Validación de rango [-90, 90] para latitud y [-180, 180] para longitud.
+- Persistencia de fincas tanto con coordenadas válidas como sin coordenadas (NULL).
 """
 
 from decimal import Decimal
+from django.core.exceptions import ValidationError
+from django.db import models
 from django.test import TestCase, Client
 from django.urls import reverse
-from fincas.forms import FincaRegistroForm, GeorreferenciacionFormMixin
+
+from fincas.models import Finca
+from fincas.forms import FincaRegistroForm, FincaModelForm, GeorreferenciacionFormMixin
+
+
+class TestGeorreferenciacionModelo(TestCase):
+    """Pruebas del modelo Finca y esquema de georreferenciación (HU07-ST5 / SCRUM-98)."""
+
+    def test_campos_latitud_y_longitud_son_decimalfield(self):
+        """Los campos deben estar definidos como DecimalField en el ORM."""
+        campo_lat = Finca._meta.get_field('latitud')
+        campo_lng = Finca._meta.get_field('longitud')
+
+        self.assertIsInstance(campo_lat, models.DecimalField)
+        self.assertIsInstance(campo_lng, models.DecimalField)
+        self.assertEqual(campo_lat.max_digits, 9)
+        self.assertEqual(campo_lat.decimal_places, 6)
+        self.assertEqual(campo_lng.max_digits, 9)
+        self.assertEqual(campo_lng.decimal_places, 6)
+
+    def test_campos_latitud_y_longitud_son_opcionales_en_modelo(self):
+        """Los campos deben permitir nulabilidad (null=True, blank=True)."""
+        campo_lat = Finca._meta.get_field('latitud')
+        campo_lng = Finca._meta.get_field('longitud')
+
+        self.assertTrue(campo_lat.null)
+        self.assertTrue(campo_lat.blank)
+        self.assertTrue(campo_lng.null)
+        self.assertTrue(campo_lng.blank)
+
+    def test_persistencia_finca_sin_coordenadas_exitoso(self):
+        """Una finca se puede persistir con coordenadas NULL (campo opcional)."""
+        finca = Finca.objects.create(
+            nombre="Finca El Silencio",
+            municipio="Toledo",
+            vereda="El Roble",
+            latitud=None,
+            longitud=None,
+        )
+
+        finca_guardada = Finca.objects.get(id=finca.id)
+        self.assertIsNone(finca_guardada.latitud)
+        self.assertIsNone(finca_guardada.longitud)
+        self.assertFalse(finca_guardada.tiene_georreferenciacion)
+
+    def test_persistencia_finca_con_coordenadas_validas_exitoso(self):
+        """Una finca se persiste correctamente con coordenadas decimales válidas."""
+        finca = Finca.objects.create(
+            nombre="Finca La Samaria",
+            municipio="Arboledas",
+            vereda="San José",
+            latitud=Decimal("7.893910"),
+            longitud=Decimal("-72.507820"),
+        )
+
+        finca_guardada = Finca.objects.get(id=finca.id)
+        self.assertEqual(finca_guardada.latitud, Decimal("7.893910"))
+        self.assertEqual(finca_guardada.longitud, Decimal("-72.507820"))
+        self.assertTrue(finca_guardada.tiene_georreferenciacion)
+
+    def test_validador_limites_latitud(self):
+        """La latitud debe rechazar valores menores a -90 o mayores a 90 grados."""
+        finca_invalida_max = Finca(
+            nombre="Finca Polo Norte",
+            municipio="Cúcuta",
+            latitud=Decimal("90.000001"),
+            longitud=Decimal("0.000000"),
+        )
+        with self.assertRaises(ValidationError):
+            finca_invalida_max.full_clean()
+
+        finca_invalida_min = Finca(
+            nombre="Finca Polo Sur",
+            municipio="Cúcuta",
+            latitud=Decimal("-90.000001"),
+            longitud=Decimal("0.000000"),
+        )
+        with self.assertRaises(ValidationError):
+            finca_invalida_min.full_clean()
+
+    def test_validador_limites_longitud(self):
+        """La longitud debe rechazar valores menores a -180 o mayores a 180 grados."""
+        finca_invalida_max = Finca(
+            nombre="Finca Este Extremo",
+            municipio="Cúcuta",
+            latitud=Decimal("7.000000"),
+            longitud=Decimal("180.000001"),
+        )
+        with self.assertRaises(ValidationError):
+            finca_invalida_max.full_clean()
+
+        finca_invalida_min = Finca(
+            nombre="Finca Oeste Extremo",
+            municipio="Cúcuta",
+            latitud=Decimal("7.000000"),
+            longitud=Decimal("-180.000001"),
+        )
+        with self.assertRaises(ValidationError):
+            finca_invalida_min.full_clean()
+
+    def test_finca_model_form_guarda_con_y_sin_coordenadas(self):
+        """El ModelForm permite guardar con y sin georreferenciación."""
+        # Caso sin coordenadas
+        form_sin_coords = FincaModelForm(data={
+            'nombre': 'Finca Modelo Sin Coords',
+            'municipio': 'Labateca',
+            'vereda': 'Centro',
+        })
+        self.assertTrue(form_sin_coords.is_valid(), f"Errores: {form_sin_coords.errors}")
+        finca_sin_coords = form_sin_coords.save()
+        self.assertIsNone(finca_sin_coords.latitud)
+        self.assertIsNone(finca_sin_coords.longitud)
+
+        # Caso con coordenadas
+        form_con_coords = FincaModelForm(data={
+            'nombre': 'Finca Modelo Con Coords',
+            'municipio': 'Salazar',
+            'vereda': 'La Playa',
+            'latitud': '7.771234',
+            'longitud': '-72.812345',
+        })
+        self.assertTrue(form_con_coords.is_valid(), f"Errores: {form_con_coords.errors}")
+        finca_con_coords = form_con_coords.save()
+        self.assertEqual(finca_con_coords.latitud, Decimal('7.771234'))
+        self.assertEqual(finca_con_coords.longitud, Decimal('-72.812345'))
 
 
 class TestGeorreferenciacionFormulario(TestCase):
-    """Pruebas del diseño del formulario y mixin de georreferenciación."""
+    """Pruebas del diseño del formulario y mixin de georreferenciación (HU07-ST1)."""
 
     def test_campos_de_coordenadas_son_opcionales(self):
         """Los campos de latitud y longitud no deben ser obligatorios (required=False)."""

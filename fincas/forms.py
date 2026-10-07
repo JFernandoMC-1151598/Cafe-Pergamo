@@ -1,9 +1,11 @@
 """
 Formularios para el módulo de Fincas y Georreferenciación - CAFÉ PÉRGAMO
 Subtarea: SCRUM-95 / HU07-ST1: Diseñar el campo opcional de coordenadas para georreferenciación.
+Subtarea: SCRUM-98 / HU07-ST5: Actualizar el modelo o esquema de datos para georreferenciación.
 """
 
 from django import forms
+from .models import Finca
 
 
 class GeorreferenciacionFormMixin(forms.Form):
@@ -64,7 +66,7 @@ class GeorreferenciacionFormMixin(forms.Form):
 
 class FincaRegistroForm(GeorreferenciacionFormMixin):
     """
-    Formulario completo para captura de datos de Finca, integrando
+    Formulario estándar para captura de datos de Finca, integrando
     los campos básicos prediales junto con la sección de georreferenciación opcional.
     """
 
@@ -106,3 +108,47 @@ class FincaRegistroForm(GeorreferenciacionFormMixin):
             }
         ),
     )
+
+
+class FincaModelForm(forms.ModelForm):
+    """
+    ModelForm enlazado directamente al modelo Finca (HU07-ST5).
+    Garantiza compatibilidad ORM y persistencia directa.
+    """
+
+    class Meta:
+        model = Finca
+        fields = ['nombre', 'municipio', 'vereda', 'latitud', 'longitud']
+        widgets = {
+            'nombre': forms.TextInput(attrs={
+                'class': 'form-control',
+                'id': 'id_nombre',
+                'placeholder': 'Ej: Finca La Esperanza',
+            }),
+            'municipio': forms.TextInput(attrs={
+                'class': 'form-control',
+                'id': 'id_municipio',
+                'placeholder': 'Ej: Toledo, Arboledas, Salazar...',
+            }),
+            'vereda': forms.TextInput(attrs={
+                'class': 'form-control',
+                'id': 'id_vereda',
+                'placeholder': 'Ej: Vereda El Silencio',
+            }),
+            'latitud': forms.NumberInput(attrs={
+                'class': 'form-control',
+                'id': 'id_latitud',
+                'step': 'any',
+                'min': '-90',
+                'max': '90',
+                'placeholder': 'Ej: 7.893910 (Grados decimales)',
+            }),
+            'longitud': forms.NumberInput(attrs={
+                'class': 'form-control',
+                'id': 'id_longitud',
+                'step': 'any',
+                'min': '-180',
+                'max': '180',
+                'placeholder': 'Ej: -72.507820 (Grados decimales)',
+            }),
+        }
