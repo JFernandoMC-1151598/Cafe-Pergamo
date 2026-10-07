@@ -516,4 +516,36 @@ main {
     color: var(--pergamo-primary-hover);
 }
 
+/* ==========================================================================
+   Módulo de Georreferenciación (HU-07 / SCRUM-95)
+   ========================================================================== */
+.card-georreferenciacion {
+    background: #FFFFFF;
+    border: 1px solid var(--pergamo-border) !important;
+    transition: box-shadow 0.25s ease, border-color 0.25s ease;
+}
+
+.card-georreferenciacion:focus-within {
+    border-color: var(--pergamo-accent) !important;
+    box-shadow: 0 4px 16px rgba(74, 44, 42, 0.08) !important;
+}
+
+.card-georreferenciacion .badge-opcional {
+    background-color: #F1EFEA !important;
+    color: #6C757D !important;
+    border-color: #DDD6CE !important;
+    font-size: 0.75rem;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+.icon-geo-wrapper {
+    background-color: rgba(45, 90, 39, 0.12) !important;
+    color: var(--pergamo-secondary) !important;
+}
+
+#geo-info-footer {
+    border-top-color: #F0EAE1 !important;
+}
+
 
