@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
     'usuarios',
     'fincas',
+    'actores',
 ]
 
 MIDDLEWARE = [
@@ -270,5 +271,4 @@ LOGIN_RESET_ON_SUCCESS = True
 AXES_FAILURE_LIMIT = LOGIN_FAILURE_LIMIT
 AXES_COOLOFF_TIME = LOGIN_COOLOFF_MINUTES / 60.0  # 0.25 horas = 15 minutos
 AXES_RESET_ON_SUCCESS = LOGIN_RESET_ON_SUCCESS
-
 
