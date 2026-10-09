@@ -537,3 +537,127 @@ class TestGuardarGeorreferenciacionBackend(TestCase):
         self.assertEqual(finca.latitud, Decimal("7.310000"))
         self.assertEqual(finca.longitud, Decimal("-72.490000"))
         self.assertTrue(finca.tiene_georreferenciacion)
+
+
+class TestScrum99PruebasGeorreferenciacion(TestCase):
+    """
+    Subtarea: SCRUM-99 / HU07-ST3: Pruebas de georreferenciación.
+    Criterio de Aceptación Cumplido (DoD):
+    "Tests unitarios de guardado con valores nulos, válidos y rechazo por coordenadas erróneas."
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_registro = reverse("finca_registro")
+
+    def test_dod_guardado_con_valores_validos(self):
+        """DoD Escenario 1: Guardado exitoso con coordenadas válidas."""
+        response = self.client.post(self.url_registro, {
+            "nombre": "Finca La Esperanza",
+            "municipio": "Toledo",
+            "vereda": "San Bernardo",
+            "latitud": "7.893910",
+            "longitud": "-72.507820",
+        })
+        self.assertEqual(response.status_code, 302)
+
+        finca = Finca.objects.get(nombre="Finca La Esperanza")
+        self.assertEqual(finca.latitud, Decimal("7.893910"))
+        self.assertEqual(finca.longitud, Decimal("-72.507820"))
+        self.assertTrue(finca.tiene_georreferenciacion)
+
+    def test_dod_guardado_con_valores_nulos_opcionales(self):
+        """DoD Escenario 2: Guardado exitoso con valores nulos (campo opcional)."""
+        response = self.client.post(self.url_registro, {
+            "nombre": "Finca El Cafetal",
+            "municipio": "Arboledas",
+            "vereda": "El Silencio",
+            "latitud": "",
+            "longitud": "",
+        })
+        self.assertEqual(response.status_code, 302)
+
+        finca = Finca.objects.get(nombre="Finca El Cafetal")
+        self.assertIsNone(finca.latitud)
+        self.assertIsNone(finca.longitud)
+        self.assertFalse(finca.tiene_georreferenciacion)
+
+    def test_dod_rechazo_por_coordenadas_erroneas_textos_no_numericos(self):
+        """DoD Escenario 3a: Rechazo por textos no numéricos en coordenadas."""
+        conteo_previo = Finca.objects.count()
+        response = self.client.post(self.url_registro, {
+            "nombre": "Finca Error Texto",
+            "municipio": "Salazar",
+            "latitud": "invalido",
+            "longitud": "otro_texto",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Finca.objects.count(), conteo_previo)
+        self.assertContains(response, "formato")
+
+    def test_dod_rechazo_por_coordenadas_erroneas_latitud_fuera_de_limites(self):
+        """DoD Escenario 3b: Rechazo por latitud fuera de rango [-90, 90]."""
+        conteo_previo = Finca.objects.count()
+        response = self.client.post(self.url_registro, {
+            "nombre": "Finca Latitud Invalida",
+            "municipio": "Salazar",
+            "latitud": "95.000000",
+            "longitud": "-72.500000",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Finca.objects.count(), conteo_previo)
+        self.assertContains(response, "fuera del rango")
+
+    def test_dod_rechazo_por_coordenadas_erroneas_longitud_fuera_de_limites(self):
+        """DoD Escenario 3c: Rechazo por longitud fuera de rango [-180, 180]."""
+        conteo_previo = Finca.objects.count()
+        response = self.client.post(self.url_registro, {
+            "nombre": "Finca Longitud Invalida",
+            "municipio": "Salazar",
+            "latitud": "7.500000",
+            "longitud": "-195.000000",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Finca.objects.count(), conteo_previo)
+        self.assertContains(response, "fuera del rango")
+
+    def test_dod_rechazo_por_coordenadas_erroneas_par_incompleto(self):
+        """DoD Escenario 3d: Rechazo cuando solo se provee una coordenada."""
+        conteo_previo = Finca.objects.count()
+        response = self.client.post(self.url_registro, {
+            "nombre": "Finca Par Incompleto",
+            "municipio": "Salazar",
+            "latitud": "7.893910",
+            "longitud": "",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Finca.objects.count(), conteo_previo)
+        self.assertContains(response, "debe ingresar también la longitud")
+
+    def test_dod_ciclo_completo_integracion_y_listado(self):
+        """DoD Escenario 4: Ciclo completo que verifica renderizado de fincas con y sin coordenadas."""
+        # 1. Crear finca sin coordenadas
+        self.client.post(self.url_registro, {
+            "nombre": "Predio Sin GPS",
+            "municipio": "Lourdes",
+            "latitud": "",
+            "longitud": "",
+        })
+
+        # 2. Crear finca con coordenadas
+        self.client.post(self.url_registro, {
+            "nombre": "Predio Con GPS",
+            "municipio": "Toledo",
+            "latitud": "7.300000",
+            "longitud": "-72.480000",
+        })
+
+        # 3. Consultar la pantalla y verificar que ambas se listan adecuadamente
+        response = self.client.get(self.url_registro)
+        self.assertEqual(response.status_code, 200)
+        contenido = response.content.decode("utf-8")
+
+        self.assertIn("Predio Sin GPS", contenido)
+        self.assertIn("NULL (Sin GPS)", contenido)
+        self.assertIn("Predio Con GPS", contenido)
+        self.assertIn("7.300000, -72.480000", contenido)
