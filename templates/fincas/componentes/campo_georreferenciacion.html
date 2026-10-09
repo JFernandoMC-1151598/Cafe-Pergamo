@@ -69,7 +69,7 @@ Criterios de Aceptación Cumplidos:
                         <i class="bi bi-compass"></i>
                     </span>
                     <input type="number" 
-                           class="form-control border-start-0 ps-1" 
+                           class="form-control border-start-0 ps-1 {% if form.latitud.errors %}is-invalid{% endif %}" 
                            id="id_latitud" 
                            name="latitud" 
                            step="any"
@@ -83,7 +83,12 @@ Criterios de Aceptación Cumplidos:
                 <div class="form-text small text-muted mt-1" id="latitud-help">
                     <i class="bi bi-question-circle me-1"></i>Formato decimal estándar WGS84. Entre <code>-90.000000</code> y <code>90.000000</code>.
                 </div>
-                <div class="invalid-feedback d-block d-none" id="latitud-feedback">
+                {% if form.latitud.errors %}
+                <div class="invalid-feedback d-block" id="latitud-backend-feedback">
+                    {{ form.latitud.errors.0 }}
+                </div>
+                {% endif %}
+                <div class="invalid-feedback d-none" id="latitud-feedback">
                     La latitud debe ser un valor decimal válido entre -90 y 90 grados.
                 </div>
             </div>
@@ -99,7 +104,7 @@ Criterios de Aceptación Cumplidos:
                         <i class="bi bi-compass-fill"></i>
                     </span>
                     <input type="number" 
-                           class="form-control border-start-0 ps-1" 
+                           class="form-control border-start-0 ps-1 {% if form.longitud.errors %}is-invalid{% endif %}" 
                            id="id_longitud" 
                            name="longitud" 
                            step="any" 
@@ -113,7 +118,12 @@ Criterios de Aceptación Cumplidos:
                 <div class="form-text small text-muted mt-1" id="longitud-help">
                     <i class="bi bi-question-circle me-1"></i>Formato decimal estándar WGS84. Entre <code>-180.000000</code> y <code>180.000000</code>.
                 </div>
-                <div class="invalid-feedback d-block d-none" id="longitud-feedback">
+                {% if form.longitud.errors %}
+                <div class="invalid-feedback d-block" id="longitud-backend-feedback">
+                    {{ form.longitud.errors.0 }}
+                </div>
+                {% endif %}
+                <div class="invalid-feedback d-none" id="longitud-feedback">
                     La longitud debe ser un valor decimal válido entre -180 y 180 grados.
                 </div>
             </div>

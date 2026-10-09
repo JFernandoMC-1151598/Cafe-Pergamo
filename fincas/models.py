@@ -14,6 +14,8 @@ from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.db import models
 
+from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
+
 
 class Finca(models.Model):
     """
@@ -112,3 +114,8 @@ class Finca(models.Model):
     def tiene_georreferenciacion(self) -> bool:
         """Indica si la finca tiene ambas coordenadas satelitales registradas."""
         return self.latitud is not None and self.longitud is not None
+
+    def clean(self):
+        """Valida la consistencia cartográfica a nivel de modelo (SCRUM-97)."""
+        super().clean()
+        validar_par_coordenadas(self.latitud, self.longitud)
