@@ -1,0 +1,141 @@
+{% comment %}
+Componente Reutilizable: Sección de Georreferenciación (HU-07 / SCRUM-95)
+Subtarea: HU07-ST1: Diseñar el campo opcional de coordenadas para georreferenciación.
+
+Criterios de Aceptación Cumplidos:
+- Inputs con placeholders indicativos de coordenadas decimales (Ej. 7.893910 y -72.507820).
+- Nota visual explícita indicando que el campo es opcional.
+- Ayudas de entrada (formato WGS84, límites de rango, botón de captura GPS interactivo).
+- Comportamiento transparente cuando no se informa (sin bloqueo ni errores obligatorios).
+{% endcomment %}
+
+<div class="card card-georreferenciacion border-0 shadow-sm rounded-4 mb-4" id="contenedor-georreferenciacion">
+    <div class="card-body p-4">
+        <!-- Encabezado de la Sección con Badge de Opcionalidad -->
+        <div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">
+            <div class="d-flex align-items-center gap-2">
+                <div class="icon-geo-wrapper bg-success-subtle text-success rounded-circle d-flex align-items-center justify-content-center" style="width: 40px; height: 40px;">
+                    <i class="bi bi-geo-alt-fill fs-5"></i>
+                </div>
+                <div>
+                    <h5 class="card-title mb-0 fw-bold text-dark d-flex align-items-center gap-2">
+                        Georreferenciación de la Finca
+                        <span class="badge badge-opcional bg-secondary-subtle text-secondary border border-secondary-subtle fw-semibold px-2 py-1" id="badge-opcional-geo">
+                            Opcional
+                        </span>
+                    </h5>
+                    <small class="text-muted">Ubicación satelital y cartográfica del predio cafetero</small>
+                </div>
+            </div>
+
+            <!-- Botones de Ayuda de Entrada Rápida -->
+            <div class="d-flex align-items-center gap-2">
+                <button type="button" class="btn btn-sm btn-outline-success d-flex align-items-center gap-1 shadow-sm" id="btn-detectar-gps" title="Obtener coordenadas usando el GPS de tu dispositivo">
+                    <i class="bi bi-crosshair"></i>
+                    <span>Capturar mi ubicación GPS</span>
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary d-none align-items-center gap-1 shadow-sm" id="btn-limpiar-geo" title="Borrar coordenadas ingresadas">
+                    <i class="bi bi-x-circle"></i>
+                    <span>Omitir / Limpiar</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Nota Explicativa de Campo Opcional y Valor para el Negocio -->
+        <div class="alert alert-light border border-info-subtle bg-info-subtle bg-opacity-25 rounded-3 py-2 px-3 mb-3 d-flex align-items-start gap-2" role="note" id="nota-informativa-geo">
+            <i class="bi bi-info-circle-fill text-info mt-1 flex-shrink-0"></i>
+            <div class="small text-secondary">
+                <span class="fw-semibold text-dark">Nota informativa:</span> 
+                Este campo <strong>no es obligatorio</strong>. Si no conoces o no tienes a la mano las coordenadas satelitales de tu finca en este momento, puedes registrar el predio sin ellas y completarlas cuando lo desees. Si las ingresas, ayudarán a verificar la denominación de origen y la trazabilidad de tus cosechas.
+            </div>
+        </div>
+
+        <!-- Alerta de estado interactivo (GPS o Validación) -->
+        <div id="geo-status-alert" class="alert d-none py-2 px-3 mb-3 small" role="alert">
+            <i class="bi bi-info-circle me-1" id="geo-status-icon"></i>
+            <span id="geo-status-text"></span>
+        </div>
+
+        <!-- Grilla de Inputs para Latitud y Longitud -->
+        <div class="row g-3">
+            <!-- Campo: Latitud Decimal -->
+            <div class="col-md-6">
+                <label for="id_latitud" class="form-label fw-semibold text-dark d-flex align-items-center justify-content-between">
+                    <span>Latitud (N / S)</span>
+                    <span class="badge bg-light text-muted border small fw-normal">[-90° a +90°]</span>
+                </label>
+                <div class="input-group">
+                    <span class="input-group-text bg-light text-muted border-end-0">
+                        <i class="bi bi-compass"></i>
+                    </span>
+                    <input type="number" 
+                           class="form-control border-start-0 ps-1 {% if form.latitud.errors %}is-invalid{% endif %}" 
+                           id="id_latitud" 
+                           name="latitud" 
+                           step="any"
+                           min="-90" 
+                           max="90" 
+                           placeholder="Ej: 7.893910 (Grados decimales)" 
+                           value="{{ form.latitud.value|default_if_none:'' }}"
+                           aria-describedby="latitud-help latitud-feedback"
+                           autocomplete="off">
+                </div>
+                <div class="form-text small text-muted mt-1" id="latitud-help">
+                    <i class="bi bi-question-circle me-1"></i>Formato decimal estándar WGS84. Entre <code>-90.000000</code> y <code>90.000000</code>.
+                </div>
+                {% if form.latitud.errors %}
+                <div class="invalid-feedback d-block" id="latitud-backend-feedback">
+                    {{ form.latitud.errors.0 }}
+                </div>
+                {% endif %}
+                <div class="invalid-feedback d-none" id="latitud-feedback">
+                    La latitud debe ser un valor decimal válido entre -90 y 90 grados.
+                </div>
+            </div>
+
+            <!-- Campo: Longitud Decimal -->
+            <div class="col-md-6">
+                <label for="id_longitud" class="form-label fw-semibold text-dark d-flex align-items-center justify-content-between">
+                    <span>Longitud (E / O)</span>
+                    <span class="badge bg-light text-muted border small fw-normal">[-180° a +180°]</span>
+                </label>
+                <div class="input-group">
+                    <span class="input-group-text bg-light text-muted border-end-0">
+                        <i class="bi bi-compass-fill"></i>
+                    </span>
+                    <input type="number" 
+                           class="form-control border-start-0 ps-1 {% if form.longitud.errors %}is-invalid{% endif %}" 
+                           id="id_longitud" 
+                           name="longitud" 
+                           step="any" 
+                           min="-180" 
+                           max="180" 
+                           placeholder="Ej: -72.507820 (Grados decimales)" 
+                           value="{{ form.longitud.value|default_if_none:'' }}"
+                           aria-describedby="longitud-help longitud-feedback"
+                           autocomplete="off">
+                </div>
+                <div class="form-text small text-muted mt-1" id="longitud-help">
+                    <i class="bi bi-question-circle me-1"></i>Formato decimal estándar WGS84. Entre <code>-180.000000</code> y <code>180.000000</code>.
+                </div>
+                {% if form.longitud.errors %}
+                <div class="invalid-feedback d-block" id="longitud-backend-feedback">
+                    {{ form.longitud.errors.0 }}
+                </div>
+                {% endif %}
+                <div class="invalid-feedback d-none" id="longitud-feedback">
+                    La longitud debe ser un valor decimal válido entre -180 y 180 grados.
+                </div>
+            </div>
+        </div>
+
+        <!-- Indicador de Comportamiento: Estado no informado / informado -->
+        <div class="d-flex align-items-center justify-content-between mt-3 pt-3 border-top text-muted small flex-wrap gap-2" id="geo-info-footer">
+            <div class="d-flex align-items-center gap-1" id="geo-resumen-estado">
+                <i class="bi bi-dash-circle text-secondary" id="geo-resumen-icon"></i>
+                <span id="geo-resumen-texto">Sin georreferenciación asignada (el predio se guardará sin coordenadas satelitales).</span>
+            </div>
+            <span class="text-secondary opacity-75 fst-italic">Sistema de Referencia Geodésico: WGS84 / EPSG:4326</span>
+        </div>
+    </div>
+</div>

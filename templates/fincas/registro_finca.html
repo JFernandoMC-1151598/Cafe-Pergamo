@@ -1,0 +1,149 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Registro de Finca — Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-8 col-xl-7">
+            <!-- Breadcrumb de Navegación -->
+            <nav aria-label="breadcrumb" class="mb-4">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{% url 'home' %}" class="text-decoration-none">Inicio</a></li>
+                    <li class="breadcrumb-item text-muted">Gestión de Predios</li>
+                    <li class="breadcrumb-item active" aria-current="page">Registro de Finca</li>
+                </ol>
+            </nav>
+
+            <div class="card border-0 shadow-sm rounded-4 overflow-hidden">
+                <!-- Encabezado del Formulario -->
+                <div class="card-header bg-white p-4 border-bottom">
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="bg-success text-white rounded-3 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+                            <i class="bi bi-pin-map-fill fs-4"></i>
+                        </div>
+                        <div>
+                            <h1 class="h4 mb-0 fw-bold text-dark">Registrar Nueva Finca</h1>
+                            <p class="text-muted small mb-0">Asocie sus predios cafeteros para vincular sus cosechas y lotes</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card-body p-4">
+                    {% if messages %}
+                        {% for message in messages %}
+                            <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+                                {{ message }}
+                                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                            </div>
+                        {% endfor %}
+                    {% endif %}
+
+                    <form method="POST" action="" id="formRegistroFinca" novalidate>
+                        {% csrf_token %}
+
+                        <!-- Sección 1: Datos Generales del Predio -->
+                        <h6 class="text-uppercase fw-bold text-muted small mb-3 letter-spacing-1">
+                            <i class="bi bi-card-heading me-1 text-primary"></i> 1. Información General del Predio
+                        </h6>
+
+                        <div class="mb-3">
+                            <label for="id_nombre" class="form-label fw-semibold text-dark">
+                                Nombre de la Finca <span class="text-danger">*</span>
+                            </label>
+                            <input type="text" class="form-control" id="id_nombre" name="nombre" 
+                                   placeholder="Ej: Finca La Esperanza" value="{{ form.nombre.value|default_if_none:'' }}" required>
+                            <div class="form-text small text-muted">Nombre distintivo con el que se identificará el predio.</div>
+                        </div>
+
+                        <div class="row g-3 mb-4">
+                            <div class="col-md-6">
+                                <label for="id_municipio" class="form-label fw-semibold text-dark">
+                                    Municipio <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="id_municipio" name="municipio" 
+                                       placeholder="Ej: Toledo, Arboledas, Salazar..." value="{{ form.municipio.value|default_if_none:'' }}" required>
+                                <div class="form-text small text-muted">Municipio productor en Norte de Santander.</div>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="id_vereda" class="form-label fw-semibold text-dark">
+                                    Vereda / Sector <span class="badge bg-secondary-subtle text-secondary small fw-normal">Opcional</span>
+                                </label>
+                                <input type="text" class="form-control" id="id_vereda" name="vereda" 
+                                       placeholder="Ej: Vereda El Silencio" value="{{ form.vereda.value|default_if_none:'' }}">
+                                <div class="form-text small text-muted">Ubicación local o veredal del predio.</div>
+                            </div>
+                        </div>
+
+                        <!-- Sección 2: Georreferenciación (HU-07 / HU07-ST1) -->
+                        <h6 class="text-uppercase fw-bold text-muted small mb-3 letter-spacing-1">
+                            <i class="bi bi-geo-alt me-1 text-success"></i> 2. Georreferenciación y Cartografía
+                        </h6>
+
+                        <!-- Inclusión del componente modular de georreferenciación -->
+                        {% include 'fincas/componentes/campo_georreferenciacion.html' %}
+
+                        <!-- Acciones del Formulario -->
+                        <div class="d-flex align-items-center justify-content-end gap-2 pt-3 border-top">
+                            <a href="{% url 'home' %}" class="btn btn-outline-secondary px-4">
+                                Cancelar
+                            </a>
+                            <button type="submit" class="btn btn-primary bg-primary px-4 fw-semibold" id="btn-guardar-finca">
+                                <i class="bi bi-check2-circle me-1"></i> Guardar Finca
+                            </button>
+                        </div>
+                    </form>
+
+                    {% if ultimas_fincas %}
+                    <hr class="my-4">
+                    <div class="mt-4">
+                        <h6 class="text-uppercase fw-bold text-muted small mb-3 letter-spacing-1">
+                            <i class="bi bi-clock-history me-1 text-secondary"></i> Fincas Registradas Recientemente
+                        </h6>
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle table-sm border rounded-3 overflow-hidden">
+                                <thead class="table-light">
+                                    <tr class="small text-muted">
+                                        <th>Finca</th>
+                                        <th>Municipio</th>
+                                        <th>Georreferenciación (BD)</th>
+                                        <th>Estado</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for f in ultimas_fincas %}
+                                    <tr>
+                                        <td class="fw-semibold text-dark">{{ f.nombre }}</td>
+                                        <td class="text-secondary small">{{ f.municipio }}{% if f.vereda %} ({{ f.vereda }}){% endif %}</td>
+                                        <td class="small">
+                                            {% if f.tiene_georreferenciacion %}
+                                            <span class="badge bg-success-subtle text-success border border-success-subtle">
+                                                <i class="bi bi-geo-alt-fill me-1"></i>{{ f.latitud }}, {{ f.longitud }}
+                                            </span>
+                                            {% else %}
+                                            <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">
+                                                <i class="bi bi-dash-circle me-1"></i>NULL (Sin GPS)
+                                            </span>
+                                            {% endif %}
+                                        </td>
+                                        <td>
+                                            <span class="badge bg-light text-muted border small">Activa</span>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/georreferenciacion.js' %}"></script>
+{% endblock %}

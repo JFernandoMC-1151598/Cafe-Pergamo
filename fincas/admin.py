@@ -1,10 +1,10 @@
 """
 Configuración del panel de administración para Fincas - CAFÉ PÉRGAMO
-Subtarea: SCRUM-87 / HU06-ST1.
+Subtarea: SCRUM-87 / HU06-ST1 (Fincas y Municipios).
+Subtarea: SCRUM-98 / HU07-ST5 (Georreferenciación).
 """
 
 from django.contrib import admin
-
 from .models import Finca, Municipio
 
 
