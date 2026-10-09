@@ -418,3 +418,122 @@ class TestGeorreferenciacionInterfazWeb(TestCase):
         self.assertEqual(response.status_code, 200)
         contenido = response.content.decode("utf-8")
         self.assertIn("fuera del rango", contenido)
+
+
+class TestGuardarGeorreferenciacionBackend(TestCase):
+    """
+    Pruebas para SCRUM-96: Guardar georreferenciación en backend.
+    DoD: La vista persiste las coordenadas en BD o almacena NULL si no se ingresaron.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_registro = reverse("finca_registro")
+        self.url_api = reverse("api_finca_crear")
+
+    def test_vista_post_persiste_finca_con_coordenadas_en_bd(self):
+        """Al enviar coordenadas válidas, la vista persiste los valores Decimal en BD."""
+        response = self.client.post(self.url_registro, {
+            "nombre": "Finca San Francisco",
+            "municipio": "Salazar",
+            "vereda": "La Playa",
+            "latitud": "7.893910",
+            "longitud": "-72.507820",
+        })
+        self.assertEqual(response.status_code, 302)
+
+        finca = Finca.objects.filter(nombre="Finca San Francisco").first()
+        self.assertIsNotNone(finca)
+        self.assertEqual(finca.latitud, Decimal("7.893910"))
+        self.assertEqual(finca.longitud, Decimal("-72.507820"))
+        self.assertTrue(finca.tiene_georreferenciacion)
+
+    def test_vista_post_persiste_finca_sin_coordenadas_almacena_null_en_bd(self):
+        """Al no ingresar coordenadas, la vista persiste la finca almacenando NULL en BD."""
+        response = self.client.post(self.url_registro, {
+            "nombre": "Finca Sin Coordenadas",
+            "municipio": "Arboledas",
+            "vereda": "Centro",
+            "latitud": "",
+            "longitud": "",
+        })
+        self.assertEqual(response.status_code, 302)
+
+        finca = Finca.objects.filter(nombre="Finca Sin Coordenadas").first()
+        self.assertIsNotNone(finca)
+        self.assertIsNone(finca.latitud)
+        self.assertIsNone(finca.longitud)
+        self.assertFalse(finca.tiene_georreferenciacion)
+
+    def test_vista_post_asocia_productor_en_sesion(self):
+        """Si el usuario está autenticado, la vista asocia request.user como productor."""
+        from django.contrib.auth.models import User
+        usuario = User.objects.create_user(username="productor_test", password="Password123!")
+        self.client.force_login(usuario)
+
+        response = self.client.post(self.url_registro, {
+            "nombre": "Finca con Productor Sesion",
+            "municipio": "Toledo",
+            "latitud": "7.300000",
+            "longitud": "-72.480000",
+        })
+        self.assertEqual(response.status_code, 302)
+
+        finca = Finca.objects.filter(nombre="Finca con Productor Sesion").first()
+        self.assertEqual(finca.productor, usuario)
+
+    def test_api_post_persiste_coordenadas_en_bd(self):
+        """Endpoint API guarda coordenadas y responde 201 Created."""
+        payload = {
+            "nombre": "Finca API Coords",
+            "municipio": "Lourdes",
+            "latitud": "7.945000",
+            "longitud": "-72.835000",
+        }
+        response = self.client.post(self.url_api, payload, content_type="application/json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["latitud"], "7.945000")
+        self.assertEqual(response.json()["longitud"], "-72.835000")
+        self.assertTrue(response.json()["tiene_georreferenciacion"])
+
+        finca = Finca.objects.get(id=response.json()["id"])
+        self.assertEqual(finca.latitud, Decimal("7.945000"))
+        self.assertEqual(finca.longitud, Decimal("-72.835000"))
+
+    def test_api_post_sin_coordenadas_almacena_null(self):
+        """Endpoint API guarda NULL cuando latitud y longitud son omitidos."""
+        payload = {
+            "nombre": "Finca API Sin Coords",
+            "municipio": "Bochalema",
+        }
+        response = self.client.post(self.url_api, payload, content_type="application/json")
+        self.assertEqual(response.status_code, 201)
+        self.assertIsNone(response.json()["latitud"])
+        self.assertIsNone(response.json()["longitud"])
+        self.assertFalse(response.json()["tiene_georreferenciacion"])
+
+        finca = Finca.objects.get(id=response.json()["id"])
+        self.assertIsNone(finca.latitud)
+        self.assertIsNone(finca.longitud)
+
+    def test_api_patch_actualiza_georreferenciacion(self):
+        """Endpoint API permite actualizar la georreferenciación de una finca existente."""
+        finca = Finca.objects.create(
+            nombre="Finca Previa Sin GPS",
+            municipio="Toledo",
+            latitud=None,
+            longitud=None,
+        )
+        url_detalle = reverse("api_finca_detalle", kwargs={"pk": finca.pk})
+
+        response = self.client.patch(
+            url_detalle,
+            {"latitud": "7.310000", "longitud": "-72.490000"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        finca.refresh_from_db()
+        self.assertEqual(finca.latitud, Decimal("7.310000"))
+        self.assertEqual(finca.longitud, Decimal("-72.490000"))
+        self.assertTrue(finca.tiene_georreferenciacion)
