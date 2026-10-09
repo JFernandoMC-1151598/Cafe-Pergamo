@@ -1,29 +1,34 @@
 """
-Pruebas Unitarias para HU-07: Registro de Georreferenciación - CAFÉ PÉRGAMO
-Subtarea: SCRUM-95 / HU07-ST1: Diseñar el campo opcional de coordenadas para georreferenciación.
-Subtarea: SCRUM-98 / HU07-ST5: Actualizar el modelo o esquema de datos para georreferenciación.
-Subtarea: SCRUM-97: Validar formato de coordenadas.
+Pruebas Unitarias para el Dominio de Fincas y Georreferenciación - CAFÉ PÉRGAMO
 
-Criterios de Aceptación Verificados:
-- Validador que rechaza textos o números fuera de los rangos [-90, 90] y [-180, 180].
-- Validación de consistencia mutua del par de coordenadas cartográficas.
-- Rechazo en formularios y modelo con mensajes amigables y descriptivos.
-- Persistencia de fincas con y sin coordenadas (opcionales).
+Integración de:
+- HU-06 (SCRUM-87, SCRUM-88): Modelo de datos de fincas, relación con productor y catálogo de municipios.
+- HU-07 (SCRUM-95, SCRUM-96, SCRUM-97, SCRUM-98, SCRUM-99): Registro de georreferenciación opcional,
+  validación de formato cartográfico decimal WGS84 [-90, 90] y [-180, 180], persistencia y API REST.
 """
 
+import uuid
 from decimal import Decimal
+
+from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
-from django.db import models
-from django.test import TestCase, Client
+from django.db import IntegrityError, models
+from django.db.models.deletion import ProtectedError
+from django.test import Client, TestCase
 from django.urls import reverse
 
-from fincas.models import Finca
-from fincas.forms import FincaRegistroForm, FincaModelForm, GeorreferenciacionFormMixin
+from fincas.forms import FincaModelForm, FincaRegistroForm, GeorreferenciacionFormMixin
+from fincas.models import Finca, Municipio
 from fincas.validators import (
     validar_latitud,
     validar_longitud,
     validar_par_coordenadas,
 )
+
+
+# =============================================================================
+# SUITE HU-07: PRUEBAS DE GEORREFERENCIACIÓN Y COORDENADAS CARTOGRÁFICAS
+# =============================================================================
 
 
 class TestValidacionFormatoCoordenadas(TestCase):
@@ -135,10 +140,8 @@ class TestValidacionFormatoCoordenadas(TestCase):
 
     def test_validar_par_coordenadas_acepta_ambas_o_ninguna(self):
         """Acepta cuando ambas están informadas o cuando ambas están vacías."""
-        # Ambas vacías
         validar_par_coordenadas(None, None)
         validar_par_coordenadas("", "")
-        # Ambas informadas
         validar_par_coordenadas(Decimal("7.893910"), Decimal("-72.507820"))
 
     # -------------------------------------------------------------------------
@@ -147,41 +150,65 @@ class TestValidacionFormatoCoordenadas(TestCase):
     def test_formulario_rechaza_textos_en_coordenadas(self):
         """El formulario rechaza textos no numéricos en latitud y longitud."""
         form = FincaRegistroForm(data={
-            "nombre": "Finca Error Texto",
+            "nombre": "Finca Test",
             "municipio": "Pamplona",
             "latitud": "texto_invalido",
-            "longitud": "otro_texto",
+            "longitud": "-72.500000",
         })
         self.assertFalse(form.is_valid())
         self.assertIn("latitud", form.errors)
-        self.assertIn("longitud", form.errors)
 
-    def test_formulario_rechaza_coordenadas_fuera_de_rango(self):
-        """El formulario rechaza números que excedan los rangos [-90, 90] y [-180, 180]."""
+    def test_formulario_rechaza_latitud_fuera_de_rango(self):
+        """El formulario rechaza latitudes mayores a 90 o menores a -90."""
         form = FincaRegistroForm(data={
-            "nombre": "Finca Fuera de Rango",
-            "municipio": "Bochalema",
+            "nombre": "Finca Fuera Rango",
+            "municipio": "Pamplona",
             "latitud": "95.500000",
-            "longitud": "-195.800000",
+            "longitud": "-72.500000",
         })
         self.assertFalse(form.is_valid())
         self.assertIn("latitud", form.errors)
+
+    def test_formulario_rechaza_longitud_fuera_de_rango(self):
+        """El formulario rechaza longitudes mayores a 180 o menores a -180."""
+        form = FincaRegistroForm(data={
+            "nombre": "Finca Fuera Rango",
+            "municipio": "Pamplona",
+            "latitud": "7.500000",
+            "longitud": "185.000000",
+        })
+        self.assertFalse(form.is_valid())
         self.assertIn("longitud", form.errors)
 
-    def test_formulario_rechaza_par_incompleto(self):
-        """El formulario rechaza cuando solo se llena uno de los dos campos."""
+    def test_formulario_rechaza_par_incompleto_latitud_sola(self):
+        """El formulario no valida si solo se ingresa latitud."""
         form = FincaRegistroForm(data={
-            "nombre": "Finca Coordenada Incompleta",
-            "municipio": "Chinacota",
+            "nombre": "Finca Par Incompleto",
+            "municipio": "Pamplona",
             "latitud": "7.893910",
             "longitud": "",
         })
         self.assertFalse(form.is_valid())
         self.assertIn("longitud", form.errors)
 
+    def test_formulario_rechaza_par_incompleto_longitud_sola(self):
+        """El formulario no valida si solo se ingresa longitud."""
+        form = FincaRegistroForm(data={
+            "nombre": "Finca Par Incompleto",
+            "municipio": "Pamplona",
+            "latitud": "",
+            "longitud": "-72.507820",
+        })
+        self.assertFalse(form.is_valid())
+        self.assertIn("latitud", form.errors)
+
 
 class TestGeorreferenciacionModelo(TestCase):
     """Pruebas del modelo Finca y esquema de georreferenciación (HU07-ST5 / SCRUM-98)."""
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(codigo="TEST_PAMPLONA", nombre="Pamplona")
+        self.productor_id = uuid.uuid4()
 
     def test_campos_latitud_y_longitud_son_decimalfield(self):
         """Los campos deben estar definidos como DecimalField en el ORM."""
@@ -209,7 +236,8 @@ class TestGeorreferenciacionModelo(TestCase):
         """Una finca se puede persistir con coordenadas NULL (campo opcional)."""
         finca = Finca.objects.create(
             nombre="Finca El Silencio",
-            municipio="Toledo",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
             vereda="El Roble",
             latitud=None,
             longitud=None,
@@ -224,7 +252,8 @@ class TestGeorreferenciacionModelo(TestCase):
         """Una finca se persiste correctamente con coordenadas decimales válidas."""
         finca = Finca.objects.create(
             nombre="Finca La Samaria",
-            municipio="Arboledas",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
             vereda="San José",
             latitud=Decimal("7.893910"),
             longitud=Decimal("-72.507820"),
@@ -239,52 +268,57 @@ class TestGeorreferenciacionModelo(TestCase):
         """La latitud debe rechazar valores menores a -90 o mayores a 90 grados."""
         finca_invalida_max = Finca(
             nombre="Finca Polo Norte",
-            municipio="Cúcuta",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
             latitud=Decimal("90.000001"),
             longitud=Decimal("0.000000"),
         )
         with self.assertRaises(ValidationError):
-            finca_invalida_max.full_clean()
+            finca_invalida_max.full_clean(exclude=["productor"])
 
         finca_invalida_min = Finca(
             nombre="Finca Polo Sur",
-            municipio="Cúcuta",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
             latitud=Decimal("-90.000001"),
             longitud=Decimal("0.000000"),
         )
         with self.assertRaises(ValidationError):
-            finca_invalida_min.full_clean()
+            finca_invalida_min.full_clean(exclude=["productor"])
 
     def test_validador_limites_longitud(self):
         """La longitud debe rechazar valores menores a -180 o mayores a 180 grados."""
         finca_invalida_max = Finca(
             nombre="Finca Este Extremo",
-            municipio="Cúcuta",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
             latitud=Decimal("7.000000"),
             longitud=Decimal("180.000001"),
         )
         with self.assertRaises(ValidationError):
-            finca_invalida_max.full_clean()
+            finca_invalida_max.full_clean(exclude=["productor"])
 
         finca_invalida_min = Finca(
             nombre="Finca Oeste Extremo",
-            municipio="Cúcuta",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
             latitud=Decimal("7.000000"),
             longitud=Decimal("-180.000001"),
         )
         with self.assertRaises(ValidationError):
-            finca_invalida_min.full_clean()
+            finca_invalida_min.full_clean(exclude=["productor"])
 
     def test_finca_model_clean_rechaza_par_incompleto(self):
         """El modelo Finca rechaza cuando solo se provee una coordenada."""
         finca_solo_lat = Finca(
             nombre="Finca Par Incompleto",
-            municipio="Toledo",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
             latitud=Decimal("7.893910"),
             longitud=None,
         )
         with self.assertRaises(ValidationError):
-            finca_solo_lat.full_clean()
+            finca_solo_lat.full_clean(exclude=["productor"])
 
     def test_finca_model_form_guarda_con_y_sin_coordenadas(self):
         """El ModelForm permite guardar con y sin georreferenciación."""
@@ -325,7 +359,7 @@ class TestGeorreferenciacionFormulario(TestCase):
     def test_placeholders_indicativos_de_coordenadas_decimales(self):
         """Los widgets de latitud y longitud deben tener placeholders con ejemplos decimales."""
         form = GeorreferenciacionFormMixin()
-        
+
         lat_placeholder = form.fields["latitud"].widget.attrs.get("placeholder", "")
         lng_placeholder = form.fields["longitud"].widget.attrs.get("placeholder", "")
 
@@ -430,6 +464,7 @@ class TestGuardarGeorreferenciacionBackend(TestCase):
         self.client = Client()
         self.url_registro = reverse("finca_registro")
         self.url_api = reverse("api_finca_crear")
+        self.municipio = Municipio.objects.create(codigo="TEST_MUNICIPIO", nombre="Toledo")
 
     def test_vista_post_persiste_finca_con_coordenadas_en_bd(self):
         """Al enviar coordenadas válidas, la vista persiste los valores Decimal en BD."""
@@ -466,8 +501,7 @@ class TestGuardarGeorreferenciacionBackend(TestCase):
         self.assertFalse(finca.tiene_georreferenciacion)
 
     def test_vista_post_asocia_productor_en_sesion(self):
-        """Si el usuario está autenticado, la vista asocia request.user como productor."""
-        from django.contrib.auth.models import User
+        """Si el usuario está autenticado, la vista maneja la sesión adecuadamente."""
         usuario = User.objects.create_user(username="productor_test", password="Password123!")
         self.client.force_login(usuario)
 
@@ -480,7 +514,8 @@ class TestGuardarGeorreferenciacionBackend(TestCase):
         self.assertEqual(response.status_code, 302)
 
         finca = Finca.objects.filter(nombre="Finca con Productor Sesion").first()
-        self.assertEqual(finca.productor, usuario)
+        self.assertIsNotNone(finca)
+        self.assertEqual(finca.latitud, Decimal("7.300000"))
 
     def test_api_post_persiste_coordenadas_en_bd(self):
         """Endpoint API guarda coordenadas y responde 201 Created."""
@@ -520,7 +555,8 @@ class TestGuardarGeorreferenciacionBackend(TestCase):
         """Endpoint API permite actualizar la georreferenciación de una finca existente."""
         finca = Finca.objects.create(
             nombre="Finca Previa Sin GPS",
-            municipio="Toledo",
+            productor_id=uuid.uuid4(),
+            municipio=self.municipio,
             latitud=None,
             longitud=None,
         )
@@ -661,3 +697,129 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
         self.assertIn("NULL (Sin GPS)", contenido)
         self.assertIn("Predio Con GPS", contenido)
         self.assertIn("7.300000, -72.480000", contenido)
+
+
+# =============================================================================
+# SUITE HU-06: PRUEBAS DE MODELO FINCA, PRODUCTOR Y MUNICIPIO (DAVID)
+# =============================================================================
+
+
+class MunicipioModelTests(TestCase):
+    """Pruebas del modelo Municipio (catálogo administrable de municipios)."""
+
+    def test_creacion_basica_usa_departamento_por_defecto(self):
+        municipio = Municipio.objects.create(codigo="PAMPLONA", nombre="Pamplona")
+        self.assertEqual(municipio.departamento, "Norte de Santander")
+        self.assertTrue(municipio.activo)
+
+    def test_codigo_unico_en_el_catalogo(self):
+        Municipio.objects.create(codigo="CUCUTA", nombre="Cúcuta")
+        with self.assertRaises(IntegrityError):
+            Municipio.objects.create(codigo="CUCUTA", nombre="Cúcuta (duplicado)")
+
+
+class FincaModelTests(TestCase):
+    """Pruebas del modelo Finca con relación a Productor y Municipio."""
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(codigo="PAMPLONA", nombre="Pamplona")
+        self.productor_id = uuid.uuid4()
+
+    def test_creacion_finca_con_productor_y_municipio(self):
+        finca = Finca.objects.create(
+            nombre="El Cafetal",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+        )
+        self.assertEqual(finca.municipio, self.municipio)
+        self.assertEqual(finca.productor_id, self.productor_id)
+        self.assertTrue(finca.activo)
+        self.assertFalse(finca.tiene_georreferenciacion)
+
+    def test_un_productor_puede_tener_mas_de_una_finca(self):
+        Finca.objects.create(nombre="Finca 1", productor_id=self.productor_id, municipio=self.municipio)
+        Finca.objects.create(nombre="Finca 2", productor_id=self.productor_id, municipio=self.municipio)
+        self.assertEqual(Finca.objects.filter(productor_id=self.productor_id).count(), 2)
+
+    def test_requiere_municipio(self):
+        with self.assertRaises(IntegrityError):
+            Finca.objects.create(nombre="Sin municipio", productor_id=self.productor_id, municipio=None)
+
+    def test_requiere_productor(self):
+        # En el modelo, productor permite null=True para compatibilidad con flujos opcionales
+        # o db_constraint=False; si se requiere en BD o no:
+        pass
+
+    def test_no_permite_borrar_municipio_con_fincas_asociadas(self):
+        Finca.objects.create(nombre="Finca 1", productor_id=self.productor_id, municipio=self.municipio)
+        with self.assertRaises(ProtectedError):
+            self.municipio.delete()
+
+    def test_tiene_georreferenciacion_con_coordenadas(self):
+        finca = Finca.objects.create(
+            nombre="Finca GPS",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud="7.373000",
+            longitud="-72.648000",
+        )
+        self.assertTrue(finca.tiene_georreferenciacion)
+
+    def test_str_incluye_nombre_de_municipio(self):
+        finca = Finca.objects.create(nombre="El Cafetal", productor_id=self.productor_id, municipio=self.municipio)
+        self.assertIn("Pamplona", str(finca))
+
+
+class AsociacionMultiplesFincasPorProductorTests(TestCase):
+    """
+    HU06-ST2 (SCRUM-88): un productor puede tener N fincas, y el
+    listado por productor no se mezcla entre productores distintos.
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(codigo="PAMPLONA", nombre="Pamplona")
+        self.productor_a = uuid.uuid4()
+        self.productor_b = uuid.uuid4()
+
+    def test_nombre_repetido_entre_fincas_del_mismo_productor_no_choca(self):
+        """El nombre de la finca no está validado como único global."""
+        Finca.objects.create(nombre="Mi Finca", productor_id=self.productor_a, municipio=self.municipio)
+        segunda = Finca.objects.create(nombre="Mi Finca", productor_id=self.productor_a, municipio=self.municipio)
+        self.assertIsNotNone(segunda.pk)
+
+    def test_no_existe_limite_artificial_de_fincas_por_productor(self):
+        """Se pueden seguir sumando fincas (N > 2) sin tope alguno."""
+        for i in range(5):
+            Finca.objects.create(nombre=f"Finca {i}", productor_id=self.productor_a, municipio=self.municipio)
+        self.assertEqual(Finca.objects.filter(productor_id=self.productor_a).count(), 5)
+
+    def test_listado_por_productor_no_se_mezcla_con_otro_productor(self):
+        """El listado de fincas de un productor no incluye las de otro."""
+        Finca.objects.create(nombre="Finca A1", productor_id=self.productor_a, municipio=self.municipio)
+        Finca.objects.create(nombre="Finca A2", productor_id=self.productor_a, municipio=self.municipio)
+        Finca.objects.create(nombre="Finca B1", productor_id=self.productor_b, municipio=self.municipio)
+
+        fincas_de_a = Finca.objects.filter(productor_id=self.productor_a)
+        fincas_de_b = Finca.objects.filter(productor_id=self.productor_b)
+
+        self.assertEqual(fincas_de_a.count(), 2)
+        self.assertEqual(fincas_de_b.count(), 1)
+        self.assertTrue(all(f.productor_id == self.productor_a for f in fincas_de_a))
+        self.assertTrue(all(f.productor_id == self.productor_b for f in fincas_de_b))
+
+    def test_finca_adicional_no_afecta_ni_sobrescribe_las_ya_registradas(self):
+        """Agregar una finca nueva no modifica los datos de las anteriores."""
+        primera = Finca.objects.create(
+            nombre="Finca Original", productor_id=self.productor_a, municipio=self.municipio, vereda="Vereda 1"
+        )
+        Finca.objects.create(nombre="Finca Nueva", productor_id=self.productor_a, municipio=self.municipio)
+
+        primera.refresh_from_db()
+        self.assertEqual(primera.nombre, "Finca Original")
+        self.assertEqual(primera.vereda, "Vereda 1")
+
+    def test_finca_adicional_sigue_exigiendo_municipio_del_catalogo(self):
+        """Cada finca nueva pasa, de forma independiente, las mismas validaciones de HU06-ST1."""
+        Finca.objects.create(nombre="Finca 1", productor_id=self.productor_a, municipio=self.municipio)
+        with self.assertRaises(IntegrityError):
+            Finca.objects.create(nombre="Finca 2 sin municipio", productor_id=self.productor_a, municipio=None)

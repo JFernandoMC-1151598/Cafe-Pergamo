@@ -4,6 +4,8 @@ Subtarea: SCRUM-95 / HU07-ST1: Diseñar el campo opcional de coordenadas para ge
 Subtarea: SCRUM-96: Guardar georreferenciación en backend.
 """
 
+import uuid
+
 from django.contrib import messages
 from django.http import JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
@@ -13,8 +15,9 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
 from .forms import FincaRegistroForm, FincaModelForm
-from .models import Finca
+from .models import Finca, Municipio
 from .serializers import FincaGeorreferenciacionSerializer
+from usuarios.models import Usuario
 
 
 def registrar_finca_view(request):
@@ -30,22 +33,40 @@ def registrar_finca_view(request):
         form = FincaRegistroForm(request.POST)
         if form.is_valid():
             nombre = form.cleaned_data["nombre"].strip()
-            municipio = form.cleaned_data["municipio"].strip()
+            municipio_val = form.cleaned_data["municipio"]
+            if isinstance(municipio_val, Municipio):
+                municipio_obj = municipio_val
+            else:
+                municipio_nombre = str(municipio_val).strip()
+                municipio_obj, _ = Municipio.objects.get_or_create(
+                    nombre__iexact=municipio_nombre,
+                    defaults={
+                        "nombre": municipio_nombre,
+                        "codigo": municipio_nombre.upper()[:20],
+                        "departamento": "Norte de Santander",
+                    },
+                )
+
             vereda = form.cleaned_data.get("vereda")
             vereda = vereda.strip() if vereda else ""
             latitud = form.cleaned_data.get("latitud")
             longitud = form.cleaned_data.get("longitud")
 
-            productor = request.user if request.user.is_authenticated else None
+            if request.user.is_authenticated and isinstance(request.user, Usuario):
+                productor_id = request.user.id
+            elif request.user.is_authenticated and hasattr(request.user, "pk"):
+                productor_id = getattr(request.user, "id", None) or uuid.uuid4()
+            else:
+                productor_id = uuid.uuid4()
 
             # Persistencia en base de datos (SCRUM-96)
             finca = Finca.objects.create(
                 nombre=nombre,
-                municipio=municipio,
+                municipio=municipio_obj,
                 vereda=vereda,
                 latitud=latitud,      # Decimal o None (NULL en BD)
                 longitud=longitud,    # Decimal o None (NULL en BD)
-                productor=productor,
+                productor_id=productor_id,
             )
 
             if finca.tiene_georreferenciacion:
@@ -89,8 +110,14 @@ def api_crear_finca_view(request):
     """
     serializer = FincaGeorreferenciacionSerializer(data=request.data)
     if serializer.is_valid():
-        productor = request.user if request.user.is_authenticated else None
-        finca = serializer.save(productor=productor)
+        if request.user.is_authenticated and isinstance(request.user, Usuario):
+            productor_id = request.user.id
+        elif request.user.is_authenticated and hasattr(request.user, "pk"):
+            productor_id = getattr(request.user, "id", None) or uuid.uuid4()
+        else:
+            productor_id = uuid.uuid4()
+
+        finca = serializer.save(productor_id=productor_id)
         return Response(
             FincaGeorreferenciacionSerializer(finca).data,
             status=status.HTTP_201_CREATED,

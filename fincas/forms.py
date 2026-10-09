@@ -5,9 +5,11 @@ Subtarea: SCRUM-98 / HU07-ST5: Actualizar el modelo o esquema de datos para geor
 Subtarea: SCRUM-97: Validar formato de coordenadas.
 """
 
+import uuid
 from decimal import Decimal
 from django import forms
-from .models import Finca
+from .models import Finca, Municipio
+
 from .validators import (
     validar_latitud,
     validar_longitud,
@@ -17,6 +19,7 @@ from .validators import (
     LONGITUD_MIN,
     LONGITUD_MAX,
 )
+
 
 
 class GeorreferenciacionFormMixin(forms.Form):
@@ -150,6 +153,16 @@ class FincaModelForm(forms.ModelForm):
     Garantiza compatibilidad ORM y persistencia directa con validación SCRUM-97.
     """
 
+    municipio = forms.CharField(
+        max_length=100,
+        required=True,
+        widget=forms.TextInput(attrs={
+            "class": "form-control",
+            "id": "id_municipio",
+            "placeholder": "Ej: Toledo, Arboledas, Salazar...",
+        }),
+    )
+
     class Meta:
         model = Finca
         fields = ["nombre", "municipio", "vereda", "latitud", "longitud"]
@@ -158,11 +171,6 @@ class FincaModelForm(forms.ModelForm):
                 "class": "form-control",
                 "id": "id_nombre",
                 "placeholder": "Ej: Finca La Esperanza",
-            }),
-            "municipio": forms.TextInput(attrs={
-                "class": "form-control",
-                "id": "id_municipio",
-                "placeholder": "Ej: Toledo, Arboledas, Salazar...",
             }),
             "vereda": forms.TextInput(attrs={
                 "class": "form-control",
@@ -187,9 +195,35 @@ class FincaModelForm(forms.ModelForm):
             }),
         }
 
+    def clean_municipio(self):
+        val = self.cleaned_data.get("municipio")
+        if isinstance(val, Municipio):
+            return val
+        if not val:
+            raise forms.ValidationError("El municipio es obligatorio.")
+        mun_nombre = str(val).strip()
+        mun, _ = Municipio.objects.get_or_create(
+            nombre__iexact=mun_nombre,
+            defaults={
+                "nombre": mun_nombre,
+                "codigo": mun_nombre.upper()[:20],
+                "departamento": "Norte de Santander",
+            },
+        )
+        return mun
+
     def clean(self):
         cleaned_data = super().clean()
         lat = cleaned_data.get("latitud")
         lng = cleaned_data.get("longitud")
         validar_par_coordenadas(lat, lng)
         return cleaned_data
+
+    def save(self, commit=True, productor_id=None):
+        instance = super().save(commit=False)
+        if not instance.productor_id:
+            instance.productor_id = productor_id or uuid.uuid4()
+        if commit:
+            instance.save()
+        return instance
+

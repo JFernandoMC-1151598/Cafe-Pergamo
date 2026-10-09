@@ -1,29 +1,54 @@
 """
 Modelos para el dominio de Fincas y Georreferenciación - CAFÉ PÉRGAMO
+Subtarea: SCRUM-87 / HU06-ST1: Definir modelo de datos para fincas y relación con productor y municipio.
 Subtarea: SCRUM-98 / HU07-ST5: Actualizar el modelo o esquema de datos para georreferenciación.
+Subtarea: SCRUM-97: Validar formato de coordenadas.
 
-Criterios de Aceptación Cumplidos:
-- Campos `latitud` y `longitud` tipo DecimalField opcionales (null=True, blank=True) en el modelo Finca.
-- Rango de validación geográfica: Latitud [-90, 90] y Longitud [-180, 180].
-- Soporte para precisión de hasta 6 decimales estándar en geolocalización satelital (WGS84).
-- Nulabilidad explícita para garantizar persistencia sin coordenadas cuando el campo no es informado.
+Cubre:
+- RF06: registrar fincas asociadas a cada productor (perfil usuarios.Usuario).
+- RF07: almacenar el municipio de cada finca referenciando el catálogo administrable Municipio.
+- RF08 / HU07: campos opcionales de georreferenciación (latitud y longitud WGS84) con validación cartográfica.
 """
 
 from decimal import Decimal
-from django.conf import settings
-from django.core.validators import MinValueValidator, MaxValueValidator
+
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
+from usuarios.models import Usuario
 from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
 
 
+class Municipio(models.Model):
+    """
+    Catálogo administrable de municipios donde pueden ubicarse las fincas
+    (RF07; RNF20 -- catálogos administrables sin tocar código fuente).
+    """
+
+    id = models.SmallAutoField(primary_key=True)
+    codigo = models.CharField(
+        max_length=20,
+        unique=True,
+        help_text="Código corto o DANE del municipio (p. ej. 'PAMPLONA').",
+    )
+    nombre = models.CharField(max_length=100)
+    departamento = models.CharField(max_length=100, default="Norte de Santander")
+    activo = models.BooleanField(default=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        managed = True
+        db_table = "municipios"
+        verbose_name = "Municipio"
+        verbose_name_plural = "Municipios"
+        ordering = ["nombre"]
+
+    def __str__(self):
+        return f"{self.nombre} ({self.departamento})"
+
+
 class Finca(models.Model):
-    """
-    Modelo representativo de un predio o finca cafetera.
-    
-    Permite registrar la información predial básica y georreferenciación satelital
-    opcional para garantizar la trazabilidad de origen de cosechas y lotes.
-    """
+    """Predio o finca cafetera: entidad raíz de la trazabilidad (RF06, RF07, RF08)."""
 
     nombre = models.CharField(
         max_length=150,
@@ -32,19 +57,20 @@ class Finca(models.Model):
     )
 
     productor = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
+        Usuario,
+        on_delete=models.PROTECT,
+        db_constraint=False,
         related_name="fincas",
-        null=True,
-        blank=True,
-        verbose_name="Productor asignado",
-        help_text="Usuario propietario o responsable de la finca.",
+        verbose_name="Productor",
+        help_text="Perfil de negocio (usuarios.Usuario) dueño/responsable de la finca (RF06).",
     )
 
-    municipio = models.CharField(
-        max_length=100,
+    municipio = models.ForeignKey(
+        Municipio,
+        on_delete=models.PROTECT,
+        related_name="fincas",
         verbose_name="Municipio",
-        help_text="Municipio donde está ubicada la finca (Norte de Santander).",
+        help_text="Municipio del catálogo donde está ubicada la finca (RF07).",
     )
 
     vereda = models.CharField(
@@ -55,9 +81,9 @@ class Finca(models.Model):
         help_text="Vereda o sector opcional de ubicación predial.",
     )
 
-    # =========================================================================
-    # CAMPOS DE GEORREFERENCIACIÓN (HU-07 / SCRUM-98 / HU07-ST5)
-    # =========================================================================
+    # ------------------------------------------------------------------
+    # Georreferenciación opcional (RF08 / HU07 / SCRUM-98 / SCRUM-97)
+    # ------------------------------------------------------------------
     latitud = models.DecimalField(
         max_digits=9,
         decimal_places=6,
@@ -66,9 +92,10 @@ class Finca(models.Model):
         validators=[
             MinValueValidator(Decimal("-90.000000")),
             MaxValueValidator(Decimal("90.000000")),
+            validar_latitud,
         ],
         verbose_name="Latitud geográfica",
-        help_text="Coordenada decimal de latitud [-90.000000, 90.000000]. Campo opcional.",
+        help_text="Coordenada decimal de latitud [-90, 90]. Campo opcional (RF08).",
     )
 
     longitud = models.DecimalField(
@@ -79,36 +106,27 @@ class Finca(models.Model):
         validators=[
             MinValueValidator(Decimal("-180.000000")),
             MaxValueValidator(Decimal("180.000000")),
+            validar_longitud,
         ],
         verbose_name="Longitud geográfica",
-        help_text="Coordenada decimal de longitud [-180.000000, 180.000000]. Campo opcional.",
+        help_text="Coordenada decimal de longitud [-180, 180]. Campo opcional (RF08).",
     )
 
-    activo = models.BooleanField(
-        default=True,
-        verbose_name="Finca activa",
-        help_text="Indica si la finca se encuentra operativa en el sistema.",
-    )
-
-    creado_en = models.DateTimeField(
-        auto_now_add=True,
-        verbose_name="Fecha de registro",
-    )
-
-    actualizado_en = models.DateTimeField(
-        auto_now=True,
-        verbose_name="Última actualización",
-    )
+    activo = models.BooleanField(default=True, verbose_name="Finca activa")
+    creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de registro")
+    actualizado_en = models.DateTimeField(auto_now=True, verbose_name="Última actualización")
 
     class Meta:
+        managed = True
         db_table = "fincas"
         verbose_name = "Finca"
         verbose_name_plural = "Fincas"
         ordering = ["-creado_en"]
 
     def __str__(self):
+        municipio_str = self.municipio.nombre if self.municipio else "Sin municipio"
         coords = f" [{self.latitud}, {self.longitud}]" if self.tiene_georreferenciacion else " [Sin GPS]"
-        return f"{self.nombre} ({self.municipio}){coords}"
+        return f"{self.nombre} ({municipio_str}){coords}"
 
     @property
     def tiene_georreferenciacion(self) -> bool:
