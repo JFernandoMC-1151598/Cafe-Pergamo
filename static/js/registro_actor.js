@@ -1,9 +1,7 @@
 /**
  * Validación visual del formulario de actores de la cadena (HU08-ST4).
  *
- * El envío al backend se incorporará en HU08-ST5. En esta etapa se
- * valida la interacción del formulario sin realizar una petición de
- * persistencia.
+ * La persistencia se realiza en el endpoint Django protegido por RBAC.
  */
 document.addEventListener('DOMContentLoaded', function () {
     const form = document.getElementById('actorCadenaForm');
@@ -93,8 +91,6 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 
     form.addEventListener('submit', function (event) {
-        event.preventDefault();
-
         const camposInvalidos = fields.filter(function (field) {
             if (field === telefono) return !validarTelefono();
             if (field === correo) return !validarCorreo();
@@ -107,15 +103,12 @@ document.addEventListener('DOMContentLoaded', function () {
         });
 
         if (camposInvalidos.length > 0) {
+            event.preventDefault();
             generalAlert.classList.remove('d-none', 'alert-success');
             generalAlert.classList.add('alert-danger');
             generalAlertMessage.textContent = 'Revise los campos marcados antes de continuar.';
             camposInvalidos[0].focus();
             return;
         }
-
-        generalAlert.classList.remove('d-none', 'alert-danger');
-        generalAlert.classList.add('alert-info');
-        generalAlertMessage.textContent = 'Formulario válido. El registro se conectará al servidor en la siguiente etapa.';
     });
 });
