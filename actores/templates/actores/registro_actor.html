@@ -3,8 +3,6 @@
 
 {% block title %}Registrar actor de la cadena — Café Pérgamo{% endblock %}
 
-{% block messages %}{% endblock %}
-
 {% block content %}
 <div class="auth-wrapper py-5">
     <div class="auth-container-wide">
@@ -25,6 +23,12 @@
                     </p>
                 </div>
 
+                {% if form.non_field_errors %}
+                    <div class="alert alert-danger" role="alert" aria-live="polite">
+                        {{ form.non_field_errors }}
+                    </div>
+                {% endif %}
+
                 <div id="general-alert" class="alert alert-danger d-none" role="alert" aria-live="polite">
                     <i class="bi bi-exclamation-triangle-fill me-2"></i>
                     <span id="general-alert-message">
@@ -39,13 +43,14 @@
                         <label for="tipo" class="form-label">
                             Tipo de actor <span class="text-danger">*</span>
                         </label>
-                        <select class="form-select" id="tipo" name="tipo" required>
-                            <option value="" selected disabled>Seleccione un tipo...</option>
-                            <option value="ASOCIACION">Asociación</option>
-                            <option value="COOPERATIVA">Cooperativa</option>
-                            <option value="COMERCIALIZADOR">Comercializador</option>
+                        <select class="form-select{% if form.tipo.errors %} is-invalid{% endif %}" id="tipo" name="tipo" required>
+                            <option value="" {% if not form.tipo.value %}selected{% endif %} disabled>Seleccione un tipo...</option>
+                            <option value="ASOCIACION" {% if form.tipo.value == "ASOCIACION" %}selected{% endif %}>Asociación</option>
+                            <option value="COOPERATIVA" {% if form.tipo.value == "COOPERATIVA" %}selected{% endif %}>Cooperativa</option>
+                            <option value="COMERCIALIZADOR" {% if form.tipo.value == "COMERCIALIZADOR" %}selected{% endif %}>Comercializador</option>
                         </select>
                         <div class="invalid-feedback">Seleccione un tipo de actor.</div>
+                        {% if form.tipo.errors %}<div class="invalid-feedback d-block">{{ form.tipo.errors|striptags }}</div>{% endif %}
                     </div>
 
                     <div class="mb-3">
@@ -54,15 +59,17 @@
                         </label>
                         <input
                             type="text"
-                            class="form-control"
+                            class="form-control{% if form.razon_social.errors %} is-invalid{% endif %}"
                             id="razon_social"
                             name="razon_social"
                             maxlength="200"
                             autocomplete="organization"
                             placeholder="Ej. Asociación Cafetera de Norte de Santander"
+                            value="{{ form.razon_social.value|default:'' }}"
                             required
                         >
                         <div class="invalid-feedback">La razón social es obligatoria.</div>
+                        {% if form.razon_social.errors %}<div class="invalid-feedback d-block">{{ form.razon_social.errors|striptags }}</div>{% endif %}
                     </div>
 
                     <div class="row g-3 mb-3">
@@ -72,15 +79,17 @@
                             </label>
                             <input
                                 type="text"
-                                class="form-control"
+                                class="form-control{% if form.nit.errors %} is-invalid{% endif %}"
                                 id="nit"
                                 name="nit"
                                 maxlength="30"
                                 autocomplete="off"
                                 placeholder="Ej. 900123456-7"
+                                value="{{ form.nit.value|default:'' }}"
                                 required
                             >
                             <div class="invalid-feedback">El NIT es obligatorio.</div>
+                            {% if form.nit.errors %}<div class="invalid-feedback d-block">{{ form.nit.errors|striptags }}</div>{% endif %}
                         </div>
                         <div class="col-md-6">
                             <label for="contacto" class="form-label">
@@ -88,15 +97,17 @@
                             </label>
                             <input
                                 type="text"
-                                class="form-control"
+                                class="form-control{% if form.contacto.errors %} is-invalid{% endif %}"
                                 id="contacto"
                                 name="contacto"
                                 maxlength="150"
                                 autocomplete="name"
                                 placeholder="Ej. Carlos Pérez"
+                                value="{{ form.contacto.value|default:'' }}"
                                 required
                             >
                             <div class="invalid-feedback">El contacto es obligatorio.</div>
+                            {% if form.contacto.errors %}<div class="invalid-feedback d-block">{{ form.contacto.errors|striptags }}</div>{% endif %}
                         </div>
                     </div>
 
@@ -107,30 +118,34 @@
                             </label>
                             <input
                                 type="email"
-                                class="form-control"
+                                class="form-control{% if form.correo.errors %} is-invalid{% endif %}"
                                 id="correo"
                                 name="correo"
                                 maxlength="254"
                                 autocomplete="email"
                                 placeholder="contacto@organizacion.com"
+                                value="{{ form.correo.value|default:'' }}"
                                 required
                             >
                             <div class="invalid-feedback" id="correo-feedback">
                                 Ingrese un correo electrónico válido.
                             </div>
+                            {% if form.correo.errors %}<div class="invalid-feedback d-block">{{ form.correo.errors|striptags }}</div>{% endif %}
                         </div>
                         <div class="col-md-6">
                             <label for="telefono" class="form-label">Teléfono</label>
                             <input
                                 type="tel"
-                                class="form-control"
+                                class="form-control{% if form.telefono.errors %} is-invalid{% endif %}"
                                 id="telefono"
                                 name="telefono"
                                 maxlength="30"
                                 autocomplete="tel"
+                                value="{{ form.telefono.value|default:'' }}"
                                 placeholder="Ej. 3001234567"
                             >
                             <div class="invalid-feedback">Ingrese un teléfono válido.</div>
+                            {% if form.telefono.errors %}<div class="invalid-feedback d-block">{{ form.telefono.errors|striptags }}</div>{% endif %}
                         </div>
                     </div>
 

@@ -46,7 +46,7 @@ from functools import wraps
 from typing import Iterable, Union
 
 from django.contrib import messages
-from django.http import JsonResponse
+from django.http import HttpResponseForbidden, JsonResponse
 from django.shortcuts import redirect
 from django.urls import reverse
 from rest_framework.permissions import BasePermission
@@ -197,7 +197,11 @@ def permiso_requerido(permiso_codigo: CodigoPermiso):
     return decorador
 
 
-def permiso_requerido_sesion(permiso_codigo: CodigoPermiso):
+def permiso_requerido_sesion(
+    permiso_codigo: CodigoPermiso,
+    *,
+    forbidden_on_denied: bool = False,
+):
     """
     "Guard" de navegación RBAC para páginas web renderizadas por el
     servidor (HU04-ST3), apoyado en la sesión de Django en vez de un
@@ -208,10 +212,14 @@ def permiso_requerido_sesion(permiso_codigo: CodigoPermiso):
 
     A diferencia de esos dos (pensados para endpoints de API, que
     responden JSON), esta vista es para páginas que un usuario navega
-    directamente, así que responde de forma consistente con el resto
-    del sitio (ver login_view/registro_view): un mensaje flash con
-    `django.contrib.messages` y una redirección, no un código de error
-    HTTP crudo.
+    directamente, así que por defecto responde de forma consistente con
+    el resto del sitio (ver login_view/registro_view): un mensaje flash
+    con `django.contrib.messages` y una redirección.
+
+    Las vistas que requieren un contrato HTTP explícito de autorización
+    pueden activar `forbidden_on_denied=True`: una sesión autenticada
+    sin el permiso recibe 403 Forbidden, mientras una sesión no iniciada
+    conserva la redirección al login.
 
       - Sin sesión iniciada: redirige a 'login' conservando la URL
         original en '?next=' para volver ahí después de autenticarse.
@@ -233,6 +241,8 @@ def permiso_requerido_sesion(permiso_codigo: CodigoPermiso):
 
             role_code = request.session.get("rol", "")
             if not role_code or not usuario_tiene_permiso(role_code, permiso_codigo):
+                if forbidden_on_denied and request.user.is_authenticated:
+                    return HttpResponseForbidden("No tiene permiso para acceder a esta sección.")
                 messages.error(request, "No tiene permiso para acceder a esta sección.")
                 return redirect("home")
 

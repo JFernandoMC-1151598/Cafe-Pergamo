@@ -58,6 +58,11 @@
                             <a class="nav-link" href="{% url 'admin_usuarios' %}">Administrar Usuarios</a>
                         </li>
                     {% endif %}
+                    {% if rol_actual|tiene_permiso:"asociaciones.gestionar" %}
+                        <li class="nav-item">
+                            <a class="nav-link" href="{% url 'registro_actor' %}">Registrar Actor</a>
+                        </li>
+                    {% endif %}
                 </ul>
 
                 <!-- Acciones de Usuario (Lógica Condicional Django) -->
