@@ -12,10 +12,12 @@ from decimal import Decimal
 
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
+from django.core.management import call_command
 from django.db import IntegrityError, models
 from django.db.models.deletion import ProtectedError
 from django.test import Client, TestCase
 from django.urls import reverse
+
 
 from fincas.forms import FincaModelForm, FincaRegistroForm, GeorreferenciacionFormMixin
 from fincas.models import Finca, Municipio
@@ -888,4 +890,66 @@ class TestScrum114ModeloCatalogoMunicipios(TestCase):
         muni_inactivo = Municipio.objects.create(nombre="Gramalote", activo=False)
         self.assertIn("Gramalote", str(muni_inactivo))
         self.assertIn("Inactivo", str(muni_inactivo))
+
+
+class TestScrum117PrepararDatosInicialesMunicipios(TestCase):
+    """
+    Subtarea: SCRUM-117 / HU09-ST7: Preparar datos iniciales del catálogo de municipios.
+    DoD: Fixture o comando de carga inicial con los municipios cafeteros de Norte de Santander.
+    """
+
+    def test_comando_cargar_municipios_inserta_40_municipios(self):
+        """El comando de gestión inserta los 40 municipios de Norte de Santander."""
+        Municipio.objects.all().delete()
+        call_command("cargar_municipios")
+        self.assertEqual(Municipio.objects.count(), 40)
+        self.assertTrue(all(m.departamento == "Norte de Santander" for m in Municipio.objects.all()))
+        self.assertTrue(all(m.activo for m in Municipio.objects.all()))
+
+    def test_comando_cargar_municipios_es_idempotente(self):
+        """Ejecutar el comando dos veces consecutivas no duplica municipios."""
+        call_command("cargar_municipios")
+        conteo_inicial = Municipio.objects.count()
+        call_command("cargar_municipios")
+        self.assertEqual(Municipio.objects.count(), conteo_inicial)
+
+    def test_comando_reactivar_municipio_inactivado(self):
+        """Con la bandera --reactivar, se activan los municipios previamente inactivados."""
+        call_command("cargar_municipios")
+        toledo = Municipio.objects.get(nombre="Toledo")
+        toledo.activo = False
+        toledo.save()
+        self.assertFalse(Municipio.objects.get(nombre="Toledo").activo)
+
+        call_command("cargar_municipios", reactivar=True)
+        toledo.refresh_from_db()
+        self.assertTrue(toledo.activo)
+
+    def test_fixture_municipios_norte_de_santander_carga_exitosamente(self):
+        """El fixture JSON de Django carga los 40 municipios canónicos."""
+        Municipio.objects.all().delete()
+        call_command("loaddata", "municipios_norte_de_santander")
+        self.assertEqual(Municipio.objects.count(), 40)
+
+    def test_municipios_cafeteros_clave_presentes_con_codigo_dane(self):
+        """Verifica que municipios de tradición cafetera tienen sus códigos DANE correctos."""
+        call_command("cargar_municipios")
+        municipios_clave = {
+            "Toledo": "54820",
+            "Labateca": "54377",
+            "Arboledas": "54051",
+            "Salazar de Las Palmas": "54660",
+            "Pamplona": "54518",
+            "Convención": "54206",
+            "Bochalema": "54099",
+            "Lourdes": "54418",
+            "Gramalote": "54313",
+            "Cúcuta": "54001",
+        }
+        for nombre, codigo in municipios_clave.items():
+            muni = Municipio.objects.filter(nombre=nombre).first()
+            self.assertIsNotNone(muni, f"El municipio {nombre} no fue encontrado en el catálogo.")
+            self.assertEqual(muni.codigo, codigo)
+            self.assertTrue(muni.activo)
+
 
