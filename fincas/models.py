@@ -21,20 +21,43 @@ from .validators import validar_latitud, validar_longitud, validar_par_coordenad
 
 class Municipio(models.Model):
     """
-    Catálogo administrable de municipios donde pueden ubicarse las fincas
+    Catálogo administrable de municipios donde pueden ubicarse las fincas.
     (RF07; RNF20 -- catálogos administrables sin tocar código fuente).
+    Subtarea: SCRUM-114 / HU09-ST5: Diseñar el modelo de datos del catálogo de municipios.
     """
 
     id = models.SmallAutoField(primary_key=True)
     codigo = models.CharField(
         max_length=20,
         unique=True,
+        blank=True,
+        verbose_name="Código DANE / Identificador",
         help_text="Código corto o DANE del municipio (p. ej. 'PAMPLONA').",
     )
-    nombre = models.CharField(max_length=100)
-    departamento = models.CharField(max_length=100, default="Norte de Santander")
-    activo = models.BooleanField(default=True)
-    creado_en = models.DateTimeField(auto_now_add=True)
+    nombre = models.CharField(
+        max_length=100,
+        verbose_name="Nombre del municipio",
+        help_text="Nombre oficial del municipio.",
+    )
+    departamento = models.CharField(
+        max_length=100,
+        default="Norte de Santander",
+        verbose_name="Departamento / Región",
+        help_text="Departamento o región a la que pertenece el municipio.",
+    )
+    activo = models.BooleanField(
+        default=True,
+        verbose_name="Estado activo",
+        help_text="Indica si el municipio está activo en el catálogo (inactivación lógica).",
+    )
+    creado_en = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Fecha de registro",
+    )
+    actualizado_en = models.DateTimeField(
+        auto_now=True,
+        verbose_name="Última actualización",
+    )
 
     class Meta:
         managed = True
@@ -44,7 +67,16 @@ class Municipio(models.Model):
         ordering = ["nombre"]
 
     def __str__(self):
-        return f"{self.nombre} ({self.departamento})"
+        estado = "Activo" if self.activo else "Inactivo"
+        return f"{self.nombre} ({self.departamento}) - {estado}"
+
+    def save(self, *args, **kwargs):
+        """Asegura código único por defecto si no es provisto explícitamente."""
+        if not self.codigo and self.nombre:
+            base_code = self.nombre.strip().upper().replace(" ", "_")[:20]
+            self.codigo = base_code
+        super().save(*args, **kwargs)
+
 
 
 class Finca(models.Model):

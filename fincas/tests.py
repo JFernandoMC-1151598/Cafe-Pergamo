@@ -823,3 +823,69 @@ class AsociacionMultiplesFincasPorProductorTests(TestCase):
         Finca.objects.create(nombre="Finca 1", productor_id=self.productor_a, municipio=self.municipio)
         with self.assertRaises(IntegrityError):
             Finca.objects.create(nombre="Finca 2 sin municipio", productor_id=self.productor_a, municipio=None)
+
+
+# =============================================================================
+# SUITE HU-09: PARAMETRIZACIÓN DEL CATÁLOGO DE MUNICIPIOS (SCRUM-114)
+# =============================================================================
+
+
+class TestScrum114ModeloCatalogoMunicipios(TestCase):
+    """
+    Subtarea: SCRUM-114 / HU09-ST5: Diseñar el modelo de datos del catálogo de municipios.
+    DoD:
+    - Modelo Municipio con nombre, departamento y booleano activo=True.
+    - Auditoría básica (creado_en y actualizado_en).
+    - Soporte para inactivación lógica (activo=False).
+    - Normalización y generación por defecto de código identificador.
+    """
+
+    def test_dod_municipio_con_nombre_departamento_y_activo_true_por_defecto(self):
+        """DoD: Municipio con nombre, departamento y booleano activo=True."""
+        muni = Municipio.objects.create(
+            nombre="Toledo",
+            departamento="Norte de Santander",
+        )
+        self.assertEqual(muni.nombre, "Toledo")
+        self.assertEqual(muni.departamento, "Norte de Santander")
+        self.assertTrue(muni.activo)
+        self.assertIsNotNone(muni.creado_en)
+        self.assertIsNotNone(muni.actualizado_en)
+
+    def test_municipio_departamento_usa_valor_por_defecto(self):
+        """El departamento por defecto debe ser 'Norte de Santander'."""
+        muni = Municipio.objects.create(nombre="Salazar")
+        self.assertEqual(muni.departamento, "Norte de Santander")
+        self.assertTrue(muni.activo)
+
+    def test_municipio_permite_inactivacion_logica(self):
+        """El campo activo permite inactivación lógica sin borrar el registro."""
+        muni = Municipio.objects.create(nombre="Bochalema", activo=False)
+        self.assertFalse(muni.activo)
+        # Sigue existiendo en la base de datos (inactivación lógica)
+        self.assertTrue(Municipio.objects.filter(nombre="Bochalema").exists())
+
+    def test_municipio_auditoria_actualizado_en_cambia_al_modificar(self):
+        """El campo actualizado_en se actualiza automáticamente al modificar el modelo."""
+        muni = Municipio.objects.create(nombre="Arboledas")
+        fecha_creacion = muni.actualizado_en
+        muni.nombre = "Arboledas Modificado"
+        muni.save()
+        muni.refresh_from_db()
+        self.assertGreaterEqual(muni.actualizado_en, fecha_creacion)
+
+    def test_municipio_genera_codigo_automatico_si_no_se_provee(self):
+        """Si no se ingresa un código, se autogenera a partir del nombre."""
+        muni = Municipio.objects.create(nombre="San Cayetano")
+        self.assertEqual(muni.codigo, "SAN_CAYETANO")
+
+    def test_municipio_str_incluye_nombre_departamento_y_estado(self):
+        """El método __str__ muestra el nombre, departamento y si está Activo/Inactivo."""
+        muni_activo = Municipio.objects.create(nombre="Lourdes", activo=True)
+        self.assertIn("Lourdes", str(muni_activo))
+        self.assertIn("Activo", str(muni_activo))
+
+        muni_inactivo = Municipio.objects.create(nombre="Gramalote", activo=False)
+        self.assertIn("Gramalote", str(muni_inactivo))
+        self.assertIn("Inactivo", str(muni_inactivo))
+
