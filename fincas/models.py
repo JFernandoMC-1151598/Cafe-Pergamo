@@ -12,6 +12,7 @@ Cubre:
 
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
@@ -24,6 +25,7 @@ class Municipio(models.Model):
     Catálogo administrable de municipios donde pueden ubicarse las fincas.
     (RF07; RNF20 -- catálogos administrables sin tocar código fuente).
     Subtarea: SCRUM-114 / HU09-ST5: Diseñar el modelo de datos del catálogo de municipios.
+    Subtarea: SCRUM-115 / HU09-ST6: Agregar validaciones y reglas de negocio del catálogo.
     """
 
     id = models.SmallAutoField(primary_key=True)
@@ -65,17 +67,69 @@ class Municipio(models.Model):
         verbose_name = "Municipio"
         verbose_name_plural = "Municipios"
         ordering = ["nombre"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["departamento", "nombre"],
+                name="municipios_departamento_nombre_unico",
+            )
+        ]
 
     def __str__(self):
         estado = "Activo" if self.activo else "Inactivo"
         return f"{self.nombre} ({self.departamento}) - {estado}"
 
+    @property
+    def tiene_fincas_asociadas(self) -> bool:
+        """Indica si el municipio tiene fincas asociadas en el sistema."""
+        return self.fincas.exists()
+
+    @property
+    def total_fincas_asociadas(self) -> int:
+        """Cantidad de fincas asociadas a este municipio."""
+        return self.fincas.count()
+
+    def clean(self):
+        """
+        Validaciones y reglas de negocio del catálogo de municipios (SCRUM-115).
+        - Obligatoriedad y saneamiento de nombre y departamento.
+        - Bloqueo de nombres de municipios duplicados en el mismo departamento (case-insensitive).
+        """
+        super().clean()
+        if self.nombre:
+            self.nombre = self.nombre.strip()
+            if len(self.nombre) < 2:
+                raise ValidationError({"nombre": "El nombre del municipio debe tener al menos 2 caracteres."})
+        else:
+            raise ValidationError({"nombre": "El nombre del municipio es obligatorio."})
+
+        if self.departamento:
+            self.departamento = self.departamento.strip()
+            if len(self.departamento) < 2:
+                raise ValidationError({"departamento": "El departamento o región debe tener al menos 2 caracteres."})
+        else:
+            raise ValidationError({"departamento": "El departamento es obligatorio."})
+
+        # Bloqueo de nombres de municipios duplicados en el mismo departamento (case-insensitive)
+        duplicado = Municipio.objects.filter(
+            departamento__iexact=self.departamento,
+            nombre__iexact=self.nombre,
+        )
+        if self.pk:
+            duplicado = duplicado.exclude(pk=self.pk)
+
+        if duplicado.exists():
+            raise ValidationError({
+                "nombre": f"Ya existe un municipio con el nombre '{self.nombre}' en el departamento '{self.departamento}'."
+            })
+
     def save(self, *args, **kwargs):
-        """Asegura código único por defecto si no es provisto explícitamente."""
+        """Asegura código único por defecto si no es provisto explícitamente y ejecuta validaciones."""
         if not self.codigo and self.nombre:
             base_code = self.nombre.strip().upper().replace(" ", "_")[:20]
             self.codigo = base_code
+        self.clean()
         super().save(*args, **kwargs)
+
 
 
 

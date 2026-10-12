@@ -19,7 +19,12 @@ from django.test import Client, TestCase
 from django.urls import reverse
 
 
-from fincas.forms import FincaModelForm, FincaRegistroForm, GeorreferenciacionFormMixin
+from fincas.forms import (
+    FincaModelForm,
+    FincaRegistroForm,
+    GeorreferenciacionFormMixin,
+    MunicipioForm,
+)
 from fincas.models import Finca, Municipio
 from fincas.validators import (
     validar_latitud,
@@ -951,5 +956,129 @@ class TestScrum117PrepararDatosInicialesMunicipios(TestCase):
             self.assertIsNotNone(muni, f"El municipio {nombre} no fue encontrado en el catálogo.")
             self.assertEqual(muni.codigo, codigo)
             self.assertTrue(muni.activo)
+
+
+class TestScrum115ValidacionesCatalogoMunicipios(TestCase):
+    """
+    Subtarea: SCRUM-115 / HU09-ST6: Agregar validaciones y reglas de negocio del catálogo.
+    DoD: Bloqueo de nombres de municipios duplicados en el mismo departamento.
+    """
+
+    def setUp(self):
+        Municipio.objects.all().delete()
+        self.municipio_base = Municipio.objects.create(
+            codigo="54518",
+            nombre="Pamplona",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+    def test_dod_bloqueo_nombres_duplicados_mismo_departamento_clean(self):
+        """DoD: Rechaza la creación de un municipio con el mismo nombre y departamento en clean()."""
+        muni_duplicado = Municipio(
+            codigo="54999",
+            nombre="Pamplona",
+            departamento="Norte de Santander",
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            muni_duplicado.clean()
+
+        self.assertIn("nombre", ctx.exception.message_dict)
+        self.assertIn("Ya existe un municipio con el nombre 'Pamplona'", ctx.exception.message_dict["nombre"][0])
+
+    def test_bloqueo_nombres_duplicados_case_insensitive_y_espacios(self):
+        """Bloquea nombres duplicados sin importar mayúsculas/minúsculas ni espacios iniciales/finales."""
+        muni_duplicado = Municipio(
+            codigo="54998",
+            nombre="   pamplona   ",
+            departamento="norte de santander",
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            muni_duplicado.clean()
+
+        self.assertIn("nombre", ctx.exception.message_dict)
+
+    def test_permite_mismo_nombre_en_distintos_departamentos(self):
+        """Permite que un municipio tenga el mismo nombre si pertenece a otro departamento."""
+        muni_otro_departamento = Municipio.objects.create(
+            codigo="68518",
+            nombre="Pamplona",
+            departamento="Santander",
+        )
+        self.assertEqual(muni_otro_departamento.nombre, "Pamplona")
+        self.assertEqual(muni_otro_departamento.departamento, "Santander")
+
+    def test_bloqueo_duplicados_nivel_base_de_datos_integrity_error(self):
+        """Verifica que el constraint de base de datos lanza IntegrityError ante duplicados."""
+        with self.assertRaises(IntegrityError):
+            Municipio.objects.bulk_create([
+                Municipio(
+                    codigo="54997",
+                    nombre="Pamplona",
+                    departamento="Norte de Santander",
+                )
+            ])
+
+    def test_nombre_municipio_es_obligatorio_y_no_vacio(self):
+        """El nombre del municipio no puede ser nulo, vacío ni consistir solo en espacios."""
+        muni_vacio = Municipio(nombre="   ", departamento="Norte de Santander")
+        with self.assertRaises(ValidationError) as ctx:
+            muni_vacio.clean()
+        self.assertIn("nombre", ctx.exception.message_dict)
+
+    def test_departamento_es_obligatorio_y_no_vacio(self):
+        """El departamento no puede ser nulo, vacío ni consistir solo en espacios."""
+        muni_dep_vacio = Municipio(nombre="Toledo", departamento="   ")
+        with self.assertRaises(ValidationError) as ctx:
+            muni_dep_vacio.clean()
+        self.assertIn("departamento", ctx.exception.message_dict)
+
+    def test_municipio_form_rechaza_duplicados_con_mensaje_amigable(self):
+        """MunicipioForm valida y rechaza duplicados en el mismo departamento con mensaje amigable."""
+        form = MunicipioForm(data={
+            "codigo": "54519",
+            "nombre": "Pamplona",
+            "departamento": "Norte de Santander",
+            "activo": True,
+        })
+        self.assertFalse(form.is_valid())
+        self.assertIn("nombre", form.errors)
+        self.assertIn("Ya existe un municipio con el nombre", form.errors["nombre"][0])
+
+    def test_municipio_form_acepta_municipio_nuevo_valido(self):
+        """MunicipioForm acepta un municipio nuevo que no esté duplicado."""
+        form = MunicipioForm(data={
+            "codigo": "54820",
+            "nombre": "Toledo",
+            "departamento": "Norte de Santander",
+            "activo": True,
+        })
+        self.assertTrue(form.is_valid(), f"Errores encontrados: {form.errors}")
+        muni = form.save()
+        self.assertEqual(muni.nombre, "Toledo")
+
+    def test_municipio_en_uso_puede_inactivarse_logicamente_manteniendo_integridad(self):
+        """
+        Regla de negocio: si un municipio tiene fincas asociadas,
+        puede inactivarse lógicamente (activo=False) sin perder la relación histórica.
+        """
+        finca = Finca.objects.create(
+            nombre="Finca Los Alpes",
+            productor_id=uuid.uuid4(),
+            municipio=self.municipio_base,
+        )
+        self.assertTrue(self.municipio_base.tiene_fincas_asociadas)
+        self.assertEqual(self.municipio_base.total_fincas_asociadas, 1)
+
+        # Inactivación lógica del municipio
+        self.municipio_base.activo = False
+        self.municipio_base.save()
+
+        self.municipio_base.refresh_from_db()
+        finca.refresh_from_db()
+        self.assertFalse(self.municipio_base.activo)
+        self.assertEqual(finca.municipio, self.municipio_base)
+        self.assertTrue(self.municipio_base.tiene_fincas_asociadas)
+
 
 

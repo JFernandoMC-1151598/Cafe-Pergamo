@@ -227,3 +227,75 @@ class FincaModelForm(forms.ModelForm):
             instance.save()
         return instance
 
+
+class MunicipioForm(forms.ModelForm):
+    """
+    Formulario para creación y edición de municipios en el catálogo (HU09-ST6 / SCRUM-115).
+    Aplica validaciones de obligatoriedad, formato y bloqueo de duplicados por departamento.
+    """
+
+    class Meta:
+        model = Municipio
+        fields = ["codigo", "nombre", "departamento", "activo"]
+        widgets = {
+            "codigo": forms.TextInput(attrs={
+                "class": "form-control",
+                "id": "id_codigo",
+                "placeholder": "Ej: 54518 (Opcional, se autogenera si se omite)",
+            }),
+            "nombre": forms.TextInput(attrs={
+                "class": "form-control",
+                "id": "id_nombre",
+                "placeholder": "Ej: Pamplona",
+            }),
+            "departamento": forms.TextInput(attrs={
+                "class": "form-control",
+                "id": "id_departamento",
+                "placeholder": "Ej: Norte de Santander",
+            }),
+            "activo": forms.CheckboxInput(attrs={
+                "class": "form-check-input",
+                "id": "id_activo",
+            }),
+        }
+
+    def clean_nombre(self):
+        nombre = self.cleaned_data.get("nombre", "").strip()
+        if not nombre:
+            raise forms.ValidationError("El nombre del municipio es obligatorio.")
+        if len(nombre) < 2:
+            raise forms.ValidationError("El nombre del municipio debe tener al menos 2 caracteres.")
+        return nombre
+
+    def clean_departamento(self):
+        departamento = self.cleaned_data.get("departamento", "").strip()
+        if not departamento:
+            raise forms.ValidationError("El departamento o región es obligatorio.")
+        if len(departamento) < 2:
+            raise forms.ValidationError("El departamento debe tener al menos 2 caracteres.")
+        return departamento
+
+    def clean(self):
+        cleaned_data = super().clean()
+        nombre = cleaned_data.get("nombre")
+        departamento = cleaned_data.get("departamento")
+
+        if nombre and departamento:
+            nombre = nombre.strip()
+            departamento = departamento.strip()
+            query = Municipio.objects.filter(
+                nombre__iexact=nombre,
+                departamento__iexact=departamento,
+            )
+            if self.instance and self.instance.pk:
+                query = query.exclude(pk=self.instance.pk)
+
+            if query.exists():
+                self.add_error(
+                    "nombre",
+                    f"Ya existe un municipio con el nombre '{nombre}' en el departamento '{departamento}'."
+                )
+
+        return cleaned_data
+
+
