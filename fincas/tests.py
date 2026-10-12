@@ -9,13 +9,16 @@ Integración de:
 
 import uuid
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
+from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.db import IntegrityError, models
 from django.db.models.deletion import ProtectedError
-from django.test import Client, TestCase
+from django.http import HttpResponse, JsonResponse
+from django.test import Client, RequestFactory, SimpleTestCase, TestCase
 from django.urls import reverse
 
 
@@ -1081,4 +1084,230 @@ class TestScrum115ValidacionesCatalogoMunicipios(TestCase):
         self.assertTrue(self.municipio_base.tiene_fincas_asociadas)
 
 
+# =============================================================================
+# SUITE HU-09: SCRUM-116 (HU09-ST8) - PERMISOS PARA LA GESTIÓN DEL CATÁLOGO (RBAC)
+# =============================================================================
 
+
+class TestScrum116PermisosCatalogoMunicipios(SimpleTestCase):
+    """
+    Subtarea: SCRUM-116 / HU09-ST8: Configurar permisos para la gestión del catálogo (RBAC).
+
+    Criterios de Aceptación (DoD):
+    1. Restricción exclusiva de gestión (crear, editar, inactivar) a roles autorizados:
+       - ADMINISTRADOR
+       - ASOCIACION
+    2. Bloqueo de acceso (403 Forbidden o redirección al login según corresponda) a:
+       - PRODUCTOR
+       - COMPRADOR
+       - OPERARIO_CAMPO
+       - CONSULTA_PUBLICA
+       - Usuarios no autenticados (anónimos)
+    3. Soporte para vistas basadas en sesión web y endpoints API REST (fail-closed).
+    """
+
+    def setUp(self):
+        self.rf = RequestFactory()
+
+    def _crear_request_web(self, autenticado: bool = True, rol: str = "", path: str = "/fincas/municipios/"):
+        request = self.rf.get(path)
+        request.user = type(
+            "UserMock",
+            (),
+            {"is_authenticated": autenticado, "is_superuser": False, "username": "test_user"},
+        )()
+        request.session = {"rol": rol} if rol else {}
+        request._messages = FallbackStorage(request)
+        return request
+
+    # -------------------------------------------------------------------------
+    # 1. Pruebas directas de rol_puede_administrar_catalogos
+    # -------------------------------------------------------------------------
+
+    @patch("fincas.permissions.usuario_tiene_permiso")
+    def test_roles_autorizados_pueden_administrar_catalogos(self, mock_tiene_permiso):
+        """Los roles ADMINISTRADOR y ASOCIACION tienen permiso concedido en la matriz."""
+        from fincas.permissions import rol_puede_administrar_catalogos
+
+        mock_tiene_permiso.side_effect = lambda rol, perms: rol in ("ADMINISTRADOR", "ASOCIACION")
+
+        self.assertTrue(rol_puede_administrar_catalogos("ADMINISTRADOR"))
+        self.assertTrue(rol_puede_administrar_catalogos("ASOCIACION"))
+
+    @patch("fincas.permissions.usuario_tiene_permiso")
+    def test_roles_no_autorizados_son_rechazados(self, mock_tiene_permiso):
+        """Roles como PRODUCTOR, COMPRADOR, OPERARIO_CAMPO o CONSULTA_PUBLICA no pueden administrar catálogos."""
+        from fincas.permissions import rol_puede_administrar_catalogos
+
+        mock_tiene_permiso.side_effect = lambda rol, perms: rol in ("ADMINISTRADOR", "ASOCIACION")
+
+        roles_denegados = ["PRODUCTOR", "COMPRADOR", "OPERARIO_CAMPO", "CONSULTA_PUBLICA", "INVITADO"]
+        for rol in roles_denegados:
+            with self.subTest(rol=rol):
+                self.assertFalse(rol_puede_administrar_catalogos(rol))
+
+    def test_rol_vacio_o_nulo_devuelve_false(self):
+        """Si el rol es None o string vacío, la verificación es fail-closed."""
+        from fincas.permissions import rol_puede_administrar_catalogos
+
+        self.assertFalse(rol_puede_administrar_catalogos(""))
+        self.assertFalse(rol_puede_administrar_catalogos(None))
+
+    # -------------------------------------------------------------------------
+    # 2. Pruebas del decorador web de sesión (permiso_administrar_catalogo_sesion)
+    # -------------------------------------------------------------------------
+
+    def test_sesion_no_autenticada_redirige_a_login(self):
+        """Un usuario sin iniciar sesión es redirigido al login con el parámetro ?next=."""
+        from fincas.permissions import permiso_administrar_catalogo_sesion
+
+        @permiso_administrar_catalogo_sesion
+        def dummy_vista(request):
+            return HttpResponse("OK")
+
+        req = self._crear_request_web(autenticado=False, path="/fincas/municipios/crear/")
+        resp = dummy_vista(req)
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(reverse("login"), resp.url)
+        self.assertIn("next=/fincas/municipios/crear/", resp.url)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_sesion_con_rol_autorizado_accede_exitosamente(self, _mock_perm):
+        """Una sesión con rol autorizado ejecuta la vista normalmente (HTTP 200)."""
+        from fincas.permissions import permiso_administrar_catalogo_sesion
+
+        @permiso_administrar_catalogo_sesion
+        def dummy_vista(request):
+            return HttpResponse("Vista permitida")
+
+        for rol in ("ADMINISTRADOR", "ASOCIACION"):
+            with self.subTest(rol=rol):
+                req = self._crear_request_web(autenticado=True, rol=rol)
+                resp = dummy_vista(req)
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.content.decode(), "Vista permitida")
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=False)
+    def test_sesion_con_rol_no_autorizado_recibe_403_forbidden(self, _mock_perm):
+        """Un rol no autorizado (ej. Productor) recibe 403 Forbidden por defecto."""
+        from fincas.permissions import permiso_administrar_catalogo_sesion
+
+        @permiso_administrar_catalogo_sesion
+        def dummy_vista(request):
+            return HttpResponse("No debería verse")
+
+        for rol in ("PRODUCTOR", "COMPRADOR", "OPERARIO_CAMPO", "CONSULTA_PUBLICA"):
+            with self.subTest(rol=rol):
+                req = self._crear_request_web(autenticado=True, rol=rol)
+                resp = dummy_vista(req)
+                self.assertEqual(resp.status_code, 403)
+                self.assertIn("No tiene permiso para acceder a esta sección.", resp.content.decode())
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=False)
+    def test_sesion_con_forbidden_false_redirige_a_home(self, _mock_perm):
+        """Si forbidden_on_denied=False, redirige a 'home' con mensaje flash de error."""
+        from fincas.permissions import permiso_administrar_catalogo_sesion
+
+        @permiso_administrar_catalogo_sesion(forbidden_on_denied=False)
+        def dummy_vista(request):
+            return HttpResponse("OK")
+
+        req = self._crear_request_web(autenticado=True, rol="PRODUCTOR")
+        resp = dummy_vista(req)
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.url, reverse("home"))
+
+    # -------------------------------------------------------------------------
+    # 3. Pruebas de helper request_puede_administrar_catalogos
+    # -------------------------------------------------------------------------
+
+    @patch("fincas.permissions.rol_puede_administrar_catalogos")
+    def test_request_puede_administrar_catalogos_con_superuser(self, mock_rol):
+        """Superusuario de Django tiene acceso garantizado."""
+        from fincas.permissions import request_puede_administrar_catalogos
+
+        req = self._crear_request_web(autenticado=True)
+        req.user.is_superuser = True
+        self.assertTrue(request_puede_administrar_catalogos(req))
+
+    @patch("fincas.permissions.rol_puede_administrar_catalogos", return_value=True)
+    def test_request_puede_administrar_catalogos_con_rol_sesion(self, mock_rol):
+        """Request con rol válido en sesión retorna True."""
+        from fincas.permissions import request_puede_administrar_catalogos
+
+        req = self._crear_request_web(autenticado=True, rol="ASOCIACION")
+        self.assertTrue(request_puede_administrar_catalogos(req))
+
+    def test_request_puede_administrar_catalogos_con_request_nula_o_anonima(self):
+        """Request nula o sin usuario autenticado devuelve False."""
+        from fincas.permissions import request_puede_administrar_catalogos
+
+        self.assertFalse(request_puede_administrar_catalogos(None))
+        req = self._crear_request_web(autenticado=False)
+        self.assertFalse(request_puede_administrar_catalogos(req))
+
+    # -------------------------------------------------------------------------
+    # 4. Pruebas de DRF Permission Class (TienePermisoAdministrarCatalogo)
+    # -------------------------------------------------------------------------
+
+    @patch("fincas.permissions.rol_puede_administrar_catalogos")
+    def test_tiene_permiso_drf_concede_a_token_con_rol_autorizado(self, mock_rol_check):
+        """TienePermisoAdministrarCatalogo concede si el token JWT contiene un rol válido."""
+        from fincas.permissions import TienePermisoAdministrarCatalogo
+
+        mock_rol_check.return_value = True
+        import json
+        perm = TienePermisoAdministrarCatalogo()
+
+        request = self.rf.get("/fincas/api/municipios/")
+        request.auth = {"role_code": "ASOCIACION"}
+        view = type("ViewMock", (), {})()
+
+        self.assertTrue(perm.has_permission(request, view))
+        mock_rol_check.assert_called_with("ASOCIACION")
+
+    @patch("fincas.permissions.rol_puede_administrar_catalogos")
+    def test_tiene_permiso_drf_deniega_a_token_con_rol_no_autorizado(self, mock_rol_check):
+        """TienePermisoAdministrarCatalogo deniega si el token tiene rol no autorizado."""
+        from fincas.permissions import TienePermisoAdministrarCatalogo
+
+        mock_rol_check.return_value = False
+        perm = TienePermisoAdministrarCatalogo()
+
+        request = self.rf.get("/fincas/api/municipios/")
+        request.auth = {"role_code": "PRODUCTOR"}
+        view = type("ViewMock", (), {})()
+
+        self.assertFalse(perm.has_permission(request, view))
+
+    def test_tiene_permiso_drf_deniega_sin_token(self):
+        """TienePermisoAdministrarCatalogo deniega peticiones sin token JWT."""
+        from fincas.permissions import TienePermisoAdministrarCatalogo
+
+        perm = TienePermisoAdministrarCatalogo()
+        request = self.rf.get("/fincas/api/municipios/")
+        request.auth = None
+        view = type("ViewMock", (), {})()
+
+        self.assertFalse(perm.has_permission(request, view))
+
+    # -------------------------------------------------------------------------
+    # 5. Pruebas del decorador API (permiso_administrar_catalogo_api)
+    # -------------------------------------------------------------------------
+
+    def test_decorador_api_rechaza_peticion_sin_token_con_401(self):
+        """Endpoint de API rechaza peticiones sin token con HTTP 401."""
+        import json
+        from fincas.permissions import permiso_administrar_catalogo_api
+
+        @permiso_administrar_catalogo_api
+        def dummy_api(request):
+            return JsonResponse({"status": "ok"})
+
+        request = self.rf.post("/fincas/api/municipios/")
+        response = dummy_api(request)
+
+        self.assertEqual(response.status_code, 401)
+        data = json.loads(response.content.decode("utf-8"))
+        self.assertIn("error", data)
