@@ -1,10 +1,12 @@
 """Vistas del catálogo maestro de variedades de café (HU10)."""
 
+from django.contrib import messages
 from django.http import HttpRequest, HttpResponse
-from django.shortcuts import render
+from django.shortcuts import redirect, render
 
 from usuarios.permissions import permiso_requerido_sesion
 
+from .forms import VariedadCafeForm
 from .models import VariedadCafe
 
 
@@ -32,3 +34,29 @@ def lista_variedades_view(request: HttpRequest) -> HttpResponse:
             "estado_filtro": estado,
         },
     )
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def crear_variedad_view(request: HttpRequest) -> HttpResponse:
+    """Muestra y procesa el formulario de creación de variedades."""
+    if request.method == "POST":
+        form = VariedadCafeForm(request.POST)
+        if form.is_valid():
+            variedad = form.save()
+            messages.success(
+                request,
+                f"La variedad «{variedad.nombre}» fue registrada exitosamente.",
+            )
+            return redirect("lista_variedades")
+
+        messages.error(
+            request,
+            "Por favor revise los errores señalados en el formulario.",
+        )
+    else:
+        form = VariedadCafeForm()
+
+    return render(request, "catalogos/crear_variedad.html", {"form": form})

@@ -7,4 +7,9 @@ from . import views
 
 urlpatterns = [
     path("variedades/", views.lista_variedades_view, name="lista_variedades"),
+    path(
+        "variedades/crear/",
+        views.crear_variedad_view,
+        name="crear_variedad",
+    ),
 ]

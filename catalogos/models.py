@@ -11,6 +11,8 @@ class VariedadCafe(models.Model):
     class Especie(models.TextChoices):
         ARABICA = "ARABICA", "Arábica"
         ROBUSTA = "ROBUSTA", "Robusta"
+        LIBERICA = "LIBERICA", "Libérica"
+        EXCELSA = "EXCELSA", "Excelsa"
 
     nombre = models.CharField(
         max_length=100,
