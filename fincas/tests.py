@@ -9,6 +9,7 @@ Integración de:
 
 import uuid
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
@@ -16,6 +17,7 @@ from django.db import IntegrityError, models
 from django.db.models.deletion import ProtectedError
 from django.test import Client, TestCase
 from django.urls import reverse
+from rest_framework_simplejwt.tokens import AccessToken
 
 from fincas.forms import FincaModelForm, FincaRegistroForm, GeorreferenciacionFormMixin
 from fincas.models import Finca, Municipio
@@ -24,6 +26,39 @@ from fincas.validators import (
     validar_longitud,
     validar_par_coordenadas,
 )
+
+
+def _iniciar_sesion_productor(client, usuario_id=None):
+    """
+    Simula, para pruebas, el mismo estado de sesión que deja `login_view`
+    al autenticar a un productor real (`request.session['usuario_id']` --
+    ver usuarios/views.py:492). `usuarios.Usuario` es `managed=False` y no
+    existe en la base de datos de pruebas (sqlite), así que aquí no se
+    crea una fila real: basta con la clave de sesión, que es justo lo que
+    `_resolver_productor_id` (fincas/views.py) necesita para identificar
+    al productor sin inventar un UUID al azar.
+    """
+    usuario_id = usuario_id or uuid.uuid4()
+    session = client.session
+    session["usuario_id"] = str(usuario_id)
+    session.save()
+    return str(usuario_id)
+
+
+def _jwt_bearer_headers(correo="productor.prueba@cafepergamo.test"):
+    """
+    Emite un JWT real válido para las pruebas de la API de fincas, con el
+    mismo claim 'email' que `CustomTokenObtainPairSerializer.get_token()`
+    agrega en producción (usuarios/serializers.py). No requiere una fila
+    real de `Usuario` (managed=False, inexistente en sqlite) porque
+    `AccessToken.for_user()` solo necesita un `auth_user` de Django.
+    """
+    user = User.objects.create_user(
+        username=f"jwt_test_{uuid.uuid4().hex[:12]}", password="Password123!"
+    )
+    token = AccessToken.for_user(user)
+    token["email"] = correo
+    return {"HTTP_AUTHORIZATION": f"Bearer {token}"}
 
 
 # =============================================================================
@@ -151,7 +186,7 @@ class TestValidacionFormatoCoordenadas(TestCase):
         """El formulario rechaza textos no numéricos en latitud y longitud."""
         form = FincaRegistroForm(data={
             "nombre": "Finca Test",
-            "municipio": "Pamplona",
+            "municipio": Municipio.objects.get(codigo="PAMPLONA").pk,
             "latitud": "texto_invalido",
             "longitud": "-72.500000",
         })
@@ -162,7 +197,7 @@ class TestValidacionFormatoCoordenadas(TestCase):
         """El formulario rechaza latitudes mayores a 90 o menores a -90."""
         form = FincaRegistroForm(data={
             "nombre": "Finca Fuera Rango",
-            "municipio": "Pamplona",
+            "municipio": Municipio.objects.get(codigo="PAMPLONA").pk,
             "latitud": "95.500000",
             "longitud": "-72.500000",
         })
@@ -173,7 +208,7 @@ class TestValidacionFormatoCoordenadas(TestCase):
         """El formulario rechaza longitudes mayores a 180 o menores a -180."""
         form = FincaRegistroForm(data={
             "nombre": "Finca Fuera Rango",
-            "municipio": "Pamplona",
+            "municipio": Municipio.objects.get(codigo="PAMPLONA").pk,
             "latitud": "7.500000",
             "longitud": "185.000000",
         })
@@ -184,7 +219,7 @@ class TestValidacionFormatoCoordenadas(TestCase):
         """El formulario no valida si solo se ingresa latitud."""
         form = FincaRegistroForm(data={
             "nombre": "Finca Par Incompleto",
-            "municipio": "Pamplona",
+            "municipio": Municipio.objects.get(codigo="PAMPLONA").pk,
             "latitud": "7.893910",
             "longitud": "",
         })
@@ -195,7 +230,7 @@ class TestValidacionFormatoCoordenadas(TestCase):
         """El formulario no valida si solo se ingresa longitud."""
         form = FincaRegistroForm(data={
             "nombre": "Finca Par Incompleto",
-            "municipio": "Pamplona",
+            "municipio": Municipio.objects.get(codigo="PAMPLONA").pk,
             "latitud": "",
             "longitud": "-72.507820",
         })
@@ -325,24 +360,27 @@ class TestGeorreferenciacionModelo(TestCase):
         # Caso sin coordenadas
         form_sin_coords = FincaModelForm(data={
             "nombre": "Finca Modelo Sin Coords",
-            "municipio": "Labateca",
+            "municipio": Municipio.objects.get(codigo="LABATECA").pk,
             "vereda": "Centro",
         })
         self.assertTrue(form_sin_coords.is_valid(), f"Errores: {form_sin_coords.errors}")
-        finca_sin_coords = form_sin_coords.save()
+        # FincaModelForm.save() ahora exige un productor_id real (ya no
+        # inventa un UUID de respaldo como hacía antes) -- se lo pasamos
+        # explícitamente, como haría la vista tras resolver la sesión.
+        finca_sin_coords = form_sin_coords.save(productor_id=uuid.uuid4())
         self.assertIsNone(finca_sin_coords.latitud)
         self.assertIsNone(finca_sin_coords.longitud)
 
         # Caso con coordenadas
         form_con_coords = FincaModelForm(data={
             "nombre": "Finca Modelo Con Coords",
-            "municipio": "Salazar",
+            "municipio": Municipio.objects.get(codigo="SALAZAR_PALMAS").pk,
             "vereda": "La Playa",
             "latitud": "7.771234",
             "longitud": "-72.812345",
         })
         self.assertTrue(form_con_coords.is_valid(), f"Errores: {form_con_coords.errors}")
-        finca_con_coords = form_con_coords.save()
+        finca_con_coords = form_con_coords.save(productor_id=uuid.uuid4())
         self.assertEqual(finca_con_coords.latitud, Decimal("7.771234"))
         self.assertEqual(finca_con_coords.longitud, Decimal("-72.812345"))
 
@@ -372,7 +410,7 @@ class TestGeorreferenciacionFormulario(TestCase):
         """Si el usuario no informa coordenadas, el formulario debe ser válido sin errores."""
         datos = {
             "nombre": "Finca Los Pinos",
-            "municipio": "Arboledas",
+            "municipio": Municipio.objects.get(codigo="ARBOLEDAS").pk,
             "vereda": "La Selva",
             "latitud": "",
             "longitud": "",
@@ -386,7 +424,7 @@ class TestGeorreferenciacionFormulario(TestCase):
         """Si el usuario ingresa coordenadas decimales válidas, se procesan correctamente."""
         datos = {
             "nombre": "Finca La Esmeralda",
-            "municipio": "Toledo",
+            "municipio": Municipio.objects.get(codigo="TOLEDO").pk,
             "vereda": "San Bernardo",
             "latitud": "7.893910",
             "longitud": "-72.507820",
@@ -445,7 +483,7 @@ class TestGeorreferenciacionInterfazWeb(TestCase):
         """Al enviar coordenadas fuera de rango, la vista responde 200 con errores."""
         response = self.client.post(self.url, {
             "nombre": "Finca Test Invalida",
-            "municipio": "Cúcuta",
+            "municipio": Municipio.objects.get(codigo="CUCUTA").pk,
             "latitud": "100.5",
             "longitud": "-250.0",
         })
@@ -468,9 +506,10 @@ class TestGuardarGeorreferenciacionBackend(TestCase):
 
     def test_vista_post_persiste_finca_con_coordenadas_en_bd(self):
         """Al enviar coordenadas válidas, la vista persiste los valores Decimal en BD."""
+        _iniciar_sesion_productor(self.client)
         response = self.client.post(self.url_registro, {
             "nombre": "Finca San Francisco",
-            "municipio": "Salazar",
+            "municipio": Municipio.objects.get(codigo="SALAZAR_PALMAS").pk,
             "vereda": "La Playa",
             "latitud": "7.893910",
             "longitud": "-72.507820",
@@ -485,9 +524,10 @@ class TestGuardarGeorreferenciacionBackend(TestCase):
 
     def test_vista_post_persiste_finca_sin_coordenadas_almacena_null_en_bd(self):
         """Al no ingresar coordenadas, la vista persiste la finca almacenando NULL en BD."""
+        _iniciar_sesion_productor(self.client)
         response = self.client.post(self.url_registro, {
             "nombre": "Finca Sin Coordenadas",
-            "municipio": "Arboledas",
+            "municipio": Municipio.objects.get(codigo="ARBOLEDAS").pk,
             "vereda": "Centro",
             "latitud": "",
             "longitud": "",
@@ -501,31 +541,47 @@ class TestGuardarGeorreferenciacionBackend(TestCase):
         self.assertFalse(finca.tiene_georreferenciacion)
 
     def test_vista_post_asocia_productor_en_sesion(self):
-        """Si el usuario está autenticado, la vista maneja la sesión adecuadamente."""
-        usuario = User.objects.create_user(username="productor_test", password="Password123!")
-        self.client.force_login(usuario)
+        """
+        Si hay un productor real identificado en sesión
+        (`request.session['usuario_id']`, el mismo patrón que deja
+        `login_view` -- ver usuarios/views.py:492), la finca queda
+        asociada a ESE productor, no a un UUID inventado.
+        """
+        productor_id = _iniciar_sesion_productor(self.client)
 
         response = self.client.post(self.url_registro, {
             "nombre": "Finca con Productor Sesion",
-            "municipio": "Toledo",
+            "municipio": Municipio.objects.get(codigo="TOLEDO").pk,
             "latitud": "7.300000",
             "longitud": "-72.480000",
         })
         self.assertEqual(response.status_code, 302)
 
+        finca = Finca.objects.get(nombre="Finca con Productor Sesion")
+        self.assertEqual(str(finca.productor_id), productor_id)
+
         finca = Finca.objects.filter(nombre="Finca con Productor Sesion").first()
         self.assertIsNotNone(finca)
         self.assertEqual(finca.latitud, Decimal("7.300000"))
 
-    def test_api_post_persiste_coordenadas_en_bd(self):
+    @patch("fincas.views.Usuario")
+    def test_api_post_persiste_coordenadas_en_bd(self, mock_usuario_model):
         """Endpoint API guarda coordenadas y responde 201 Created."""
+        # `usuarios.Usuario` es managed=False (no existe en la BD de pruebas),
+        # así que se mockea igual que en usuarios/tests.py: solo hace falta
+        # que `_resolver_productor_id` encuentre un id al buscar por correo.
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(
+            id=uuid.uuid4()
+        )
         payload = {
             "nombre": "Finca API Coords",
             "municipio": "Lourdes",
             "latitud": "7.945000",
             "longitud": "-72.835000",
         }
-        response = self.client.post(self.url_api, payload, content_type="application/json")
+        response = self.client.post(
+            self.url_api, payload, content_type="application/json", **_jwt_bearer_headers()
+        )
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()["latitud"], "7.945000")
         self.assertEqual(response.json()["longitud"], "-72.835000")
@@ -535,13 +591,19 @@ class TestGuardarGeorreferenciacionBackend(TestCase):
         self.assertEqual(finca.latitud, Decimal("7.945000"))
         self.assertEqual(finca.longitud, Decimal("-72.835000"))
 
-    def test_api_post_sin_coordenadas_almacena_null(self):
+    @patch("fincas.views.Usuario")
+    def test_api_post_sin_coordenadas_almacena_null(self, mock_usuario_model):
         """Endpoint API guarda NULL cuando latitud y longitud son omitidos."""
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(
+            id=uuid.uuid4()
+        )
         payload = {
             "nombre": "Finca API Sin Coords",
             "municipio": "Bochalema",
         }
-        response = self.client.post(self.url_api, payload, content_type="application/json")
+        response = self.client.post(
+            self.url_api, payload, content_type="application/json", **_jwt_bearer_headers()
+        )
         self.assertEqual(response.status_code, 201)
         self.assertIsNone(response.json()["latitud"])
         self.assertIsNone(response.json()["longitud"])
@@ -566,6 +628,7 @@ class TestGuardarGeorreferenciacionBackend(TestCase):
             url_detalle,
             {"latitud": "7.310000", "longitud": "-72.490000"},
             content_type="application/json",
+            **_jwt_bearer_headers(),
         )
         self.assertEqual(response.status_code, 200)
 
@@ -588,9 +651,10 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
 
     def test_dod_guardado_con_valores_validos(self):
         """DoD Escenario 1: Guardado exitoso con coordenadas válidas."""
+        _iniciar_sesion_productor(self.client)
         response = self.client.post(self.url_registro, {
             "nombre": "Finca La Esperanza",
-            "municipio": "Toledo",
+            "municipio": Municipio.objects.get(codigo="TOLEDO").pk,
             "vereda": "San Bernardo",
             "latitud": "7.893910",
             "longitud": "-72.507820",
@@ -604,9 +668,10 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
 
     def test_dod_guardado_con_valores_nulos_opcionales(self):
         """DoD Escenario 2: Guardado exitoso con valores nulos (campo opcional)."""
+        _iniciar_sesion_productor(self.client)
         response = self.client.post(self.url_registro, {
             "nombre": "Finca El Cafetal",
-            "municipio": "Arboledas",
+            "municipio": Municipio.objects.get(codigo="ARBOLEDAS").pk,
             "vereda": "El Silencio",
             "latitud": "",
             "longitud": "",
@@ -623,7 +688,7 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
         conteo_previo = Finca.objects.count()
         response = self.client.post(self.url_registro, {
             "nombre": "Finca Error Texto",
-            "municipio": "Salazar",
+            "municipio": Municipio.objects.get(codigo="SALAZAR_PALMAS").pk,
             "latitud": "invalido",
             "longitud": "otro_texto",
         })
@@ -636,7 +701,7 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
         conteo_previo = Finca.objects.count()
         response = self.client.post(self.url_registro, {
             "nombre": "Finca Latitud Invalida",
-            "municipio": "Salazar",
+            "municipio": Municipio.objects.get(codigo="SALAZAR_PALMAS").pk,
             "latitud": "95.000000",
             "longitud": "-72.500000",
         })
@@ -649,7 +714,7 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
         conteo_previo = Finca.objects.count()
         response = self.client.post(self.url_registro, {
             "nombre": "Finca Longitud Invalida",
-            "municipio": "Salazar",
+            "municipio": Municipio.objects.get(codigo="SALAZAR_PALMAS").pk,
             "latitud": "7.500000",
             "longitud": "-195.000000",
         })
@@ -662,7 +727,7 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
         conteo_previo = Finca.objects.count()
         response = self.client.post(self.url_registro, {
             "nombre": "Finca Par Incompleto",
-            "municipio": "Salazar",
+            "municipio": Municipio.objects.get(codigo="SALAZAR_PALMAS").pk,
             "latitud": "7.893910",
             "longitud": "",
         })
@@ -672,10 +737,11 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
 
     def test_dod_ciclo_completo_integracion_y_listado(self):
         """DoD Escenario 4: Ciclo completo que verifica renderizado de fincas con y sin coordenadas."""
+        _iniciar_sesion_productor(self.client)
         # 1. Crear finca sin coordenadas
         self.client.post(self.url_registro, {
             "nombre": "Predio Sin GPS",
-            "municipio": "Lourdes",
+            "municipio": Municipio.objects.get(codigo="LOURDES").pk,
             "latitud": "",
             "longitud": "",
         })
@@ -683,7 +749,7 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
         # 2. Crear finca con coordenadas
         self.client.post(self.url_registro, {
             "nombre": "Predio Con GPS",
-            "municipio": "Toledo",
+            "municipio": Municipio.objects.get(codigo="TOLEDO").pk,
             "latitud": "7.300000",
             "longitud": "-72.480000",
         })
@@ -708,21 +774,21 @@ class MunicipioModelTests(TestCase):
     """Pruebas del modelo Municipio (catálogo administrable de municipios)."""
 
     def test_creacion_basica_usa_departamento_por_defecto(self):
-        municipio = Municipio.objects.create(codigo="PAMPLONA", nombre="Pamplona")
+        municipio = Municipio.objects.create(codigo="TEST_PAMPLONA_MOD", nombre="Pamplona (prueba)")
         self.assertEqual(municipio.departamento, "Norte de Santander")
         self.assertTrue(municipio.activo)
 
     def test_codigo_unico_en_el_catalogo(self):
-        Municipio.objects.create(codigo="CUCUTA", nombre="Cúcuta")
+        Municipio.objects.create(codigo="TEST_CUCUTA_UNICO", nombre="Cúcuta (prueba)")
         with self.assertRaises(IntegrityError):
-            Municipio.objects.create(codigo="CUCUTA", nombre="Cúcuta (duplicado)")
+            Municipio.objects.create(codigo="TEST_CUCUTA_UNICO", nombre="Cúcuta (duplicado)")
 
 
 class FincaModelTests(TestCase):
     """Pruebas del modelo Finca con relación a Productor y Municipio."""
 
     def setUp(self):
-        self.municipio = Municipio.objects.create(codigo="PAMPLONA", nombre="Pamplona")
+        self.municipio = Municipio.objects.create(codigo="TEST_PAMPLONA_FINCA", nombre="Pamplona (prueba)")
         self.productor_id = uuid.uuid4()
 
     def test_creacion_finca_con_productor_y_municipio(self):
@@ -777,7 +843,7 @@ class AsociacionMultiplesFincasPorProductorTests(TestCase):
     """
 
     def setUp(self):
-        self.municipio = Municipio.objects.create(codigo="PAMPLONA", nombre="Pamplona")
+        self.municipio = Municipio.objects.create(codigo="TEST_PAMPLONA_ASOC", nombre="Pamplona (prueba)")
         self.productor_a = uuid.uuid4()
         self.productor_b = uuid.uuid4()
 
