@@ -63,6 +63,11 @@
                             <a class="nav-link" href="{% url 'registro_actor' %}">Registrar Actor</a>
                         </li>
                     {% endif %}
+                    {% if rol_actual|tiene_permiso:"catalogos_maestros.consultar" %}
+                        <li class="nav-item">
+                            <a class="nav-link" href="{% url 'lista_variedades' %}">Variedades de café</a>
+                        </li>
+                    {% endif %}
                 </ul>
 
                 <!-- Acciones de Usuario (Lógica Condicional Django) -->

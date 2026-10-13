@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}Variedades de café - Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h1 class="h3 fw-bold text-dark mb-1">Catálogo de variedades de café</h1>
+            <p class="text-muted mb-0">Consulte las variedades activas e inactivas registradas.</p>
+        </div>
+        <span class="user-badge">
+            <i class="bi bi-list-ul"></i>
+            <span>{{ variedades|length }} variedad{{ variedades|length|pluralize }}</span>
+        </span>
+    </div>
+
+    <form method="get" class="row g-2 align-items-end mb-4">
+        <div class="col-auto">
+            <label for="filtroEstado" class="form-label small text-muted mb-1">Estado</label>
+            <select class="form-select" id="filtroEstado" name="estado" onchange="this.form.submit()">
+                <option value="" {% if not estado_filtro %}selected{% endif %}>Todas</option>
+                <option value="activas" {% if estado_filtro == "activas" %}selected{% endif %}>Activas</option>
+                <option value="inactivas" {% if estado_filtro == "inactivas" %}selected{% endif %}>Inactivas</option>
+            </select>
+        </div>
+        {% if estado_filtro %}
+            <div class="col-auto">
+                <a href="{% url 'lista_variedades' %}" class="btn btn-outline-pergamo btn-sm">
+                    <i class="bi bi-x-circle me-1"></i> Quitar filtro
+                </a>
+            </div>
+        {% endif %}
+    </form>
+
+    <div class="table-responsive">
+        <table class="table table-hover align-middle bg-white">
+            <thead class="table-light">
+                <tr>
+                    <th>Nombre</th>
+                    <th>Especie</th>
+                    <th>Descripción</th>
+                    <th>Estado</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for variedad in variedades %}
+                    <tr>
+                        <td class="fw-semibold">{{ variedad.nombre }}</td>
+                        <td>{{ variedad.get_especie_display }}</td>
+                        <td>{{ variedad.descripcion|default:"—" }}</td>
+                        <td>
+                            {% if variedad.activo %}
+                                <span class="badge bg-success-subtle text-success border border-success-subtle">Activa</span>
+                            {% else %}
+                                <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">Inactiva</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% empty %}
+                    <tr>
+                        <td colspan="4" class="text-center text-muted py-4">
+                            No hay variedades para el filtro seleccionado.
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
