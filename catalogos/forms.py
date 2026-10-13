@@ -1,0 +1,49 @@
+"""Formularios del catálogo de variedades de café (HU10)."""
+
+from django import forms
+
+from .models import VariedadCafe
+
+
+class VariedadCafeForm(forms.ModelForm):
+    """Valida y normaliza los datos de una variedad antes de guardarla."""
+
+    class Meta:
+        model = VariedadCafe
+        fields = ("nombre", "especie", "descripcion")
+        widgets = {
+            "nombre": forms.TextInput(
+                attrs={
+                    "class": "form-control",
+                    "maxlength": 100,
+                    "placeholder": "Ej. Castillo",
+                    "autocomplete": "off",
+                }
+            ),
+            "especie": forms.Select(attrs={"class": "form-select"}),
+            "descripcion": forms.Textarea(
+                attrs={
+                    "class": "form-control",
+                    "rows": 4,
+                    "placeholder": "Descripción opcional de la variedad.",
+                }
+            ),
+        }
+
+    def clean_nombre(self):
+        nombre = self.cleaned_data["nombre"].strip()
+        if not nombre:
+            raise forms.ValidationError(
+                "El nombre de la variedad es obligatorio."
+            )
+        queryset = VariedadCafe.objects.filter(nombre__iexact=nombre)
+        if self.instance.pk:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise forms.ValidationError(
+                "Ya existe una variedad con ese nombre."
+            )
+        return nombre
+
+    def clean_descripcion(self):
+        return self.cleaned_data.get("descripcion", "").strip()
