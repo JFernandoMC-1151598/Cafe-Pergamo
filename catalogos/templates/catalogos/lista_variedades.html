@@ -44,6 +44,7 @@
         {% endif %}
     </form>
 
+    {% with puede_administrar=rol_actual|tiene_permiso:"catalogos_maestros.administrar" %}
     <div class="table-responsive">
         <table class="table table-hover align-middle bg-white">
             <thead class="table-light">
@@ -52,6 +53,7 @@
                     <th>Especie</th>
                     <th>Descripción</th>
                     <th>Estado</th>
+                    {% if puede_administrar %}<th>Acciones</th>{% endif %}
                 </tr>
             </thead>
             <tbody>
@@ -67,10 +69,17 @@
                                 <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">Inactiva</span>
                             {% endif %}
                         </td>
+                        {% if puede_administrar %}
+                            <td>
+                                <a href="{% url 'editar_variedad' variedad.id %}" class="btn btn-outline-pergamo btn-sm">
+                                    <i class="bi bi-pencil-square me-1"></i> Editar
+                                </a>
+                            </td>
+                        {% endif %}
                     </tr>
                 {% empty %}
                     <tr>
-                        <td colspan="4" class="text-center text-muted py-4">
+                        <td colspan="{% if puede_administrar %}5{% else %}4{% endif %}" class="text-center text-muted py-4">
                             No hay variedades para el filtro seleccionado.
                         </td>
                     </tr>
@@ -78,5 +87,6 @@
             </tbody>
         </table>
     </div>
+    {% endwith %}
 </div>
 {% endblock %}

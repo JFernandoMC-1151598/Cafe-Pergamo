@@ -12,4 +12,9 @@ urlpatterns = [
         views.crear_variedad_view,
         name="crear_variedad",
     ),
+    path(
+        "variedades/<int:variedad_id>/editar/",
+        views.editar_variedad_view,
+        name="editar_variedad",
+    ),
 ]
