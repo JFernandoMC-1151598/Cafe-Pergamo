@@ -889,3 +889,102 @@ class AsociacionMultiplesFincasPorProductorTests(TestCase):
         Finca.objects.create(nombre="Finca 1", productor_id=self.productor_a, municipio=self.municipio)
         with self.assertRaises(IntegrityError):
             Finca.objects.create(nombre="Finca 2 sin municipio", productor_id=self.productor_a, municipio=None)
+
+
+class ValidacionCamposObligatoriosRegistroTests(TestCase):
+    """
+    HU06-ST4 (SCRUM-89): Validar campos obligatorios y consistencia de
+    datos del registro.
+
+    Criterio de aceptación: "Rechazo en backend si falta el nombre o el
+    municipio seleccionado no es válido." Estas pruebas verifican ambas
+    mitades del criterio, en la vista web y en el endpoint de la API,
+    y confirman que un municipio inválido no se "resuelve" creando uno
+    nuevo (ese era, precisamente, el defecto que corrigió HU06-ST3).
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_registro = reverse("finca_registro")
+        self.url_api = reverse("api_finca_crear")
+        self.municipio_valido = Municipio.objects.get(codigo="TOLEDO")
+
+    # -------------------------------------------------------------------
+    # Falta el nombre
+    # -------------------------------------------------------------------
+    def test_vista_rechaza_registro_sin_nombre(self):
+        """La vista no crea la finca si el nombre viene vacío."""
+        conteo_previo = Finca.objects.count()
+        response = self.client.post(self.url_registro, {
+            "nombre": "",
+            "municipio": self.municipio_valido.pk,
+            "latitud": "",
+            "longitud": "",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Finca.objects.count(), conteo_previo)
+
+    @patch("fincas.views.Usuario")
+    def test_api_rechaza_registro_sin_nombre(self, mock_usuario_model):
+        """El endpoint API responde 400 si falta el nombre."""
+        payload = {
+            "municipio": self.municipio_valido.pk,
+        }
+        response = self.client.post(
+            self.url_api, payload, content_type="application/json", **_jwt_bearer_headers()
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("nombre", response.json())
+        # El rechazo ocurre en la validación del serializer, antes de
+        # intentar resolver el productor.
+        mock_usuario_model.objects.filter.assert_not_called()
+
+    # -------------------------------------------------------------------
+    # Municipio faltante o inválido (no se "resuelve" creando uno nuevo)
+    # -------------------------------------------------------------------
+    def test_vista_rechaza_registro_sin_municipio_seleccionado(self):
+        """La vista no crea la finca si no se selecciona ningún municipio."""
+        conteo_previo = Finca.objects.count()
+        response = self.client.post(self.url_registro, {
+            "nombre": "Finca Sin Municipio",
+            "municipio": "",
+            "latitud": "",
+            "longitud": "",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Finca.objects.count(), conteo_previo)
+
+    def test_vista_rechaza_municipio_que_no_existe_en_el_catalogo(self):
+        """
+        Un id de municipio que no existe en el catálogo (por ejemplo, un
+        valor manipulado fuera del <select>) se rechaza; ya NO se crea
+        un municipio nuevo "al vuelo" como antes de HU06-ST3.
+        """
+        conteo_previo = Finca.objects.count()
+        id_inexistente = Municipio.objects.order_by("-pk").first().pk + 1000
+        response = self.client.post(self.url_registro, {
+            "nombre": "Finca Municipio Inventado",
+            "municipio": id_inexistente,
+            "latitud": "",
+            "longitud": "",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Finca.objects.count(), conteo_previo)
+        self.assertEqual(Municipio.objects.filter(pk=id_inexistente).count(), 0)
+
+    def test_api_rechaza_municipio_que_no_existe_en_el_catalogo(self):
+        """
+        El endpoint API responde 400 ante un nombre de municipio que no
+        existe, y NO crea un municipio nuevo a partir de ese texto.
+        """
+        conteo_municipios_previo = Municipio.objects.count()
+        payload = {
+            "nombre": "Finca Municipio Inventado API",
+            "municipio": "Municipio Que No Existe",
+        }
+        response = self.client.post(
+            self.url_api, payload, content_type="application/json", **_jwt_bearer_headers()
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("municipio", response.json())
+        self.assertEqual(Municipio.objects.count(), conteo_municipios_previo)
