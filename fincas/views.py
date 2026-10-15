@@ -4,6 +4,8 @@ Subtarea: SCRUM-95 / HU07-ST1: Diseñar el campo opcional de coordenadas para ge
 Subtarea: SCRUM-96: Guardar georreferenciación en backend.
 Subtarea: SCRUM-91 / HU06-ST3: Crear formulario de registro de finca(s) en la interfaz.
 Subtarea: SCRUM-89 / HU06-ST4: Validar campos obligatorios y consistencia de datos del registro.
+Subtarea: SCRUM-90 / HU06-ST5: Implementar servicio/API para registrar fincas.
+Subtarea: SCRUM-92 / HU06-ST6: Listar fincas registradas por productor.
 """
 
 from django.contrib import messages
@@ -128,8 +130,17 @@ def registrar_finca_view(request):
 @api_view(["POST"])
 def api_crear_finca_view(request):
     """
-    Endpoint REST para registrar fincas con georreferenciación (SCRUM-96).
+    Endpoint REST para registrar fincas con georreferenciación
+    (SCRUM-96 / SCRUM-90 / HU06-ST5).
     POST /fincas/api/
+
+    Criterio de Aceptación de HU06-ST5: "Controlador POST que asigna
+    automáticamente request.user y guarda la finca" -- por eso el
+    productor NUNCA se toma de un campo del body que el cliente podría
+    falsificar: `_resolver_productor_id(request)` lo deduce del usuario
+    realmente autenticado (sesión o JWT) y se lo pasa a `serializer.save()`
+    como `productor_id`, igual que `registrar_finca_view` hace para la
+    versión web del mismo flujo.
 
     Hereda la autenticación/autorización por defecto del proyecto
     (JWTAuthentication + IsAuthenticated, ver settings.REST_FRAMEWORK) en
@@ -173,3 +184,53 @@ def api_detalle_finca_view(request, pk):
         finca_actualizada = serializer.save()
         return Response(FincaGeorreferenciacionSerializer(finca_actualizada).data)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+def mis_fincas_view(request):
+    """
+    Vista web "Mis Fincas" (SCRUM-92 / HU06-ST6).
+
+    Criterio de Aceptación (DoD): "Implementar la consulta o vista que
+    permita visualizar las fincas ya asociadas a cada productor."
+
+    Punto clave de seguridad (también cubre el criterio de "aislamiento
+    entre usuarios" de SCRUM-93 / HU06-ST7): el listado SIEMPRE se filtra
+    por el productor realmente autenticado (`_resolver_productor_id`), que
+    es el mismo helper que ya usan `registrar_finca_view` y
+    `api_crear_finca_view`. Nunca se expone aquí el catálogo completo de
+    fincas de todos los productores -- cada quien ve únicamente las suyas.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(
+            request,
+            "Debe iniciar sesión con su cuenta de productor para ver sus fincas."
+        )
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    fincas = (
+        Finca.objects.filter(productor_id=productor_id, activo=True)
+        .select_related("municipio")
+        .order_by("-creado_en")
+    )
+
+    # Subconjunto georreferenciado, serializado para el mapa (fincas sin
+    # coordenadas simplemente no se pintan como marcador, pero sí aparecen
+    # en el listado de tarjetas de la plantilla).
+    fincas_geo = [
+        {
+            "nombre": finca.nombre,
+            "municipio": finca.municipio.nombre,
+            "vereda": finca.vereda or "",
+            "lat": finca.latitud,
+            "lng": finca.longitud,
+        }
+        for finca in fincas
+        if finca.tiene_georreferenciacion
+    ]
+
+    return render(
+        request,
+        "fincas/mis_fincas.html",
+        {"fincas": fincas, "fincas_geo": fincas_geo},
+    )

@@ -146,6 +146,16 @@
 </div>
 {% endblock %}
 
+{% block extra_css %}
+<!-- HU07: Leaflet + OpenStreetMap para el mapa interactivo de respaldo de
+     georreferenciación (static/js/georreferenciacion.js). Gratis, sin API
+     Key ni registro -- el CSS se carga aquí (liviano) y el JS se carga
+     perezosamente solo si el usuario abre el mapa. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin="">
+{% endblock %}
+
 {% block extra_js %}
 <script src="{% static 'js/georreferenciacion.js' %}"></script>
 {% endblock %}

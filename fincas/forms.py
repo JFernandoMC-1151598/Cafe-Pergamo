@@ -21,6 +21,21 @@ from .validators import (
 )
 
 
+class MunicipioChoiceField(forms.ModelChoiceField):
+    """
+    ModelChoiceField que muestra solo el nombre del municipio en el
+    <select> (p. ej. "Chinácota"), sin repetir "(Norte de Santander)" en
+    cada opción: todo el catálogo pertenece a ese departamento, así que
+    el sufijo es ruido visual en una lista de 40 opciones. El __str__
+    completo del modelo ("Chinácota (Norte de Santander)") se conserva
+    para otros usos (admin, logs, etc.), aquí solo se cambia el label
+    que ve el usuario en el formulario.
+    """
+
+    def label_from_instance(self, obj):
+        return obj.nombre
+
+
 def _municipio_field(**overrides):
     """
     Construye el campo `municipio` como una selección real del catálogo
@@ -43,7 +58,7 @@ def _municipio_field(**overrides):
         widget=forms.Select(attrs={"class": "form-select", "id": "id_municipio"}),
     )
     defaults.update(overrides)
-    return forms.ModelChoiceField(**defaults)
+    return MunicipioChoiceField(**defaults)
 
 
 class GeorreferenciacionFormMixin(forms.Form):

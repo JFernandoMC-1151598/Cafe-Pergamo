@@ -30,10 +30,17 @@
                         id="btnExplorarCatalogo">
                         <i class="bi bi-grid-3x3-gap-fill me-2"></i>Explorar Catálogo de Lotes
                     </a>
+                    {% if user.is_authenticated %}
+                    <a href="{% url 'finca_registro' %}" class="btn btn-outline-pergamo btn-lg px-4"
+                        id="btnRegistroProductor">
+                        <i class="bi bi-pin-map-fill me-2"></i>Registrar Finca
+                    </a>
+                    {% else %}
                     <a href="{% url 'registro' %}" class="btn btn-outline-pergamo btn-lg px-4"
                         id="btnRegistroProductor">
                         <i class="bi bi-person-plus-fill me-2"></i>Registrarme como Productor
                     </a>
+                    {% endif %}
                 </div>
 
                 <!-- Métricas y Valores Destacados -->

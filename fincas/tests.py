@@ -988,3 +988,105 @@ class ValidacionCamposObligatoriosRegistroTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("municipio", response.json())
         self.assertEqual(Municipio.objects.count(), conteo_municipios_previo)
+
+
+# =============================================================================
+# SUITE HU06-ST6 (SCRUM-92): LISTADO "MIS FINCAS" POR PRODUCTOR
+# =============================================================================
+
+class ListadoMisFincasTests(TestCase):
+    """
+    HU06-ST6 (SCRUM-92): Listar fincas registradas por productor.
+    Criterio de aceptación: "Implementar la consulta o vista que permita
+    visualizar las fincas ya asociadas a cada productor."
+
+    También verifica el criterio de "aislamiento entre usuarios" que pide
+    SCRUM-93 / HU06-ST7: un productor jamás debe ver las fincas de otro.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_mis_fincas = reverse("mis_fincas")
+        self.municipio = Municipio.objects.create(
+            codigo="TEST_MISFINCAS", nombre="Toledo (prueba mis fincas)"
+        )
+
+    def test_redirige_a_login_si_no_hay_sesion(self):
+        """Un visitante anónimo no puede ver el listado: se le redirige a login."""
+        response = self.client.get(self.url_mis_fincas)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+
+    def test_solo_muestra_fincas_del_productor_autenticado(self):
+        """
+        Aislamiento entre usuarios: el productor A nunca debe ver, en su
+        propio listado, las fincas registradas por el productor B.
+        """
+        productor_a = uuid.uuid4()
+        productor_b = uuid.uuid4()
+
+        Finca.objects.create(nombre="Finca de A", productor_id=productor_a, municipio=self.municipio)
+        Finca.objects.create(nombre="Otra finca de A", productor_id=productor_a, municipio=self.municipio)
+        Finca.objects.create(nombre="Finca de B", productor_id=productor_b, municipio=self.municipio)
+
+        _iniciar_sesion_productor(self.client, usuario_id=productor_a)
+        response = self.client.get(self.url_mis_fincas)
+
+        self.assertEqual(response.status_code, 200)
+        nombres_mostrados = {finca.nombre for finca in response.context["fincas"]}
+        self.assertEqual(nombres_mostrados, {"Finca de A", "Otra finca de A"})
+        self.assertNotIn("Finca de B", nombres_mostrados)
+
+    def test_muestra_estado_vacio_si_el_productor_no_tiene_fincas(self):
+        """Un productor sin fincas registradas ve la página (200), con el listado vacío."""
+        _iniciar_sesion_productor(self.client)
+        response = self.client.get(self.url_mis_fincas)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(list(response.context["fincas"]), [])
+
+    def test_fincas_inactivas_no_aparecen_en_el_listado(self):
+        """Una finca dada de baja (activo=False) no debe listarse."""
+        productor_id = _iniciar_sesion_productor(self.client)
+        Finca.objects.create(
+            nombre="Finca Activa", productor_id=productor_id, municipio=self.municipio
+        )
+        Finca.objects.create(
+            nombre="Finca Inactiva", productor_id=productor_id, municipio=self.municipio, activo=False
+        )
+
+        response = self.client.get(self.url_mis_fincas)
+        nombres_mostrados = {finca.nombre for finca in response.context["fincas"]}
+        self.assertEqual(nombres_mostrados, {"Finca Activa"})
+
+    def test_fincas_con_coordenadas_se_incluyen_en_los_datos_del_mapa(self):
+        """Las fincas georreferenciadas sí deben aparecer en `fincas_geo` (datos del mapa)."""
+        productor_id = _iniciar_sesion_productor(self.client)
+        Finca.objects.create(
+            nombre="Finca Con GPS",
+            productor_id=productor_id,
+            municipio=self.municipio,
+            latitud="7.373000",
+            longitud="-72.648000",
+        )
+
+        response = self.client.get(self.url_mis_fincas)
+        fincas_geo = response.context["fincas_geo"]
+        self.assertEqual(len(fincas_geo), 1)
+        self.assertEqual(fincas_geo[0]["nombre"], "Finca Con GPS")
+        self.assertEqual(fincas_geo[0]["municipio"], self.municipio.nombre)
+
+    def test_fincas_sin_coordenadas_se_excluyen_de_los_datos_del_mapa(self):
+        """
+        Una finca sin georreferenciación debe seguir apareciendo en
+        `fincas` (listado de tarjetas) pero NO en `fincas_geo` (no hay
+        coordenada que pintar como marcador).
+        """
+        productor_id = _iniciar_sesion_productor(self.client)
+        Finca.objects.create(
+            nombre="Finca Sin GPS", productor_id=productor_id, municipio=self.municipio
+        )
+
+        response = self.client.get(self.url_mis_fincas)
+        self.assertEqual(len(response.context["fincas"]), 1)
+        self.assertEqual(response.context["fincas_geo"], [])
+

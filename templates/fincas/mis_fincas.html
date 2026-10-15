@@ -1,0 +1,96 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Mis Fincas — Café Pérgamo{% endblock %}
+
+{% block extra_css %}
+<!-- HU06-ST6 (SCRUM-92): Leaflet + Esri World Street Map para el mapa con
+     todas las fincas georreferenciadas del productor (sin API Key, ver
+     static/js/mis_fincas.js). -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin="">
+{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <!-- Encabezado -->
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
+        <div>
+            <h1 class="h3 fw-bold text-dark mb-1">Mis Fincas</h1>
+            <p class="text-muted mb-0">Predios cafeteros registrados a tu nombre en Café Pérgamo.</p>
+        </div>
+        <a href="{% url 'finca_registro' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
+            <i class="bi bi-plus-circle me-1"></i> Registrar Finca
+        </a>
+    </div>
+
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+    {% endif %}
+
+    {% if fincas %}
+    <!-- Mapa con todas las fincas georreferenciadas del productor -->
+    <div class="card border-0 shadow-sm rounded-4 mb-4">
+        <div class="card-body p-4">
+            <h6 class="text-uppercase fw-bold text-muted small mb-3">
+                <i class="bi bi-geo-alt me-1 text-success"></i> Ubicación de tus Fincas
+            </h6>
+            {{ fincas_geo|json_script:"fincas-geo-data" }}
+            <div id="mapa-mis-fincas" class="border rounded-3 overflow-hidden" style="width: 100%; height: 360px; background-color: #eef2ef;"></div>
+        </div>
+    </div>
+
+    <!-- Listado en tarjetas: incluye tambien las fincas sin georreferenciación -->
+    <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
+        {% for finca in fincas %}
+        <div class="col">
+            <div class="card h-100 border-0 shadow-sm rounded-4">
+                <div class="card-body p-4 d-flex flex-column">
+                    <div class="d-flex align-items-start justify-content-between gap-2 mb-2">
+                        <h5 class="card-title fw-bold text-dark mb-0">{{ finca.nombre }}</h5>
+                        {% if finca.tiene_georreferenciacion %}
+                        <span class="badge bg-success-subtle text-success border border-success-subtle small flex-shrink-0">
+                            <i class="bi bi-geo-alt-fill me-1"></i>GPS
+                        </span>
+                        {% else %}
+                        <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle small flex-shrink-0">
+                            <i class="bi bi-dash-circle me-1"></i>Sin GPS
+                        </span>
+                        {% endif %}
+                    </div>
+                    <p class="text-muted small mb-1">
+                        <i class="bi bi-pin-map me-1"></i>{{ finca.municipio.nombre }}{% if finca.vereda %} &middot; {{ finca.vereda }}{% endif %}
+                    </p>
+                    <p class="text-muted small mb-0">
+                        <i class="bi bi-calendar3 me-1"></i>Registrada el {{ finca.creado_en|date:"d/m/Y" }}
+                    </p>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <!-- Estado vacío: el productor aún no tiene fincas registradas -->
+    <div class="card border-0 shadow-sm rounded-4">
+        <div class="card-body p-5 text-center">
+            <i class="bi bi-pin-map fs-1 text-muted mb-3 d-block"></i>
+            <h5 class="fw-bold text-dark">Todavía no tienes fincas registradas</h5>
+            <p class="text-muted mb-4">Registra tu primer predio cafetero para empezar a asociar cosechas y lotes.</p>
+            <a href="{% url 'finca_registro' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
+                <i class="bi bi-plus-circle me-1"></i> Registrar mi primera finca
+            </a>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/mis_fincas.js' %}"></script>
+{% endblock %}
