@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+
+{% block title %}{% if modo_edicion %}Editar variedad{% else %}Registrar variedad{% endif %} - Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h1 class="h3 fw-bold text-dark mb-1">
+                {% if modo_edicion %}Editar variedad de café{% else %}Registrar variedad de café{% endif %}
+            </h1>
+            <p class="text-muted mb-0">
+                {% if modo_edicion %}Actualice la información de la variedad seleccionada.{% else %}Agregue una nueva variedad al catálogo maestro.{% endif %}
+            </p>
+        </div>
+        <a href="{% url 'lista_variedades' %}" class="btn btn-outline-pergamo">
+            <i class="bi bi-arrow-left me-1"></i> Volver al catálogo
+        </a>
+    </div>
+
+    {% if form.non_field_errors %}
+        <div class="alert alert-danger" role="alert">
+            {{ form.non_field_errors }}
+        </div>
+    {% endif %}
+
+    <div class="card border-0 shadow-sm mx-auto" style="max-width: 760px;">
+        <div class="card-header bg-white border-bottom p-4">
+            <div class="d-flex align-items-center gap-3">
+                <span class="rounded-circle bg-success-subtle text-success p-3">
+                    <i class="bi bi-cup-hot-fill fs-5"></i>
+                </span>
+                <div>
+                    <h2 class="h5 fw-bold text-dark mb-1">Datos de la variedad</h2>
+                    <p class="text-muted small mb-0">
+                        {% if modo_edicion %}Modifique los datos que necesite conservar en el catálogo.{% else %}Complete la información básica del nuevo registro.{% endif %}
+                    </p>
+                </div>
+            </div>
+        </div>
+        <div class="card-body p-4 p-md-5">
+            <form method="post" novalidate>
+                {% csrf_token %}
+
+                <div class="row g-4 mb-4">
+                    <div class="col-md-7">
+                    <label for="{{ form.nombre.id_for_label }}" class="form-label">
+                        Nombre <span class="text-danger">*</span>
+                    </label>
+                    {{ form.nombre }}
+                    {% if form.nombre.errors %}
+                        <div class="invalid-feedback d-block">{{ form.nombre.errors|striptags }}</div>
+                    {% endif %}
+                    <div class="form-text">Use el nombre con el que se identifica comercialmente.</div>
+                    </div>
+
+                    <div class="col-md-5">
+                    <label for="{{ form.especie.id_for_label }}" class="form-label">
+                        Especie <span class="text-danger">*</span>
+                    </label>
+                    {{ form.especie }}
+                    {% if form.especie.errors %}
+                        <div class="invalid-feedback d-block">{{ form.especie.errors|striptags }}</div>
+                    {% endif %}
+                    </div>
+                </div>
+
+                <div class="mb-4">
+                    <label for="{{ form.descripcion.id_for_label }}" class="form-label">
+                        Descripción
+                    </label>
+                    {{ form.descripcion }}
+                    {% if form.descripcion.errors %}
+                        <div class="invalid-feedback d-block">{{ form.descripcion.errors|striptags }}</div>
+                    {% endif %}
+                    <div class="form-text">Este campo es opcional y puede incluir características relevantes.</div>
+                </div>
+
+                <div class="d-flex flex-column flex-sm-row justify-content-end gap-2 pt-3 border-top">
+                    <button type="submit" class="btn btn-pergamo">
+                        <i class="bi bi-save me-1"></i>
+                        {% if modo_edicion %}Guardar cambios{% else %}Registrar variedad{% endif %}
+                    </button>
+                    <a href="{% url 'lista_variedades' %}" class="btn btn-outline-secondary">
+                        Cancelar
+                    </a>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
