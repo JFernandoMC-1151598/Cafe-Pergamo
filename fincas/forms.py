@@ -3,10 +3,10 @@ Formularios para el módulo de Fincas y Georreferenciación - CAFÉ PÉRGAMO
 Subtarea: SCRUM-95 / HU07-ST1: Diseñar el campo opcional de coordenadas para georreferenciación.
 Subtarea: SCRUM-98 / HU07-ST5: Actualizar el modelo o esquema de datos para georreferenciación.
 Subtarea: SCRUM-97: Validar formato de coordenadas.
+Subtarea: SCRUM-91 / HU06-ST3: Crear formulario de registro de finca(s) en la interfaz.
+Subtarea: SCRUM-89 / HU06-ST4: Validar campos obligatorios y consistencia de datos del registro.
 """
 
-import uuid
-from decimal import Decimal
 from django import forms
 from .models import Finca, Municipio
 
@@ -21,11 +21,50 @@ from .validators import (
 )
 
 
+class MunicipioChoiceField(forms.ModelChoiceField):
+    """
+    ModelChoiceField que muestra solo el nombre del municipio en el
+    <select> (p. ej. "Chinácota"), sin repetir "(Norte de Santander)" en
+    cada opción: todo el catálogo pertenece a ese departamento, así que
+    el sufijo es ruido visual en una lista de 40 opciones. El __str__
+    completo del modelo ("Chinácota (Norte de Santander)") se conserva
+    para otros usos (admin, logs, etc.), aquí solo se cambia el label
+    que ve el usuario en el formulario.
+    """
+
+    def label_from_instance(self, obj):
+        return obj.nombre
+
+
+def _municipio_field(**overrides):
+    """
+    Construye el campo `municipio` como una selección real del catálogo
+    (RF07 / HU06-ST3 / HU06-ST4): el usuario SOLO puede elegir uno de los
+    municipios ya existentes en `Municipio` (activos). Antes era un
+    `CharField` de texto libre que creaba un municipio nuevo con
+    `get_or_create` por cada error de tipeo -- exactamente lo que
+    SCRUM-89 ("Rechazo en backend si ... el municipio seleccionado no es
+    válido") pide impedir.
+    """
+    defaults = dict(
+        queryset=Municipio.objects.filter(activo=True).order_by("nombre"),
+        required=True,
+        label="Municipio",
+        empty_label="Seleccione un municipio del catálogo...",
+        error_messages={
+            "required": "El municipio es obligatorio.",
+            "invalid_choice": "El municipio seleccionado no es válido. Debe elegirlo del catálogo.",
+        },
+        widget=forms.Select(attrs={"class": "form-select", "id": "id_municipio"}),
+    )
+    defaults.update(overrides)
+    return MunicipioChoiceField(**defaults)
+
 
 class GeorreferenciacionFormMixin(forms.Form):
     """
     Mixin / Formulario base con los campos de georreferenciación (HU-07).
-    
+
     Criterios de aceptación (DoD de HU07-ST1 y SCRUM-97):
     - Campo de coordenadas opcional (required=False).
     - Inputs con placeholders indicativos de formato decimal (WGS84).
@@ -120,18 +159,7 @@ class FincaRegistroForm(GeorreferenciacionFormMixin):
         ),
     )
 
-    municipio = forms.CharField(
-        max_length=100,
-        required=True,
-        label="Municipio",
-        widget=forms.TextInput(
-            attrs={
-                "class": "form-control",
-                "id": "id_municipio",
-                "placeholder": "Ej: Arboledas, Toledo, Salazar...",
-            }
-        ),
-    )
+    municipio = _municipio_field()
 
     vereda = forms.CharField(
         max_length=150,
@@ -153,15 +181,7 @@ class FincaModelForm(forms.ModelForm):
     Garantiza compatibilidad ORM y persistencia directa con validación SCRUM-97.
     """
 
-    municipio = forms.CharField(
-        max_length=100,
-        required=True,
-        widget=forms.TextInput(attrs={
-            "class": "form-control",
-            "id": "id_municipio",
-            "placeholder": "Ej: Toledo, Arboledas, Salazar...",
-        }),
-    )
+    municipio = _municipio_field()
 
     class Meta:
         model = Finca
@@ -195,23 +215,6 @@ class FincaModelForm(forms.ModelForm):
             }),
         }
 
-    def clean_municipio(self):
-        val = self.cleaned_data.get("municipio")
-        if isinstance(val, Municipio):
-            return val
-        if not val:
-            raise forms.ValidationError("El municipio es obligatorio.")
-        mun_nombre = str(val).strip()
-        mun, _ = Municipio.objects.get_or_create(
-            nombre__iexact=mun_nombre,
-            defaults={
-                "nombre": mun_nombre,
-                "codigo": mun_nombre.upper()[:20],
-                "departamento": "Norte de Santander",
-            },
-        )
-        return mun
-
     def clean(self):
         cleaned_data = super().clean()
         lat = cleaned_data.get("latitud")
@@ -221,9 +224,13 @@ class FincaModelForm(forms.ModelForm):
 
     def save(self, commit=True, productor_id=None):
         instance = super().save(commit=False)
+        if productor_id is not None:
+            instance.productor_id = productor_id
         if not instance.productor_id:
-            instance.productor_id = productor_id or uuid.uuid4()
+            raise ValueError(
+                "No se puede registrar una finca sin un productor identificado "
+                "(productor_id). Verifique que el usuario tenga una sesión válida."
+            )
         if commit:
             instance.save()
         return instance
-
