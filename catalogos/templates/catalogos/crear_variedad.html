@@ -1,13 +1,17 @@
 {% extends "base.html" %}
 
-{% block title %}Registrar variedad - Café Pérgamo{% endblock %}
+{% block title %}{% if modo_edicion %}Editar variedad{% else %}Registrar variedad{% endif %} - Café Pérgamo{% endblock %}
 
 {% block content %}
 <div class="container py-4">
     <div class="d-flex justify-content-between align-items-center mb-4">
         <div>
-            <h1 class="h3 fw-bold text-dark mb-1">Registrar variedad de café</h1>
-            <p class="text-muted mb-0">Agregue una nueva variedad al catálogo maestro.</p>
+            <h1 class="h3 fw-bold text-dark mb-1">
+                {% if modo_edicion %}Editar variedad de café{% else %}Registrar variedad de café{% endif %}
+            </h1>
+            <p class="text-muted mb-0">
+                {% if modo_edicion %}Actualice la información de la variedad seleccionada.{% else %}Agregue una nueva variedad al catálogo maestro.{% endif %}
+            </p>
         </div>
         <a href="{% url 'lista_variedades' %}" class="btn btn-outline-pergamo">
             <i class="bi bi-arrow-left me-1"></i> Volver al catálogo
@@ -28,7 +32,9 @@
                 </span>
                 <div>
                     <h2 class="h5 fw-bold text-dark mb-1">Datos de la variedad</h2>
-                    <p class="text-muted small mb-0">Complete la información básica del nuevo registro.</p>
+                    <p class="text-muted small mb-0">
+                        {% if modo_edicion %}Modifique los datos que necesite conservar en el catálogo.{% else %}Complete la información básica del nuevo registro.{% endif %}
+                    </p>
                 </div>
             </div>
         </div>
@@ -72,7 +78,8 @@
 
                 <div class="d-flex flex-column flex-sm-row justify-content-end gap-2 pt-3 border-top">
                     <button type="submit" class="btn btn-pergamo">
-                        <i class="bi bi-save me-1"></i> Registrar variedad
+                        <i class="bi bi-save me-1"></i>
+                        {% if modo_edicion %}Guardar cambios{% else %}Registrar variedad{% endif %}
                     </button>
                     <a href="{% url 'lista_variedades' %}" class="btn btn-outline-secondary">
                         Cancelar

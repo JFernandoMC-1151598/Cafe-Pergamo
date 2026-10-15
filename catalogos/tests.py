@@ -3,11 +3,17 @@
 from unittest.mock import patch
 
 from django.contrib.messages.storage.fallback import FallbackStorage
+from django.core.exceptions import ValidationError
 from django.test import RequestFactory, TestCase
 from django.urls import reverse
 
 from .models import VariedadCafe
-from .views import crear_variedad_view, lista_variedades_view
+from .views import (
+    alternar_estado_variedad_view,
+    crear_variedad_view,
+    editar_variedad_view,
+    lista_variedades_view,
+)
 
 
 class VariedadCafeEspeciesTests(TestCase):
@@ -18,6 +24,28 @@ class VariedadCafeEspeciesTests(TestCase):
             set(VariedadCafe.Especie.values),
             {"ARABICA", "ROBUSTA", "LIBERICA", "EXCELSA"},
         )
+
+    def test_modelo_rechaza_nombre_vacio(self):
+        variedad = VariedadCafe(
+            nombre="   ",
+            especie=VariedadCafe.Especie.ARABICA,
+        )
+
+        with self.assertRaises(ValidationError) as contexto:
+            variedad.full_clean()
+
+        self.assertIn("nombre", contexto.exception.message_dict)
+
+    def test_modelo_rechaza_especie_invalida(self):
+        variedad = VariedadCafe(
+            nombre="Variedad inválida",
+            especie="NO_EXISTE",
+        )
+
+        with self.assertRaises(ValidationError) as contexto:
+            variedad.full_clean()
+
+        self.assertIn("especie", contexto.exception.message_dict)
 
 
 class ListaVariedadesTests(TestCase):
@@ -92,6 +120,18 @@ class ListaVariedadesTests(TestCase):
 
         self.assertContains(response, "Castillo")
         self.assertNotContains(response, "Robusta Tradicional")
+
+    @patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_filtro_muestra_solo_inactivas(
+        self, _mock_permission, _mock_template_permission
+    ):
+        response = lista_variedades_view(
+            self._request(True, role="ADMINISTRADOR", estado="inactivas")
+        )
+
+        self.assertContains(response, "Robusta Tradicional")
+        self.assertNotContains(response, "Castillo")
 
 
 class CrearVariedadTests(TestCase):
@@ -202,3 +242,274 @@ class CrearVariedadTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Ya existe")
         self.assertEqual(VariedadCafe.objects.count(), 1)
+
+
+class EditarVariedadTests(TestCase):
+    """Comprueba la actualización de variedades sin alterar su estado."""
+
+    def _request(self, variedad_id, authenticated, role="", data=None):
+        url = reverse("editar_variedad", args=[variedad_id])
+        request = RequestFactory().post(url, data=data or {}) if data is not None else RequestFactory().get(url)
+        request.user = type(
+            "User",
+            (),
+            {
+                "is_authenticated": authenticated,
+                "username": "admin@example.com",
+                "first_name": "Admin",
+            },
+        )()
+        request.session = {"rol": role} if role else {}
+        request._messages = FallbackStorage(request)
+        return request
+
+    def setUp(self):
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo",
+            especie=VariedadCafe.Especie.ARABICA,
+            descripcion="Descripción original.",
+            activo=False,
+        )
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=False)
+    def test_rol_sin_permiso_recibe_403(self, _mock_permission):
+        response = editar_variedad_view(
+            self._request(self.variedad.id, True, role="PRODUCTOR"),
+            self.variedad.id,
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_post_actualiza_datos_y_conserva_estado(self, _mock_permission):
+        response = editar_variedad_view(
+            self._request(
+                self.variedad.id,
+                True,
+                role="ADMINISTRADOR",
+                data={
+                    "nombre": "Castillo Mejorado",
+                    "especie": VariedadCafe.Especie.LIBERICA,
+                    "descripcion": "Descripción actualizada.",
+                },
+            ),
+            self.variedad.id,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("lista_variedades"))
+        self.variedad.refresh_from_db()
+        self.assertEqual(self.variedad.nombre, "Castillo Mejorado")
+        self.assertEqual(self.variedad.especie, VariedadCafe.Especie.LIBERICA)
+        self.assertEqual(self.variedad.descripcion, "Descripción actualizada.")
+        self.assertFalse(self.variedad.activo)
+
+    @patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_post_rechaza_nombre_de_otra_variedad(
+        self, _mock_permission, _mock_template_permission
+    ):
+        VariedadCafe.objects.create(
+            nombre="Caturra",
+            especie=VariedadCafe.Especie.ARABICA,
+        )
+
+        response = editar_variedad_view(
+            self._request(
+                self.variedad.id,
+                True,
+                role="ADMINISTRADOR",
+                data={
+                    "nombre": "caturra",
+                    "especie": VariedadCafe.Especie.ARABICA,
+                    "descripcion": "No debe guardarse.",
+                },
+            ),
+            self.variedad.id,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Ya existe")
+        self.variedad.refresh_from_db()
+        self.assertEqual(self.variedad.nombre, "Castillo")
+
+
+class AlternarEstadoVariedadTests(TestCase):
+    """Comprueba la baja lógica y la reactivación del catálogo."""
+
+    def _request(self, variedad_id, authenticated, role=""):
+        request = RequestFactory().post(
+            reverse("alternar_estado_variedad", args=[variedad_id])
+        )
+        request.user = type(
+            "User",
+            (),
+            {
+                "is_authenticated": authenticated,
+                "username": "admin@example.com",
+                "first_name": "Admin",
+            },
+        )()
+        request.session = {"rol": role} if role else {}
+        request._messages = FallbackStorage(request)
+        return request
+
+    def setUp(self):
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo",
+            especie=VariedadCafe.Especie.ARABICA,
+        )
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=False)
+    def test_rol_sin_permiso_recibe_403(self, _mock_permission):
+        response = alternar_estado_variedad_view(
+            self._request(self.variedad.id, True, role="PRODUCTOR"),
+            self.variedad.id,
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_inactivar_cambia_estado_sin_eliminar_registro(
+        self, _mock_permission
+    ):
+        response = alternar_estado_variedad_view(
+            self._request(self.variedad.id, True, role="ADMINISTRADOR"),
+            self.variedad.id,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("lista_variedades"))
+        self.variedad.refresh_from_db()
+        self.assertFalse(self.variedad.activo)
+        self.assertTrue(
+            VariedadCafe.objects.filter(pk=self.variedad.id).exists()
+        )
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_variedad_inactiva_puede_reactivarse(self, _mock_permission):
+        self.variedad.activo = False
+        self.variedad.save(update_fields=["activo", "actualizado_en"])
+
+        response = alternar_estado_variedad_view(
+            self._request(self.variedad.id, True, role="ADMINISTRADOR"),
+            self.variedad.id,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.variedad.refresh_from_db()
+        self.assertTrue(self.variedad.activo)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_get_no_cambia_estado_y_responde_metodo_no_permitido(
+        self, _mock_permission
+    ):
+        request = RequestFactory().get(
+            reverse("alternar_estado_variedad", args=[self.variedad.id])
+        )
+        request.user = type(
+            "User",
+            (),
+            {
+                "is_authenticated": True,
+            },
+        )()
+        request.session = {"rol": "ADMINISTRADOR"}
+        response = alternar_estado_variedad_view(request, self.variedad.id)
+
+        self.assertEqual(response.status_code, 405)
+        self.variedad.refresh_from_db()
+        self.assertTrue(self.variedad.activo)
+
+
+class CicloVidaVariedadTests(TestCase):
+    """Comprueba el ciclo completo del catálogo desde la perspectiva funcional."""
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_crear_editar_inactivar_y_reactivar_conserva_el_registro(
+        self, _mock_permission
+    ):
+        crear_request = RequestFactory().post(
+            reverse("crear_variedad"),
+            data={
+                "nombre": "Bourbon",
+                "especie": VariedadCafe.Especie.ARABICA,
+                "descripcion": "Variedad inicial.",
+            },
+        )
+        crear_request.user = type(
+            "User",
+            (),
+            {"is_authenticated": True},
+        )()
+        crear_request.session = {"rol": "ADMINISTRADOR"}
+        crear_request._messages = FallbackStorage(crear_request)
+
+        crear_response = crear_variedad_view(crear_request)
+
+        self.assertEqual(crear_response.status_code, 302)
+        variedad = VariedadCafe.objects.get(nombre="Bourbon")
+        variedad_id = variedad.id
+
+        editar_request = RequestFactory().post(
+            reverse("editar_variedad", args=[variedad_id]),
+            data={
+                "nombre": "Bourbon Mejorado",
+                "especie": VariedadCafe.Especie.EXCELSA,
+                "descripcion": "Variedad actualizada.",
+            },
+        )
+        editar_request.user = crear_request.user
+        editar_request.session = crear_request.session
+        editar_request._messages = FallbackStorage(editar_request)
+
+        editar_response = editar_variedad_view(editar_request, variedad_id)
+
+        self.assertEqual(editar_response.status_code, 302)
+        variedad.refresh_from_db()
+        self.assertEqual(variedad.nombre, "Bourbon Mejorado")
+        self.assertEqual(variedad.especie, VariedadCafe.Especie.EXCELSA)
+        self.assertTrue(variedad.activo)
+
+        estado_request = RequestFactory().post(
+            reverse("alternar_estado_variedad", args=[variedad_id])
+        )
+        estado_request.user = crear_request.user
+        estado_request.session = crear_request.session
+        estado_request._messages = FallbackStorage(estado_request)
+
+        alternar_estado_variedad_view(estado_request, variedad_id)
+        variedad.refresh_from_db()
+        self.assertFalse(variedad.activo)
+        self.assertTrue(VariedadCafe.objects.filter(pk=variedad_id).exists())
+
+        alternar_estado_variedad_view(estado_request, variedad_id)
+        variedad.refresh_from_db()
+        self.assertTrue(variedad.activo)
+
+    @patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_variedad_creada_aparece_inmediatamente_en_listado(
+        self, _mock_permission, _mock_template_permission
+    ):
+        variedad = VariedadCafe.objects.create(
+            nombre="Typica",
+            especie=VariedadCafe.Especie.ARABICA,
+        )
+        request = RequestFactory().get(reverse("lista_variedades"))
+        request.user = type(
+            "User",
+            (),
+            {
+                "is_authenticated": True,
+                "username": "admin@example.com",
+                "first_name": "Admin",
+            },
+        )()
+        request.session = {"rol": "ADMINISTRADOR"}
+        request._messages = FallbackStorage(request)
+
+        response = lista_variedades_view(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, variedad.nombre)
