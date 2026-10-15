@@ -10,13 +10,18 @@ from django.contrib import messages
 from django.http import JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.authentication import SessionAuthentication
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+
 from .forms import FincaRegistroForm, FincaModelForm
 from .models import Finca, Municipio
-from .serializers import FincaGeorreferenciacionSerializer
+from .permissions import rol_puede_administrar_catalogos
+from .serializers import FincaGeorreferenciacionSerializer, MunicipioSerializer
 from usuarios.models import Usuario
 
 
@@ -141,4 +146,80 @@ def api_detalle_finca_view(request, pk):
     if serializer.is_valid():
         finca_actualizada = serializer.save()
         return Response(FincaGeorreferenciacionSerializer(finca_actualizada).data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["GET", "POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_municipios_coleccion_view(request):
+    """
+    Endpoint REST para listar y crear municipios del catálogo (SCRUM-112).
+    - GET: Lista municipios. Filtros opcionales: ?q=... (búsqueda), ?departamento=..., ?activo=true/false.
+    - POST: Crea un nuevo municipio. Requiere rol autorizado (ADMINISTRADOR o ASOCIACION).
+    """
+    if request.method == "GET":
+        queryset = Municipio.objects.all().order_by("departamento", "nombre")
+
+        q = request.query_params.get("q", "").strip()
+        if q:
+            queryset = queryset.filter(nombre__icontains=q)
+
+        departamento = request.query_params.get("departamento", "").strip()
+        if departamento:
+            queryset = queryset.filter(departamento__icontains=departamento)
+
+        activo_param = request.query_params.get("activo")
+        if activo_param is not None:
+            if activo_param.lower() in ("true", "1"):
+                queryset = queryset.filter(activo=True)
+            elif activo_param.lower() in ("false", "0"):
+                queryset = queryset.filter(activo=False)
+
+        serializer = MunicipioSerializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    # POST: Crear municipio
+    auth = JWTAuthentication()
+    token = getattr(request, "auth", None)
+    user_auth = None
+    if token is None:
+        try:
+            res = auth.authenticate(request)
+            if res is not None:
+                user_auth, token = res
+                request.user = user_auth
+                request.auth = token
+        except (InvalidToken, TokenError):
+            pass
+
+    # Determinar si el usuario está autenticado (vía JWT, sesión o superuser)
+    usuario_autenticado = getattr(request.user, "is_authenticated", False) or (token is not None)
+    if not usuario_autenticado:
+        return Response(
+            {"error": "Se requiere un token de autenticación válido."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    # Determinar código de rol
+    role_code = ""
+    if token and hasattr(token, "get"):
+        role_code = token.get("role_code", "") or ""
+    if not role_code and hasattr(request, "session"):
+        role_code = request.session.get("rol", "")
+    if not role_code and hasattr(request.user, "rol") and hasattr(request.user.rol, "codigo"):
+        role_code = request.user.rol.codigo
+
+    es_super = getattr(request.user, "is_superuser", False)
+
+    if not es_super and (not role_code or not rol_puede_administrar_catalogos(role_code)):
+        return Response(
+            {"error": "No tiene permiso para acceder a este recurso."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    serializer = MunicipioSerializer(data=request.data)
+    if serializer.is_valid():
+        municipio = serializer.save()
+        return Response(MunicipioSerializer(municipio).data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

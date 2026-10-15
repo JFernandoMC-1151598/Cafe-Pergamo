@@ -1311,3 +1311,244 @@ class TestScrum116PermisosCatalogoMunicipios(SimpleTestCase):
         self.assertEqual(response.status_code, 401)
         data = json.loads(response.content.decode("utf-8"))
         self.assertIn("error", data)
+
+
+# =============================================================================
+# SUITE HU-09: SCRUM-112 (HU09-ST3) - SERVICIOS Y API PARA CREAR MUNICIPIOS
+# =============================================================================
+
+
+class TestScrum112CrearMunicipioServicioYApi(TestCase):
+    """
+    Subtarea: SCRUM-112 / HU09-ST3: Implementar servicios y API para crear municipios.
+
+    Criterios de Aceptación (DoD):
+    1. Servicio de dominio `crear_municipio` que persiste municipios validando unicidad
+       por departamento, nombres no vacíos y códigos sugeridos automáticos.
+    2. Endpoint REST `POST /fincas/api/municipios/` protegido con RBAC:
+       - 201 Created para roles autorizados (ASOCIACION, ADMINISTRADOR).
+       - 401 Unauthorized para peticiones anónimas sin token.
+       - 403 Forbidden para roles no autorizados (PRODUCTOR, COMPRADOR, etc.).
+       - 400 Bad Request ante duplicados en el mismo departamento o datos inválidos.
+    3. Endpoint REST `GET /fincas/api/municipios/` para listar el catálogo con filtros (?q, ?departamento, ?activo).
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_municipios = reverse("api_municipios_coleccion")
+        self.municipio_existente = Municipio.objects.create(
+            codigo="54001",
+            nombre="Cúcuta",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+    # -------------------------------------------------------------------------
+    # 1. Pruebas de la Capa de Servicio (crear_municipio)
+    # -------------------------------------------------------------------------
+
+    def test_servicio_crear_municipio_con_datos_completos(self):
+        """El servicio crea y persiste un municipio con todos los atributos válidos."""
+        from fincas.services import crear_municipio
+
+        muni = crear_municipio(
+            nombre="Salazar de Las Palmas",
+            departamento="Norte de Santander",
+            codigo="54660",
+            activo=True,
+        )
+        self.assertIsNotNone(muni.id)
+        self.assertEqual(muni.nombre, "Salazar de Las Palmas")
+        self.assertEqual(muni.codigo, "54660")
+        self.assertTrue(muni.activo)
+        self.assertEqual(muni.departamento, "Norte de Santander")
+
+    def test_servicio_crear_municipio_genera_codigo_sugerido_si_se_omite(self):
+        """Si no se proporciona código, el servicio genera uno sugerido no nulo y único."""
+        from fincas.services import crear_municipio
+
+        muni = crear_municipio(
+            nombre="Gramalote",
+            departamento="Norte de Santander",
+        )
+        self.assertIsNotNone(muni.codigo)
+        self.assertTrue(muni.codigo.startswith("NDS-") or muni.codigo.startswith("NOR-"))
+        self.assertIn("GRAMALOTE", muni.codigo)
+        self.assertEqual(muni.nombre, "Gramalote")
+
+    def test_servicio_crear_municipio_rechaza_nombre_vacio(self):
+        """El servicio valida y rechaza nombres nulos o consistentes en solo espacios."""
+        from fincas.services import crear_municipio
+
+        with self.assertRaises(ValidationError) as ctx:
+            crear_municipio(nombre="   ", departamento="Norte de Santander")
+        self.assertIn("nombre", ctx.exception.message_dict)
+
+    def test_servicio_crear_municipio_rechaza_departamento_vacio(self):
+        """El servicio valida y rechaza departamentos vacíos."""
+        from fincas.services import crear_municipio
+
+        with self.assertRaises(ValidationError) as ctx:
+            crear_municipio(nombre="Pamplonita", departamento="   ")
+        self.assertIn("departamento", ctx.exception.message_dict)
+
+    def test_servicio_crear_municipio_bloquea_duplicados_mismo_departamento(self):
+        """El servicio rechaza la creación si ya existe un municipio con el mismo nombre en el departamento."""
+        from fincas.services import crear_municipio
+
+        with self.assertRaises(ValidationError) as ctx:
+            crear_municipio(nombre="  cúcuta  ", departamento="Norte de Santander")
+        self.assertIn("nombre", ctx.exception.message_dict)
+
+    def test_servicio_crear_municipio_permite_mismo_nombre_otro_departamento(self):
+        """El servicio permite un municipio con el mismo nombre si pertenece a otro departamento."""
+        from fincas.services import crear_municipio
+
+        muni_valle = crear_municipio(
+            nombre="Cúcuta",
+            departamento="Valle del Cauca",
+            codigo="76001",
+        )
+        self.assertEqual(muni_valle.nombre, "Cúcuta")
+        self.assertEqual(muni_valle.departamento, "Valle del Cauca")
+
+    # -------------------------------------------------------------------------
+    # 2. Pruebas de la API REST - Listado y Filtros (GET)
+    # -------------------------------------------------------------------------
+
+    def test_api_get_municipios_lista_catalogo_exitosamente(self):
+        """GET /fincas/api/municipios/ responde 200 OK con la lista de municipios."""
+        response = self.client.get(self.url_municipios)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIsInstance(data, list)
+        nombres = [m["nombre"] for m in data]
+        self.assertIn("Cúcuta", nombres)
+
+    def test_api_get_municipios_filtra_por_busqueda_q(self):
+        """GET /fincas/api/municipios/?q=cuc filtra por coincidencia parcial en nombre."""
+        Municipio.objects.create(codigo="54820", nombre="Toledo", departamento="Norte de Santander")
+
+        response = self.client.get(self.url_municipios, {"q": "cúc"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        nombres = [m["nombre"] for m in data]
+        self.assertIn("Cúcuta", nombres)
+        self.assertNotIn("Toledo", nombres)
+
+    def test_api_get_municipios_filtra_por_activo(self):
+        """GET /fincas/api/municipios/?activo=false filtra correctamente por estado."""
+        Municipio.objects.create(
+            codigo="54999",
+            nombre="Municipio Inactivo",
+            departamento="Norte de Santander",
+            activo=False,
+        )
+        resp_activos = self.client.get(self.url_municipios, {"activo": "true"})
+        nombres_activos = [m["nombre"] for m in resp_activos.json()]
+        self.assertNotIn("Municipio Inactivo", nombres_activos)
+
+        resp_inactivos = self.client.get(self.url_municipios, {"activo": "false"})
+        nombres_inactivos = [m["nombre"] for m in resp_inactivos.json()]
+        self.assertIn("Municipio Inactivo", nombres_inactivos)
+
+    # -------------------------------------------------------------------------
+    # 3. Pruebas de la API REST - Creación y Control de Acceso RBAC (POST)
+    # -------------------------------------------------------------------------
+
+    def _auth_headers(self, user, role_code="ASOCIACION"):
+        """Genera encabezados de autorización Bearer JWT con el role_code indicado."""
+        from rest_framework_simplejwt.tokens import AccessToken
+        token = AccessToken.for_user(user)
+        token["role_code"] = role_code
+        return {"HTTP_AUTHORIZATION": f"Bearer {str(token)}"}
+
+    def test_api_post_sin_autenticacion_retorna_401(self):
+        """Petición POST anónima sin token JWT es rechazada con HTTP 401."""
+        response = self.client.post(
+            self.url_municipios,
+            {"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("error", response.json())
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=False)
+    def test_api_post_con_rol_no_autorizado_retorna_403(self, _mock_rol):
+        """Petición POST con rol sin permisos (ej. PRODUCTOR) es rechazada con HTTP 403."""
+        user = User.objects.create_user(username="productor_user", password="Password123!")
+        headers = self._auth_headers(user, role_code="PRODUCTOR")
+
+        response = self.client.post(
+            self.url_municipios,
+            {"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            content_type="application/json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("error", response.json())
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=True)
+    def test_api_post_con_rol_autorizado_crea_municipio_exitosamente_201(self, _mock_rol):
+        """Petición POST con rol autorizado (ASOCIACION / ADMIN) crea el municipio y responde 201 Created."""
+        user = User.objects.create_user(username="asociacion_user", password="Password123!")
+        headers = self._auth_headers(user, role_code="ASOCIACION")
+
+        payload = {
+            "codigo": "54051",
+            "nombre": "Arboledas",
+            "departamento": "Norte de Santander",
+            "activo": True,
+        }
+        response = self.client.post(
+            self.url_municipios,
+            payload,
+            content_type="application/json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["nombre"], "Arboledas")
+        self.assertEqual(data["codigo"], "54051")
+        self.assertTrue(data["activo"])
+        self.assertIn("id", data)
+
+        self.assertTrue(Municipio.objects.filter(nombre="Arboledas").exists())
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=True)
+    def test_api_post_con_duplicado_mismo_departamento_retorna_400(self, _mock_rol):
+        """Petición POST con nombre duplicado en el mismo departamento retorna HTTP 400 Bad Request."""
+        user = User.objects.create_user(username="admin_user", password="Password123!")
+        headers = self._auth_headers(user, role_code="ADMINISTRADOR")
+
+        payload = {
+            "nombre": "cúcuta",
+            "departamento": "Norte de Santander",
+        }
+        response = self.client.post(
+            self.url_municipios,
+            payload,
+            content_type="application/json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("nombre", response.json())
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=True)
+    def test_api_post_con_nombre_vacio_retorna_400(self, _mock_rol):
+        """Petición POST con nombre vacío retorna HTTP 400 Bad Request."""
+        user = User.objects.create_user(username="asoc_user2", password="Password123!")
+        headers = self._auth_headers(user, role_code="ASOCIACION")
+
+        payload = {
+            "nombre": "   ",
+            "departamento": "Norte de Santander",
+        }
+        response = self.client.post(
+            self.url_municipios,
+            payload,
+            content_type="application/json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("nombre", response.json())

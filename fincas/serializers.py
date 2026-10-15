@@ -88,3 +88,85 @@ class FincaGeorreferenciacionSerializer(serializers.ModelSerializer):
         lng = attrs.get("longitud")
         validar_par_coordenadas(lat, lng)
         return attrs
+
+
+class MunicipioSerializer(serializers.ModelSerializer):
+    """
+    Serializador DRF para el catálogo de municipios (SCRUM-112).
+    Permite serializar, validar y crear municipios con reglas de negocio.
+    """
+
+    codigo = serializers.CharField(
+        max_length=20,
+        required=False,
+        allow_blank=True,
+    )
+    nombre = serializers.CharField(max_length=100, required=True)
+    departamento = serializers.CharField(
+        max_length=100,
+        required=False,
+        default="Norte de Santander",
+    )
+    activo = serializers.BooleanField(required=False, default=True)
+    total_fincas_asociadas = serializers.IntegerField(read_only=True)
+    tiene_fincas_asociadas = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = Municipio
+        fields = [
+            "id",
+            "codigo",
+            "nombre",
+            "departamento",
+            "activo",
+            "total_fincas_asociadas",
+            "tiene_fincas_asociadas",
+            "creado_en",
+            "actualizado_en",
+        ]
+        read_only_fields = [
+            "id",
+            "creado_en",
+            "actualizado_en",
+            "total_fincas_asociadas",
+            "tiene_fincas_asociadas",
+        ]
+
+    def validate(self, attrs):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        nombre = (attrs.get("nombre") or "").strip()
+        departamento = (attrs.get("departamento") or "Norte de Santander").strip()
+
+        if not nombre:
+            raise serializers.ValidationError({"nombre": "El nombre del municipio no puede estar vacío."})
+        if not departamento:
+            raise serializers.ValidationError({"departamento": "El departamento no puede estar vacío."})
+
+        # Bloqueo de duplicados en el mismo departamento (case-insensitive)
+        queryset = Municipio.objects.filter(
+            departamento__iexact=departamento,
+            nombre__iexact=nombre,
+        )
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+
+        if queryset.exists():
+            raise serializers.ValidationError({
+                "nombre": f"Ya existe un municipio con el nombre '{nombre}' en el departamento '{departamento}'."
+            })
+
+        attrs["nombre"] = nombre
+        attrs["departamento"] = departamento
+        return attrs
+
+    def create(self, validated_data):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .services import crear_municipio
+
+        try:
+            return crear_municipio(**validated_data)
+        except DjangoValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                raise serializers.ValidationError(exc.message_dict)
+            raise serializers.ValidationError(exc.messages)
