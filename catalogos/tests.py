@@ -8,6 +8,7 @@ from django.urls import reverse
 
 from .models import VariedadCafe
 from .views import (
+    alternar_estado_variedad_view,
     crear_variedad_view,
     editar_variedad_view,
     lista_variedades_view,
@@ -296,3 +297,89 @@ class EditarVariedadTests(TestCase):
         self.assertContains(response, "Ya existe")
         self.variedad.refresh_from_db()
         self.assertEqual(self.variedad.nombre, "Castillo")
+
+
+class AlternarEstadoVariedadTests(TestCase):
+    """Comprueba la baja lógica y la reactivación del catálogo."""
+
+    def _request(self, variedad_id, authenticated, role=""):
+        request = RequestFactory().post(
+            reverse("alternar_estado_variedad", args=[variedad_id])
+        )
+        request.user = type(
+            "User",
+            (),
+            {
+                "is_authenticated": authenticated,
+                "username": "admin@example.com",
+                "first_name": "Admin",
+            },
+        )()
+        request.session = {"rol": role} if role else {}
+        request._messages = FallbackStorage(request)
+        return request
+
+    def setUp(self):
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo",
+            especie=VariedadCafe.Especie.ARABICA,
+        )
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=False)
+    def test_rol_sin_permiso_recibe_403(self, _mock_permission):
+        response = alternar_estado_variedad_view(
+            self._request(self.variedad.id, True, role="PRODUCTOR"),
+            self.variedad.id,
+        )
+
+        self.assertEqual(response.status_code, 403)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_inactivar_cambia_estado_sin_eliminar_registro(
+        self, _mock_permission
+    ):
+        response = alternar_estado_variedad_view(
+            self._request(self.variedad.id, True, role="ADMINISTRADOR"),
+            self.variedad.id,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("lista_variedades"))
+        self.variedad.refresh_from_db()
+        self.assertFalse(self.variedad.activo)
+        self.assertTrue(
+            VariedadCafe.objects.filter(pk=self.variedad.id).exists()
+        )
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_variedad_inactiva_puede_reactivarse(self, _mock_permission):
+        self.variedad.activo = False
+        self.variedad.save(update_fields=["activo", "actualizado_en"])
+
+        response = alternar_estado_variedad_view(
+            self._request(self.variedad.id, True, role="ADMINISTRADOR"),
+            self.variedad.id,
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.variedad.refresh_from_db()
+        self.assertTrue(self.variedad.activo)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_get_no_cambia_estado_y_responde_metodo_no_permitido(
+        self, _mock_permission
+    ):
+        request = RequestFactory().get(
+            reverse("alternar_estado_variedad", args=[self.variedad.id])
+        )
+        request.user = type(
+            "User",
+            (),
+            {"is_authenticated": True},
+        )()
+        request.session = {"rol": "ADMINISTRADOR"}
+        response = alternar_estado_variedad_view(request, self.variedad.id)
+
+        self.assertEqual(response.status_code, 405)
+        self.variedad.refresh_from_db()
+        self.assertTrue(self.variedad.activo)

@@ -99,3 +99,27 @@ def editar_variedad_view(
             "variedad": variedad,
         },
     )
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def alternar_estado_variedad_view(
+    request: HttpRequest,
+    variedad_id: int,
+) -> HttpResponse:
+    """Activa o inactiva una variedad sin eliminarla físicamente."""
+    if request.method != "POST":
+        return HttpResponse("Método no permitido.", status=405)
+
+    variedad = get_object_or_404(VariedadCafe, pk=variedad_id)
+    variedad.activo = not variedad.activo
+    variedad.save(update_fields=["activo", "actualizado_en"])
+
+    estado = "activada" if variedad.activo else "inactivada"
+    messages.success(
+        request,
+        f"La variedad «{variedad.nombre}» fue {estado} correctamente.",
+    )
+    return redirect("lista_variedades")
