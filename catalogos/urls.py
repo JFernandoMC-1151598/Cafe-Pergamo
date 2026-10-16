@@ -6,6 +6,11 @@ from . import views
 
 
 urlpatterns = [
+    path(
+        "trazabilidad/",
+        views.administrar_trazabilidad_view,
+        name="administrar_trazabilidad",
+    ),
     path("variedades/", views.lista_variedades_view, name="lista_variedades"),
     path(
         "variedades/crear/",

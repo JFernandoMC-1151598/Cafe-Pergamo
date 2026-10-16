@@ -10,10 +10,80 @@ from django.urls import reverse
 from .models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from .views import (
     alternar_estado_variedad_view,
+    administrar_trazabilidad_view,
     crear_variedad_view,
     editar_variedad_view,
     lista_variedades_view,
 )
+
+
+class AdministrarTrazabilidadViewTests(TestCase):
+    """Verifica la pantalla modular de catálogos de HU11-ST1."""
+
+    def _request(self, pestana="procesos", estado=""):
+        query = f"?pestana={pestana}"
+        if estado:
+            query += f"&estado={estado}"
+        request = RequestFactory().get(
+            f"{reverse('administrar_trazabilidad')}{query}"
+        )
+        request.user = type(
+            "User",
+            (),
+            {
+                "is_authenticated": True,
+                "username": "admin@example.com",
+                "first_name": "Admin",
+            },
+        )()
+        request.session = {"rol": "ADMINISTRADOR"}
+        request._messages = FallbackStorage(request)
+        return request
+
+    @patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_muestra_pestana_de_procesos_y_registros(
+        self, _mock_permission, _mock_template_permission
+    ):
+        ProcesoBeneficio.objects.create(
+            codigo="LAVADO",
+            nombre="Lavado",
+            descripcion="Proceso de lavado.",
+        )
+
+        response = administrar_trazabilidad_view(self._request())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Procesos de beneficio")
+        self.assertContains(response, "LAVADO")
+        self.assertContains(response, "Lavado")
+
+    @patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_muestra_pestana_de_estados_y_filtra_inactivos(
+        self, _mock_permission, _mock_template_permission
+    ):
+        EstadoLote.objects.create(codigo="SECADO", nombre="Secado")
+        EstadoLote.objects.create(
+            codigo="RECOLECCION",
+            nombre="Recolección",
+            activo=False,
+        )
+
+        response = administrar_trazabilidad_view(
+            self._request(pestana="estados", estado="inactivos")
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Estados del lote")
+        self.assertContains(response, "RECOLECCION")
+        self.assertNotContains(response, "SECADO")
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=False)
+    def test_usuario_sin_permiso_recibe_403(self, _mock_permission):
+        response = administrar_trazabilidad_view(self._request())
+
+        self.assertEqual(response.status_code, 403)
 
 
 class VariedadCafeEspeciesTests(TestCase):

@@ -7,7 +7,55 @@ from django.shortcuts import get_object_or_404, redirect, render
 from usuarios.permissions import permiso_requerido_sesion
 
 from .forms import VariedadCafeForm
-from .models import VariedadCafe
+from .models import EstadoLote, ProcesoBeneficio, VariedadCafe
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.consultar",
+    forbidden_on_denied=True,
+)
+def administrar_trazabilidad_view(request: HttpRequest) -> HttpResponse:
+    """Muestra los catálogos de procesos y estados en pestañas independientes."""
+    pestaña = request.GET.get("pestana", "procesos").strip().lower()
+    if pestaña not in {"procesos", "estados"}:
+        pestaña = "procesos"
+
+    estado = request.GET.get("estado", "").strip().lower()
+    filtros_estado = {
+        "activos": True,
+        "inactivos": False,
+    }
+
+    procesos = ProcesoBeneficio.objects.all()
+    estados = EstadoLote.objects.all()
+    if estado in filtros_estado:
+        if pestaña == "procesos":
+            procesos = procesos.filter(activo=filtros_estado[estado])
+        else:
+            estados = estados.filter(activo=filtros_estado[estado])
+    else:
+        estado = ""
+
+    return render(
+        request,
+        "catalogos/administrar_trazabilidad.html",
+        {
+            "procesos": procesos,
+            "estados_lote": estados,
+            "pestana_activa": pestaña,
+            "estado_filtro": estado,
+            "metricas": {
+                "procesos_total": ProcesoBeneficio.objects.count(),
+                "procesos_activos": ProcesoBeneficio.objects.filter(
+                    activo=True
+                ).count(),
+                "estados_total": EstadoLote.objects.count(),
+                "estados_activos": EstadoLote.objects.filter(
+                    activo=True
+                ).count(),
+            },
+        },
+    )
 
 
 @permiso_requerido_sesion(
