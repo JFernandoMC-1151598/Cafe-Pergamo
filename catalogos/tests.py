@@ -3,8 +3,9 @@
 from unittest.mock import patch
 
 from django.contrib.messages.storage.fallback import FallbackStorage
+from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
-from django.test import RequestFactory, TestCase
+from django.test import Client, RequestFactory, TestCase
 from django.urls import reverse
 
 from .models import EstadoLote, ProcesoBeneficio, VariedadCafe
@@ -82,6 +83,114 @@ class AdministrarTrazabilidadViewTests(TestCase):
     @patch("usuarios.permissions.usuario_tiene_permiso", return_value=False)
     def test_usuario_sin_permiso_recibe_403(self, _mock_permission):
         response = administrar_trazabilidad_view(self._request())
+
+        self.assertEqual(response.status_code, 403)
+
+
+class CatalogosTrazabilidadApiTests(TestCase):
+    """Comprueba el mantenimiento REST de ambos catálogos."""
+
+    def setUp(self):
+        self.client = Client()
+        self.usuario = User.objects.create_user(
+            username="admin-api",
+            password="test-password",
+        )
+        self.client.force_login(self.usuario)
+        session = self.client.session
+        session["rol"] = "ADMINISTRADOR"
+        session.save()
+
+    @patch(
+        "catalogos.api_permissions.usuario_tiene_permiso",
+        return_value=True,
+    )
+    def test_crea_proceso_y_lo_consulta(self, _mock_permission):
+        response = self.client.post(
+            reverse("api_procesos_beneficio"),
+            data={
+                "codigo": "lavado",
+                "nombre": " Lavado ",
+                "descripcion": "Proceso húmedo.",
+                "orden": 1,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["codigo"], "LAVADO")
+        proceso_id = response.json()["id"]
+
+        response = self.client.get(
+            reverse("api_proceso_beneficio_detalle", args=[proceso_id])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["nombre"], "Lavado")
+
+    @patch(
+        "catalogos.api_permissions.usuario_tiene_permiso",
+        return_value=True,
+    )
+    def test_actualiza_y_alterna_estado_de_estado_lote(self, _mock_permission):
+        estado = EstadoLote.objects.create(
+            codigo="RECOLECCION",
+            nombre="Recolección",
+        )
+
+        response = self.client.patch(
+            reverse("api_estado_lote_detalle", args=[estado.id]),
+            data={"nombre": "Recepción"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["nombre"], "Recepción")
+
+        response = self.client.post(
+            reverse("api_estado_lote_toggle", args=[estado.id])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["activo"])
+
+    @patch(
+        "catalogos.api_permissions.usuario_tiene_permiso",
+        return_value=True,
+    )
+    def test_rechaza_duplicados_y_filtra_registros_activos(
+        self, _mock_permission
+    ):
+        ProcesoBeneficio.objects.create(
+            codigo="HONEY",
+            nombre="Honey",
+        )
+        response = self.client.post(
+            reverse("api_procesos_beneficio"),
+            data={"codigo": "honey", "nombre": "Honey nuevo"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("codigo", response.json())
+
+        ProcesoBeneficio.objects.create(
+            codigo="NATURAL",
+            nombre="Natural",
+            activo=False,
+        )
+        response = self.client.get(
+            reverse("api_procesos_beneficio") + "?activo=true"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([item["codigo"] for item in response.json()], ["HONEY"])
+
+    @patch(
+        "catalogos.api_permissions.usuario_tiene_permiso",
+        return_value=False,
+    )
+    def test_sin_permiso_recibe_403(self, _mock_permission):
+        response = self.client.post(
+            reverse("api_estados_lote"),
+            data={"codigo": "SECADO", "nombre": "Secado"},
+            content_type="application/json",
+        )
 
         self.assertEqual(response.status_code, 403)
 

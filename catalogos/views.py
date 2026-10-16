@@ -3,11 +3,131 @@
 from django.contrib import messages
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from rest_framework import status
+from rest_framework.decorators import (
+    api_view,
+    authentication_classes,
+    permission_classes,
+)
+from rest_framework.authentication import SessionAuthentication
+from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from usuarios.permissions import permiso_requerido_sesion
 
 from .forms import VariedadCafeForm
 from .models import EstadoLote, ProcesoBeneficio, VariedadCafe
+from .api_permissions import CatalogosTrazabilidadPermission
+from .serializers import EstadoLoteSerializer, ProcesoBeneficioSerializer
+
+
+@api_view(["GET", "POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_procesos_beneficio_view(request: HttpRequest) -> Response:
+    """Lista o crea procesos de beneficio."""
+    if request.method == "GET":
+        queryset = ProcesoBeneficio.objects.all()
+        activo = request.query_params.get("activo")
+        if activo in {"true", "1"}:
+            queryset = queryset.filter(activo=True)
+        elif activo in {"false", "0"}:
+            queryset = queryset.filter(activo=False)
+        return Response(ProcesoBeneficioSerializer(queryset, many=True).data)
+
+    serializer = ProcesoBeneficioSerializer(data=request.data)
+    if serializer.is_valid():
+        return Response(
+            ProcesoBeneficioSerializer(serializer.save()).data,
+            status=status.HTTP_201_CREATED,
+        )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["GET", "PUT", "PATCH"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_proceso_beneficio_detalle_view(
+    request: HttpRequest,
+    pk: int,
+) -> Response:
+    """Consulta o actualiza un proceso de beneficio."""
+    proceso = get_object_or_404(ProcesoBeneficio, pk=pk)
+    if request.method == "GET":
+        return Response(ProcesoBeneficioSerializer(proceso).data)
+
+    serializer = ProcesoBeneficioSerializer(
+        proceso,
+        data=request.data,
+        partial=request.method == "PATCH",
+    )
+    if serializer.is_valid():
+        return Response(ProcesoBeneficioSerializer(serializer.save()).data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_proceso_beneficio_toggle_view(request: HttpRequest, pk: int) -> Response:
+    """Activa o inactiva un proceso sin eliminarlo."""
+    proceso = get_object_or_404(ProcesoBeneficio, pk=pk)
+    proceso.activo = not proceso.activo
+    proceso.save(update_fields=["activo", "actualizado_en"])
+    return Response(ProcesoBeneficioSerializer(proceso).data)
+
+
+@api_view(["GET", "POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_estados_lote_view(request: HttpRequest) -> Response:
+    """Lista o crea estados del lote."""
+    if request.method == "GET":
+        queryset = EstadoLote.objects.all()
+        activo = request.query_params.get("activo")
+        if activo in {"true", "1"}:
+            queryset = queryset.filter(activo=True)
+        elif activo in {"false", "0"}:
+            queryset = queryset.filter(activo=False)
+        return Response(EstadoLoteSerializer(queryset, many=True).data)
+
+    serializer = EstadoLoteSerializer(data=request.data)
+    if serializer.is_valid():
+        return Response(
+            EstadoLoteSerializer(serializer.save()).data,
+            status=status.HTTP_201_CREATED,
+        )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["GET", "PUT", "PATCH"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_estado_lote_detalle_view(request: HttpRequest, pk: int) -> Response:
+    """Consulta o actualiza un estado del lote."""
+    estado = get_object_or_404(EstadoLote, pk=pk)
+    if request.method == "GET":
+        return Response(EstadoLoteSerializer(estado).data)
+
+    serializer = EstadoLoteSerializer(
+        estado,
+        data=request.data,
+        partial=request.method == "PATCH",
+    )
+    if serializer.is_valid():
+        return Response(EstadoLoteSerializer(serializer.save()).data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_estado_lote_toggle_view(request: HttpRequest, pk: int) -> Response:
+    """Activa o inactiva un estado sin eliminarlo."""
+    estado = get_object_or_404(EstadoLote, pk=pk)
+    estado.activo = not estado.activo
+    estado.save(update_fields=["activo", "actualizado_en"])
+    return Response(EstadoLoteSerializer(estado).data)
 
 
 @permiso_requerido_sesion(
