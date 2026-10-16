@@ -15,7 +15,9 @@ urlpatterns = [
     path('api/', views.api_crear_finca_view, name='api_finca_crear'),
     path('api/<int:pk>/', views.api_detalle_finca_view, name='api_finca_detalle'),
 
-    # API REST de Municipios / Catálogos (SCRUM-112 y SCRUM-110)
+    # API REST de Municipios / Catálogos (SCRUM-112, SCRUM-110, SCRUM-113)
     path('api/municipios/', views.api_municipios_coleccion_view, name='api_municipios_coleccion'),
     path('api/municipios/<int:pk>/', views.api_municipio_detalle_view, name='api_municipio_detalle'),
+    path('api/municipios/<int:pk>/inactivar/', views.api_municipio_toggle_activo_view, name='api_municipio_inactivar'),
+    path('api/municipios/<int:pk>/toggle-activo/', views.api_municipio_toggle_activo_view, name='api_municipio_toggle_activo'),
 ]

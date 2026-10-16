@@ -291,3 +291,74 @@ def api_municipio_detalle_view(request, pk):
         municipio_actualizado = serializer.save()
         return Response(MunicipioSerializer(municipio_actualizado).data, status=status.HTTP_200_OK)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_municipio_toggle_activo_view(request, pk):
+    """
+    Endpoint REST para inactivar o reactivar lógicamente un municipio (SCRUM-113 / HU09-ST4).
+    POST /fincas/api/municipios/<pk>/toggle-activo/
+    POST /fincas/api/municipios/<pk>/inactivar/
+
+    Requiere rol autorizado (ADMINISTRADOR o ASOCIACION).
+    Garantiza la preservación de fincas asociadas (integridad referencial histórica).
+    """
+    try:
+        municipio = Municipio.objects.get(pk=pk)
+    except Municipio.DoesNotExist:
+        return Response(
+            {"error": "Municipio no encontrado."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    auth = JWTAuthentication()
+    token = getattr(request, "auth", None)
+    if token is None:
+        try:
+            res = auth.authenticate(request)
+            if res is not None:
+                user_auth, token = res
+                request.user = user_auth
+                request.auth = token
+        except (InvalidToken, TokenError):
+            pass
+
+    usuario_autenticado = getattr(request.user, "is_authenticated", False) or (token is not None)
+    if not usuario_autenticado:
+        return Response(
+            {"error": "Se requiere un token de autenticación válido."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    role_code = ""
+    if token and hasattr(token, "get"):
+        role_code = token.get("role_code", "") or ""
+    if not role_code and hasattr(request, "session"):
+        role_code = request.session.get("rol", "")
+    if not role_code and hasattr(request.user, "rol") and hasattr(request.user.rol, "codigo"):
+        role_code = request.user.rol.codigo
+
+    es_super = getattr(request.user, "is_superuser", False)
+
+    if not es_super and (not role_code or not rol_puede_administrar_catalogos(role_code)):
+        return Response(
+            {"error": "No tiene permiso para acceder a este recurso."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    from .services import toggle_estado_municipio, inactivar_municipio, reactivar_municipio
+
+    activo_deseado = request.data.get("activo") if hasattr(request, "data") and isinstance(request.data, dict) else None
+    if activo_deseado is not None:
+        if bool(activo_deseado):
+            municipio_res, mensaje = reactivar_municipio(municipio)
+        else:
+            municipio_res, mensaje = inactivar_municipio(municipio)
+    else:
+        municipio_res, mensaje = toggle_estado_municipio(municipio)
+
+    data = MunicipioSerializer(municipio_res).data
+    data["mensaje"] = mensaje
+    return Response(data, status=status.HTTP_200_OK)

@@ -19,23 +19,31 @@ class MunicipioRelatedField(serializers.RelatedField):
 
     def to_internal_value(self, data):
         if isinstance(data, Municipio):
+            if not data.activo:
+                raise serializers.ValidationError("El municipio seleccionado se encuentra inactivo y no admite nuevos registros de fincas.")
             return data
         if isinstance(data, int) or (isinstance(data, str) and data.isdigit()):
             try:
-                return Municipio.objects.get(pk=int(data))
+                mun = Municipio.objects.get(pk=int(data))
+                if not mun.activo:
+                    raise serializers.ValidationError("El municipio seleccionado se encuentra inactivo y no admite nuevos registros de fincas.")
+                return mun
             except Municipio.DoesNotExist:
                 raise serializers.ValidationError("Municipio no encontrado.")
         if isinstance(data, str):
             nombre = data.strip()
             if not nombre:
                 raise serializers.ValidationError("El municipio no puede estar vacío.")
-            mun, _ = Municipio.objects.get_or_create(
-                nombre__iexact=nombre,
-                defaults={
-                    "nombre": nombre,
-                    "codigo": nombre.upper()[:20],
-                    "departamento": "Norte de Santander",
-                },
+            mun = Municipio.objects.filter(nombre__iexact=nombre).first()
+            if mun:
+                if not mun.activo:
+                    raise serializers.ValidationError(f"El municipio '{mun.nombre}' se encuentra inactivo y no admite nuevos registros de fincas.")
+                return mun
+            mun = Municipio.objects.create(
+                nombre=nombre,
+                codigo=nombre.upper()[:20],
+                departamento="Norte de Santander",
+                activo=True,
             )
             return mun
         raise serializers.ValidationError("Formato de municipio inválido.")

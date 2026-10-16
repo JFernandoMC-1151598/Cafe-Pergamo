@@ -1795,3 +1795,190 @@ class TestScrum110EditarMunicipioServicioYApi(TestCase):
             **headers,
         )
         self.assertEqual(response.status_code, 404)
+
+
+# =============================================================================
+# SUITE HU-09: SCRUM-113 (HU09-ST4) - INACTIVACIÓN LÓGICA DE MUNICIPIOS
+# =============================================================================
+
+
+class TestScrum113InactivacionLogicaMunicipios(TestCase):
+    """
+    Subtarea: SCRUM-113 / HU09-ST4: Implementar inactivación lógica de municipios.
+
+    Criterios de Aceptación (DoD):
+    1. Inactivación exclusivamente lógica (`activo = False`) que preserva la integridad
+       referencial histórica con las fincas ya asociadas.
+    2. Los municipios inactivos no pueden asignarse a nuevas fincas.
+    3. Servicios de dominio: `inactivar_municipio`, `reactivar_municipio`, `toggle_estado_municipio`.
+    4. Endpoints REST `POST /fincas/api/municipios/<pk>/inactivar/` y `/toggle-activo/` protegidos con RBAC:
+       - 200 OK para roles autorizados (ASOCIACION, ADMINISTRADOR) con mensaje informativo.
+       - 401 Unauthorized para peticiones anónimas.
+       - 403 Forbidden para roles sin permisos (PRODUCTOR, COMPRADOR, etc.).
+       - 404 Not Found si el municipio no existe.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.create(
+            codigo="54820",
+            nombre="Toledo",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        self.url_inactivar = reverse("api_municipio_inactivar", kwargs={"pk": self.municipio.pk})
+        self.url_toggle = reverse("api_municipio_toggle_activo", kwargs={"pk": self.municipio.pk})
+
+    def _auth_headers(self, user, role_code="ASOCIACION"):
+        """Genera encabezados de autorización Bearer JWT con el role_code indicado."""
+        from rest_framework_simplejwt.tokens import AccessToken
+        token = AccessToken.for_user(user)
+        token["role_code"] = role_code
+        return {"HTTP_AUTHORIZATION": f"Bearer {str(token)}"}
+
+    # -------------------------------------------------------------------------
+    # 1. Pruebas de la Capa de Servicio
+    # -------------------------------------------------------------------------
+
+    def test_servicio_inactivar_municipio_preserva_fincas_asociadas(self):
+        """Inactivar lógicamente un municipio con fincas no rompe la relación y genera mensaje explicativo."""
+        from fincas.services import inactivar_municipio
+
+        finca1 = Finca.objects.create(
+            nombre="Finca Samaria",
+            productor_id=uuid.uuid4(),
+            municipio=self.municipio,
+        )
+        finca2 = Finca.objects.create(
+            nombre="Finca La Vega",
+            productor_id=uuid.uuid4(),
+            municipio=self.municipio,
+        )
+
+        muni_inactivo, mensaje = inactivar_municipio(self.municipio)
+        self.assertFalse(muni_inactivo.activo)
+        self.assertIn("2 finca(s) histórica(s)", mensaje)
+
+        self.municipio.refresh_from_db()
+        finca1.refresh_from_db()
+        finca2.refresh_from_db()
+
+        self.assertFalse(self.municipio.activo)
+        self.assertEqual(finca1.municipio, self.municipio)
+        self.assertEqual(finca2.municipio, self.municipio)
+        self.assertTrue(self.municipio.tiene_fincas_asociadas)
+
+    def test_servicio_reactivar_municipio(self):
+        """Reactivar un municipio previamente inactivo cambia activo a True."""
+        from fincas.services import reactivar_municipio
+
+        self.municipio.activo = False
+        self.municipio.save()
+
+        muni_activo, mensaje = reactivar_municipio(self.municipio)
+        self.assertTrue(muni_activo.activo)
+        self.assertIn("reactivado exitosamente", mensaje)
+
+    def test_servicio_toggle_estado_municipio(self):
+        """Alternar estado invierte de True a False y viceversa."""
+        from fincas.services import toggle_estado_municipio
+
+        muni, msg1 = toggle_estado_municipio(self.municipio)
+        self.assertFalse(muni.activo)
+
+        muni, msg2 = toggle_estado_municipio(muni)
+        self.assertTrue(muni.activo)
+
+    # -------------------------------------------------------------------------
+    # 2. Regla de Negocio: Municipios Inactivos No Admiten Nuevas Fincas
+    # -------------------------------------------------------------------------
+
+    def test_model_form_bloquea_registro_con_municipio_inactivo(self):
+        """FincaModelForm rechaza la creación de una finca en un municipio inactivo."""
+        self.municipio.activo = False
+        self.municipio.save()
+
+        form = FincaModelForm(data={
+            "nombre": "Nueva Finca Inválida",
+            "municipio": "Toledo",
+        })
+        self.assertFalse(form.is_valid())
+        self.assertIn("municipio", form.errors)
+        self.assertIn("inactivo", form.errors["municipio"][0])
+
+    def test_serializer_bloquea_registro_con_municipio_inactivo(self):
+        """FincaGeorreferenciacionSerializer rechaza asociar un municipio inactivo a una finca."""
+        from fincas.serializers import FincaGeorreferenciacionSerializer
+
+        self.municipio.activo = False
+        self.municipio.save()
+
+        serializer = FincaGeorreferenciacionSerializer(data={
+            "nombre": "Finca API Bloqueada",
+            "municipio": self.municipio.pk,
+        })
+        self.assertFalse(serializer.is_valid())
+        self.assertIn("municipio", serializer.errors)
+        self.assertIn("inactivo", str(serializer.errors["municipio"]))
+
+    # -------------------------------------------------------------------------
+    # 3. Pruebas de la API REST y Control RBAC
+    # -------------------------------------------------------------------------
+
+    def test_api_inactivar_sin_autenticacion_retorna_401(self):
+        """Petición anónima a /inactivar/ retorna HTTP 401 Unauthorized."""
+        response = self.client.post(self.url_inactivar)
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("error", response.json())
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=False)
+    def test_api_inactivar_con_rol_no_autorizado_retorna_403(self, _mock_rol):
+        """Petición de usuario con rol no autorizado (ej. PRODUCTOR) retorna HTTP 403 Forbidden."""
+        user = User.objects.create_user(username="prod_inac", password="Password123!")
+        headers = self._auth_headers(user, role_code="PRODUCTOR")
+
+        response = self.client.post(self.url_inactivar, **headers)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("error", response.json())
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=True)
+    def test_api_inactivar_con_rol_autorizado_retorna_200(self, _mock_rol):
+        """Petición con rol autorizado (ASOCIACION / ADMIN) inactiva lógicamente el municipio."""
+        user = User.objects.create_user(username="asoc_inac", password="Password123!")
+        headers = self._auth_headers(user, role_code="ASOCIACION")
+
+        response = self.client.post(self.url_inactivar, **headers)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["activo"])
+        self.assertIn("mensaje", data)
+
+        self.municipio.refresh_from_db()
+        self.assertFalse(self.municipio.activo)
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=True)
+    def test_api_toggle_activo_con_rol_autorizado_retorna_200(self, _mock_rol):
+        """Petición a /toggle-activo/ invierte el estado correctamente."""
+        user = User.objects.create_user(username="asoc_toggle", password="Password123!")
+        headers = self._auth_headers(user, role_code="ASOCIACION")
+
+        # Inactiva
+        resp1 = self.client.post(self.url_toggle, **headers)
+        self.assertEqual(resp1.status_code, 200)
+        self.assertFalse(resp1.json()["activo"])
+
+        # Reactiva
+        resp2 = self.client.post(self.url_toggle, **headers)
+        self.assertEqual(resp2.status_code, 200)
+        self.assertTrue(resp2.json()["activo"])
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=True)
+    def test_api_inactivar_inexistente_retorna_404(self, _mock_rol):
+        """Petición sobre un ID inexistente retorna HTTP 404 Not Found."""
+        user = User.objects.create_user(username="asoc_404", password="Password123!")
+        headers = self._auth_headers(user, role_code="ASOCIACION")
+
+        url_inexistente = reverse("api_municipio_inactivar", kwargs={"pk": 99999})
+        response = self.client.post(url_inexistente, **headers)
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("error", response.json())

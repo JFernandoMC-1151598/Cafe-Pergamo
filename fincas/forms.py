@@ -198,17 +198,22 @@ class FincaModelForm(forms.ModelForm):
     def clean_municipio(self):
         val = self.cleaned_data.get("municipio")
         if isinstance(val, Municipio):
+            if not val.activo:
+                raise forms.ValidationError("El municipio seleccionado se encuentra inactivo y no admite nuevos registros de fincas.")
             return val
         if not val:
             raise forms.ValidationError("El municipio es obligatorio.")
         mun_nombre = str(val).strip()
-        mun, _ = Municipio.objects.get_or_create(
-            nombre__iexact=mun_nombre,
-            defaults={
-                "nombre": mun_nombre,
-                "codigo": mun_nombre.upper()[:20],
-                "departamento": "Norte de Santander",
-            },
+        mun = Municipio.objects.filter(nombre__iexact=mun_nombre).first()
+        if mun:
+            if not mun.activo:
+                raise forms.ValidationError(f"El municipio '{mun.nombre}' se encuentra inactivo y no admite nuevos registros de fincas.")
+            return mun
+        mun = Municipio.objects.create(
+            nombre=mun_nombre,
+            codigo=mun_nombre.upper()[:20],
+            departamento="Norte de Santander",
+            activo=True,
         )
         return mun
 

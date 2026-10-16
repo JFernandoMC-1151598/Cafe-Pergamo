@@ -120,3 +120,66 @@ def editar_municipio(
     municipio.full_clean()
     municipio.save()
     return municipio
+
+
+def inactivar_municipio(municipio_o_id):
+    """
+    Realiza la inactivación lógica (activo = False) de un municipio (SCRUM-113 / HU09-ST4).
+    Preserva intacta la integridad referencial histórica con las fincas ya registradas.
+    """
+    if isinstance(municipio_o_id, Municipio):
+        municipio = municipio_o_id
+    else:
+        try:
+            municipio = Municipio.objects.get(pk=municipio_o_id)
+        except Municipio.DoesNotExist:
+            raise ValidationError({"id": "Municipio no encontrado."})
+
+    municipio.activo = False
+    municipio.save()
+
+    total_fincas = municipio.total_fincas_asociadas
+    if total_fincas > 0:
+        mensaje = (
+            f"Municipio '{municipio.nombre}' inactivado lógicamente. "
+            f"Se preserva la integridad referencial con {total_fincas} finca(s) histórica(s) asociada(s)."
+        )
+    else:
+        mensaje = f"Municipio '{municipio.nombre}' inactivado exitosamente."
+
+    return municipio, mensaje
+
+
+def reactivar_municipio(municipio_o_id):
+    """
+    Reactiva un municipio previamente inactivado (activo = True).
+    """
+    if isinstance(municipio_o_id, Municipio):
+        municipio = municipio_o_id
+    else:
+        try:
+            municipio = Municipio.objects.get(pk=municipio_o_id)
+        except Municipio.DoesNotExist:
+            raise ValidationError({"id": "Municipio no encontrado."})
+
+    municipio.activo = True
+    municipio.save()
+    mensaje = f"Municipio '{municipio.nombre}' reactivado exitosamente."
+    return municipio, mensaje
+
+
+def toggle_estado_municipio(municipio_o_id):
+    """
+    Alterna el estado activo/inactivo de un municipio (SCRUM-113).
+    """
+    if isinstance(municipio_o_id, Municipio):
+        municipio = municipio_o_id
+    else:
+        try:
+            municipio = Municipio.objects.get(pk=municipio_o_id)
+        except Municipio.DoesNotExist:
+            raise ValidationError({"id": "Municipio no encontrado."})
+
+    if municipio.activo:
+        return inactivar_municipio(municipio)
+    return reactivar_municipio(municipio)
