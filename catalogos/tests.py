@@ -7,7 +7,7 @@ from django.core.exceptions import ValidationError
 from django.test import RequestFactory, TestCase
 from django.urls import reverse
 
-from .models import VariedadCafe
+from .models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from .views import (
     alternar_estado_variedad_view,
     crear_variedad_view,
@@ -46,6 +46,75 @@ class VariedadCafeEspeciesTests(TestCase):
             variedad.full_clean()
 
         self.assertIn("especie", contexto.exception.message_dict)
+
+
+class CatalogosTrazabilidadModelTests(TestCase):
+    """Verifica la estructura y las reglas básicas de HU11-ST4."""
+
+    def test_proceso_beneficio_normaliza_codigo_y_campos_de_texto(self):
+        proceso = ProcesoBeneficio(
+            codigo=" lavado ",
+            nombre=" Lavado ",
+            descripcion=" Proceso tradicional. ",
+            orden=1,
+        )
+
+        proceso.full_clean()
+        proceso.save()
+
+        self.assertEqual(proceso.codigo, "LAVADO")
+        self.assertEqual(proceso.nombre, "Lavado")
+        self.assertEqual(proceso.descripcion, "Proceso tradicional.")
+        self.assertTrue(proceso.activo)
+        self.assertEqual(proceso.orden, 1)
+
+    def test_estado_lote_exige_codigo_y_nombre(self):
+        estado = EstadoLote(codigo="", nombre="   ")
+
+        with self.assertRaises(ValidationError) as contexto:
+            estado.full_clean()
+
+        self.assertEqual(
+            set(contexto.exception.message_dict),
+            {"codigo", "nombre"},
+        )
+
+    def test_codigos_y_nombres_son_unicos_sin_distinguir_mayusculas(self):
+        ProcesoBeneficio.objects.create(
+            codigo="HONEY",
+            nombre="Honey",
+        )
+
+        proceso_codigo_duplicado = ProcesoBeneficio(
+            codigo="honey",
+            nombre="Honey especial",
+        )
+        proceso_nombre_duplicado = ProcesoBeneficio(
+            codigo="HONEY-2",
+            nombre="hONEY",
+        )
+
+        with self.assertRaises(ValidationError):
+            proceso_codigo_duplicado.full_clean()
+        with self.assertRaises(ValidationError):
+            proceso_nombre_duplicado.full_clean()
+
+    def test_catalogos_conservan_registros_inactivos(self):
+        proceso = ProcesoBeneficio.objects.create(
+            codigo="NATURAL",
+            nombre="Natural",
+            activo=False,
+        )
+        estado = EstadoLote.objects.create(
+            codigo="SECADO",
+            nombre="Secado",
+            activo=False,
+        )
+
+        self.assertFalse(
+            ProcesoBeneficio.objects.get(pk=proceso.pk).activo
+        )
+        self.assertFalse(EstadoLote.objects.get(pk=estado.pk).activo)
 
 
 class ListaVariedadesTests(TestCase):
