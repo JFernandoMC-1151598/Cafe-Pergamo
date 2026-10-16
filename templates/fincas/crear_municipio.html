@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+
+{% block title %}Registrar Municipio — Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+
+    <!-- Encabezado con Botón de Regreso -->
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <div class="d-flex align-items-center gap-2 mb-1">
+                <a href="{% url 'admin_municipios' %}" class="text-decoration-none text-muted small">
+                    <i class="bi bi-arrow-left me-1"></i> Volver al Catálogo de Municipios
+                </a>
+            </div>
+            <h1 class="h3 fw-bold text-dark mb-1">Registrar Nuevo Municipio</h1>
+            <p class="text-muted mb-0">Agregue un nuevo territorio al catálogo maestro de Café Pérgamo.</p>
+        </div>
+
+        <a href="{% url 'admin_municipios' %}" class="btn btn-outline-secondary">
+            <i class="bi bi-arrow-left me-1"></i> Cancelar
+        </a>
+    </div>
+
+    <!-- Mensajes de Error Generales -->
+    {% if form.non_field_errors %}
+        <div class="alert alert-danger shadow-sm mb-4" role="alert">
+            <div class="fw-bold mb-1"><i class="bi bi-exclamation-triangle-fill me-2"></i>Errores de validación:</div>
+            {{ form.non_field_errors }}
+        </div>
+    {% endif %}
+
+    <!-- Tarjeta del Formulario -->
+    <div class="card border-0 shadow-sm mx-auto bg-white rounded-3 overflow-hidden" style="max-width: 760px;">
+        <div class="card-header bg-white border-bottom p-4">
+            <div class="d-flex align-items-center gap-3">
+                <span class="rounded-circle bg-success-subtle text-success p-3 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+                    <i class="bi bi-plus-circle-fill fs-5"></i>
+                </span>
+                <div>
+                    <h2 class="h5 fw-bold text-dark mb-1">Datos del Municipio</h2>
+                    <p class="text-muted small mb-0">Complete la información requerida para registrar el territorio.</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="card-body p-4 p-md-5">
+            <form method="post" novalidate>
+                {% csrf_token %}
+
+                <!-- Nombre del Municipio -->
+                <div class="mb-4">
+                    <label for="{{ form.nombre.id_for_label }}" class="form-label fw-semibold">
+                        Nombre del Municipio <span class="text-danger">*</span>
+                    </label>
+                    {{ form.nombre }}
+                    {% if form.nombre.errors %}
+                        <div class="invalid-feedback d-block">{{ form.nombre.errors|striptags }}</div>
+                    {% endif %}
+                    <div class="form-text">Nombre oficial del municipio (p. ej. Salazar, Toledo, Ocaña).</div>
+                </div>
+
+                <!-- Departamento / Región -->
+                <div class="mb-4">
+                    <label for="{{ form.departamento.id_for_label }}" class="form-label fw-semibold">
+                        Departamento o Región <span class="text-danger">*</span>
+                    </label>
+                    {{ form.departamento }}
+                    {% if form.departamento.errors %}
+                        <div class="invalid-feedback d-block">{{ form.departamento.errors|striptags }}</div>
+                    {% endif %}
+                    <div class="form-text">Por defecto Norte de Santander. Puede especificarse otra región.</div>
+                </div>
+
+                <!-- Código DANE / Identificador -->
+                <div class="mb-4">
+                    <label for="{{ form.codigo.id_for_label }}" class="form-label fw-semibold">
+                        Código DANE / Identificador <span class="text-muted fw-normal">(Opcional)</span>
+                    </label>
+                    {{ form.codigo }}
+                    {% if form.codigo.errors %}
+                        <div class="invalid-feedback d-block">{{ form.codigo.errors|striptags }}</div>
+                    {% endif %}
+                    <div class="form-text">Si se deja vacío, el sistema asignará un código único sugerido automáticamente.</div>
+                </div>
+
+                <!-- Estado Activo -->
+                <div class="form-check form-switch mb-4 p-3 bg-light rounded-3">
+                    <div class="ms-1">
+                        {{ form.activo }}
+                        <label class="form-check-label fw-semibold" for="{{ form.activo.id_for_label }}">
+                            Municipio Activo para registro de fincas
+                        </label>
+                        <div class="form-text mt-1">
+                            Los municipios inactivos no podrán seleccionarse en nuevos registros prediales.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Botones de Acción -->
+                <div class="d-flex flex-column flex-sm-row justify-content-end gap-2 pt-3 border-top">
+                    <a href="{% url 'admin_municipios' %}" class="btn btn-outline-secondary">
+                        Cancelar
+                    </a>
+                    <button type="submit" class="btn btn-pergamo">
+                        <i class="bi bi-save me-1"></i> Guardar Municipio
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

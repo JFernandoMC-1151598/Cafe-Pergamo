@@ -8,6 +8,7 @@ Subtarea: SCRUM-89 / HU06-ST4: Validar campos obligatorios y consistencia de dat
 """
 
 from django import forms
+from django.db import models
 from .models import Finca, Municipio
 
 from .validators import (
@@ -34,6 +35,28 @@ class MunicipioChoiceField(forms.ModelChoiceField):
 
     def label_from_instance(self, obj):
         return obj.nombre
+
+    def to_python(self, value):
+        if value in self.empty_values:
+            return None
+        # Verificar si el municipio existe en el catálogo pero está inactivo (HU09-ST4 / SCRUM-113)
+        muni_inactivo = None
+        if isinstance(value, int) or (isinstance(value, str) and value.isdigit()):
+            muni_inactivo = Municipio.objects.filter(pk=int(value), activo=False).first()
+        elif isinstance(value, Municipio):
+            muni_inactivo = value if not value.activo else None
+        elif isinstance(value, str):
+            muni_inactivo = Municipio.objects.filter(
+                models.Q(nombre__iexact=value) | models.Q(codigo__iexact=value),
+                activo=False,
+            ).first()
+
+        if muni_inactivo:
+            raise forms.ValidationError(
+                "El municipio seleccionado se encuentra inactivo y no puede ser asignado a nuevas fincas."
+            )
+
+        return super().to_python(value)
 
 
 def _municipio_field(**overrides):
@@ -215,6 +238,28 @@ class FincaModelForm(forms.ModelForm):
             }),
         }
 
+    def clean_municipio(self):
+        val = self.cleaned_data.get("municipio")
+        if isinstance(val, Municipio):
+            if not val.activo:
+                raise forms.ValidationError("El municipio seleccionado se encuentra inactivo y no admite nuevos registros de fincas.")
+            return val
+        if not val:
+            raise forms.ValidationError("El municipio es obligatorio.")
+        mun_nombre = str(val).strip()
+        mun = Municipio.objects.filter(nombre__iexact=mun_nombre).first()
+        if mun:
+            if not mun.activo:
+                raise forms.ValidationError(f"El municipio '{mun.nombre}' se encuentra inactivo y no admite nuevos registros de fincas.")
+            return mun
+        mun = Municipio.objects.create(
+            nombre=mun_nombre,
+            codigo=mun_nombre.upper()[:20],
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        return mun
+
     def clean(self):
         cleaned_data = super().clean()
         lat = cleaned_data.get("latitud")
@@ -234,3 +279,95 @@ class FincaModelForm(forms.ModelForm):
         if commit:
             instance.save()
         return instance
+
+
+class MunicipioForm(forms.ModelForm):
+    """
+    Formulario para creación y edición de municipios en el catálogo (HU09-ST6 / SCRUM-115 / SCRUM-111).
+    Aplica validaciones de obligatoriedad, formato y bloqueo de duplicados por departamento.
+    """
+
+    codigo = forms.CharField(
+        max_length=20,
+        required=False,
+        label="Código DANE / Identificador",
+        help_text="Código corto o DANE (p. ej. 54518). Si se deja vacío se autogenerará automáticamente.",
+        widget=forms.TextInput(attrs={
+            "class": "form-control",
+            "id": "id_codigo",
+            "placeholder": "Ej: 54518 (Opcional)",
+            "autocomplete": "off",
+        }),
+    )
+
+    class Meta:
+        model = Municipio
+        fields = ["codigo", "nombre", "departamento", "activo"]
+        widgets = {
+            "nombre": forms.TextInput(attrs={
+                "class": "form-control",
+                "id": "id_nombre",
+                "placeholder": "Ej: Pamplona",
+                "autocomplete": "off",
+            }),
+            "departamento": forms.TextInput(attrs={
+                "class": "form-control",
+                "id": "id_departamento",
+                "placeholder": "Ej: Norte de Santander",
+                "autocomplete": "off",
+            }),
+            "activo": forms.CheckboxInput(attrs={
+                "class": "form-check-input",
+                "id": "id_activo",
+            }),
+        }
+
+    def clean_codigo(self):
+        codigo = self.cleaned_data.get("codigo", "")
+        if codigo:
+            codigo = codigo.strip().upper()
+            qs = Municipio.objects.filter(codigo=codigo)
+            if self.instance and self.instance.pk:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise forms.ValidationError(f"Ya existe un municipio con el código '{codigo}'.")
+        return codigo
+
+    def clean_nombre(self):
+        nombre = self.cleaned_data.get("nombre", "").strip()
+        if not nombre:
+            raise forms.ValidationError("El nombre del municipio es obligatorio.")
+        if len(nombre) < 2:
+            raise forms.ValidationError("El nombre del municipio debe tener al menos 2 caracteres.")
+        return nombre
+
+    def clean_departamento(self):
+        departamento = self.cleaned_data.get("departamento", "").strip()
+        if not departamento:
+            raise forms.ValidationError("El departamento o región es obligatorio.")
+        if len(departamento) < 2:
+            raise forms.ValidationError("El departamento debe tener al menos 2 caracteres.")
+        return departamento
+
+    def clean(self):
+        cleaned_data = super().clean()
+        nombre = cleaned_data.get("nombre")
+        departamento = cleaned_data.get("departamento")
+
+        if nombre and departamento:
+            nombre = nombre.strip()
+            departamento = departamento.strip()
+            query = Municipio.objects.filter(
+                nombre__iexact=nombre,
+                departamento__iexact=departamento,
+            )
+            if self.instance and self.instance.pk:
+                query = query.exclude(pk=self.instance.pk)
+
+            if query.exists():
+                self.add_error(
+                    "nombre",
+                    f"Ya existe un municipio con el nombre '{nombre}' en el departamento '{departamento}'."
+                )
+
+        return cleaned_data

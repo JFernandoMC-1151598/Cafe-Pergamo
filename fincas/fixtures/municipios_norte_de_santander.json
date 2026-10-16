@@ -1,0 +1,482 @@
+[
+  {
+    "model": "fincas.municipio",
+    "pk": 1,
+    "fields": {
+      "codigo": "54001",
+      "nombre": "Cúcuta",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 2,
+    "fields": {
+      "codigo": "54003",
+      "nombre": "Ábrego",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 3,
+    "fields": {
+      "codigo": "54051",
+      "nombre": "Arboledas",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 4,
+    "fields": {
+      "codigo": "54099",
+      "nombre": "Bochalema",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 5,
+    "fields": {
+      "codigo": "54109",
+      "nombre": "Bucarasica",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 6,
+    "fields": {
+      "codigo": "54125",
+      "nombre": "Cácota",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 7,
+    "fields": {
+      "codigo": "54128",
+      "nombre": "Cáchira",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 8,
+    "fields": {
+      "codigo": "54172",
+      "nombre": "Chinácota",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 9,
+    "fields": {
+      "codigo": "54174",
+      "nombre": "Chitagá",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 10,
+    "fields": {
+      "codigo": "54206",
+      "nombre": "Convención",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 11,
+    "fields": {
+      "codigo": "54223",
+      "nombre": "Cucutilla",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 12,
+    "fields": {
+      "codigo": "54239",
+      "nombre": "Durania",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 13,
+    "fields": {
+      "codigo": "54245",
+      "nombre": "El Carmen",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 14,
+    "fields": {
+      "codigo": "54250",
+      "nombre": "El Tarra",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 15,
+    "fields": {
+      "codigo": "54261",
+      "nombre": "El Zulia",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 16,
+    "fields": {
+      "codigo": "54313",
+      "nombre": "Gramalote",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 17,
+    "fields": {
+      "codigo": "54344",
+      "nombre": "Hacarí",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 18,
+    "fields": {
+      "codigo": "54347",
+      "nombre": "Herrán",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 19,
+    "fields": {
+      "codigo": "54377",
+      "nombre": "Labateca",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 20,
+    "fields": {
+      "codigo": "54385",
+      "nombre": "La Esperanza",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 21,
+    "fields": {
+      "codigo": "54398",
+      "nombre": "La Playa de Belén",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 22,
+    "fields": {
+      "codigo": "54405",
+      "nombre": "Los Patios",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 23,
+    "fields": {
+      "codigo": "54418",
+      "nombre": "Lourdes",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 24,
+    "fields": {
+      "codigo": "54480",
+      "nombre": "Mutiscua",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 25,
+    "fields": {
+      "codigo": "54498",
+      "nombre": "Ocaña",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 26,
+    "fields": {
+      "codigo": "54518",
+      "nombre": "Pamplona",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 27,
+    "fields": {
+      "codigo": "54520",
+      "nombre": "Pamplonita",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 28,
+    "fields": {
+      "codigo": "54553",
+      "nombre": "Puerto Santander",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 29,
+    "fields": {
+      "codigo": "54599",
+      "nombre": "Ragonvalia",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 30,
+    "fields": {
+      "codigo": "54660",
+      "nombre": "Salazar de Las Palmas",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 31,
+    "fields": {
+      "codigo": "54670",
+      "nombre": "San Calixto",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 32,
+    "fields": {
+      "codigo": "54673",
+      "nombre": "San Cayetano",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 33,
+    "fields": {
+      "codigo": "54680",
+      "nombre": "Santiago",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 34,
+    "fields": {
+      "codigo": "54720",
+      "nombre": "Sardinata",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 35,
+    "fields": {
+      "codigo": "54743",
+      "nombre": "Silos",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 36,
+    "fields": {
+      "codigo": "54800",
+      "nombre": "Teorama",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 37,
+    "fields": {
+      "codigo": "54810",
+      "nombre": "Tibú",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 38,
+    "fields": {
+      "codigo": "54820",
+      "nombre": "Toledo",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 39,
+    "fields": {
+      "codigo": "54871",
+      "nombre": "Villa Caro",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "fincas.municipio",
+    "pk": 40,
+    "fields": {
+      "codigo": "54874",
+      "nombre": "Villa del Rosario",
+      "departamento": "Norte de Santander",
+      "activo": true,
+      "creado_en": "2026-10-01T00:00:00Z",
+      "actualizado_en": "2026-10-01T00:00:00Z"
+    }
+  }
+]

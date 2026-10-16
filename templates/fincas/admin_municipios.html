@@ -1,0 +1,372 @@
+{% extends "base.html" %}
+{% load rbac_tags %}
+
+{% block title %}Catálogo Maestro de Municipios — Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+
+    <!-- Encabezado de la Sección -->
+    <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3 mb-4">
+        <div>
+            <div class="d-flex align-items-center gap-2 mb-1">
+                <span class="badge bg-success-subtle text-success border border-success-subtle px-2 py-1">
+                    <i class="bi bi-diagram-3 me-1"></i> Catálogos Maestros (HU-09)
+                </span>
+                <span class="badge bg-light text-dark border px-2 py-1">
+                    <i class="bi bi-geo-alt me-1"></i> {{ total_municipios }} registrados
+                </span>
+            </div>
+            <h1 class="h3 fw-bold text-dark mb-1">Catálogo Maestro de Municipios</h1>
+            <p class="text-muted mb-0">
+                Administre los territorios cafeteros donde operan los productores y asociaciones de la región.
+            </p>
+        </div>
+
+        {% with puede_administrar=rol_actual|tiene_permiso:"catalogos_maestros.administrar" %}
+            {% if puede_administrar %}
+                <div class="d-flex gap-2">
+                    <button type="button" class="btn btn-pergamo shadow-sm" data-bs-toggle="modal" data-bs-target="#modalCrearMunicipio">
+                        <i class="bi bi-plus-circle me-1"></i> Nuevo Municipio
+                    </button>
+                </div>
+            {% endif %}
+        {% endwith %}
+    </div>
+
+    <!-- Tarjetas de Métricas (KPIs) -->
+    <div class="row g-3 mb-4">
+        <div class="col-6 col-lg-3">
+            <div class="card border-0 shadow-sm rounded-3 h-100 bg-white">
+                <div class="card-body p-3 d-flex align-items-center gap-3">
+                    <div class="rounded-circle bg-success-subtle text-success p-3 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+                        <i class="bi bi-geo-alt-fill fs-5"></i>
+                    </div>
+                    <div>
+                        <div class="text-muted small fw-medium">Total Municipios</div>
+                        <div class="fs-4 fw-bold text-dark">{{ metricas.total }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-6 col-lg-3">
+            <div class="card border-0 shadow-sm rounded-3 h-100 bg-white">
+                <div class="card-body p-3 d-flex align-items-center gap-3">
+                    <div class="rounded-circle bg-success-subtle text-success p-3 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+                        <i class="bi bi-check-circle-fill fs-5"></i>
+                    </div>
+                    <div>
+                        <div class="text-muted small fw-medium">Activos</div>
+                        <div class="fs-4 fw-bold text-success">{{ metricas.activos }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-6 col-lg-3">
+            <div class="card border-0 shadow-sm rounded-3 h-100 bg-white">
+                <div class="card-body p-3 d-flex align-items-center gap-3">
+                    <div class="rounded-circle bg-secondary-subtle text-secondary p-3 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+                        <i class="bi bi-pause-circle-fill fs-5"></i>
+                    </div>
+                    <div>
+                        <div class="text-muted small fw-medium">Inactivos</div>
+                        <div class="fs-4 fw-bold text-secondary">{{ metricas.inactivos }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-6 col-lg-3">
+            <div class="card border-0 shadow-sm rounded-3 h-100 bg-white">
+                <div class="card-body p-3 d-flex align-items-center gap-3">
+                    <div class="rounded-circle bg-primary-subtle text-primary p-3 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+                        <i class="bi bi-houses-fill fs-5"></i>
+                    </div>
+                    <div>
+                        <div class="text-muted small fw-medium">Fincas Vinculadas</div>
+                        <div class="fs-4 fw-bold text-dark">{{ metricas.total_fincas }}</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Barra de Filtros y Búsqueda -->
+    <div class="card border-0 shadow-sm mb-4 bg-white">
+        <div class="card-body p-3">
+            <form method="get" class="row g-2 align-items-center">
+                <!-- Buscador por texto -->
+                <div class="col-12 col-md-5">
+                    <div class="input-group">
+                        <span class="input-group-text bg-light border-end-0 text-muted">
+                            <i class="bi bi-search"></i>
+                        </span>
+                        <input
+                            type="text"
+                            name="q"
+                            value="{{ query_q }}"
+                            class="form-control bg-light border-start-0"
+                            placeholder="Buscar por nombre o código DANE..."
+                            aria-label="Buscar municipio"
+                        >
+                    </div>
+                </div>
+
+                <!-- Filtro por Departamento -->
+                <div class="col-12 col-sm-6 col-md-3">
+                    <select name="departamento" class="form-select bg-light" aria-label="Filtrar por departamento">
+                        <option value="">Todos los departamentos</option>
+                        {% for dep in departamentos %}
+                            <option value="{{ dep }}" {% if filtro_dep == dep %}selected{% endif %}>{{ dep }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Filtro por Estado -->
+                <div class="col-12 col-sm-6 col-md-2">
+                    <select name="estado" class="form-select bg-light" aria-label="Filtrar por estado">
+                        <option value="" {% if not filtro_estado %}selected{% endif %}>Todos los estados</option>
+                        <option value="activos" {% if filtro_estado == "activos" or filtro_estado == "activas" %}selected{% endif %}>Activos</option>
+                        <option value="inactivos" {% if filtro_estado == "inactivos" or filtro_estado == "inactivas" %}selected{% endif %}>Inactivos</option>
+                    </select>
+                </div>
+
+                <!-- Botones de Acción de Filtro -->
+                <div class="col-12 col-md-2 d-flex gap-2">
+                    <button type="submit" class="btn btn-pergamo w-100">
+                        <i class="bi bi-funnel me-1"></i> Filtrar
+                    </button>
+                    {% if query_q or filtro_dep or filtro_estado %}
+                        <a href="{% url 'admin_municipios' %}" class="btn btn-outline-secondary" title="Limpiar filtros">
+                            <i class="bi bi-x-circle"></i>
+                        </a>
+                    {% endif %}
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Tabla Principal de Municipios -->
+    {% with puede_administrar=rol_actual|tiene_permiso:"catalogos_maestros.administrar" %}
+    <div class="card border-0 shadow-sm bg-white overflow-hidden">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light border-bottom">
+                    <tr class="text-muted small text-uppercase">
+                        <th class="ps-4" style="width: 140px;">Código DANE</th>
+                        <th>Municipio</th>
+                        <th>Departamento / Región</th>
+                        <th class="text-center" style="width: 150px;">Fincas Vinculadas</th>
+                        <th style="width: 120px;">Estado</th>
+                        {% if puede_administrar %}
+                            <th class="text-end pe-4" style="width: 200px;">Acciones</th>
+                        {% endif %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for m in municipios %}
+                        <tr>
+                            <!-- Código DANE / Sugerido -->
+                            <td class="ps-4">
+                                <span class="badge bg-light text-secondary border font-monospace px-2 py-1">
+                                    {{ m.codigo|default:"—" }}
+                                </span>
+                            </td>
+
+                            <!-- Nombre del Municipio -->
+                            <td>
+                                <div class="fw-bold text-dark">{{ m.nombre }}</div>
+                                <div class="text-muted small d-md-none">{{ m.departamento }}</div>
+                            </td>
+
+                            <!-- Departamento -->
+                            <td class="text-secondary">
+                                <i class="bi bi-geo-alt me-1 text-muted"></i>{{ m.departamento }}
+                            </td>
+
+                            <!-- Fincas Asociadas -->
+                            <td class="text-center">
+                                {% if m.total_fincas > 0 %}
+                                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1" title="{{ m.total_fincas }} finca(s) registrada(s)">
+                                        <i class="bi bi-houses me-1"></i>{{ m.total_fincas }}
+                                    </span>
+                                {% else %}
+                                    <span class="badge bg-light text-muted border px-2 py-1">
+                                        0 fincas
+                                    </span>
+                                {% endif %}
+                            </td>
+
+                            <!-- Estado Activo / Inactivo -->
+                            <td>
+                                {% if m.activo %}
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle px-2 py-1">
+                                        <i class="bi bi-check-circle me-1"></i>Activo
+                                    </span>
+                                {% else %}
+                                    <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle px-2 py-1">
+                                        <i class="bi bi-pause-circle me-1"></i>Inactivo
+                                    </span>
+                                {% endif %}
+                            </td>
+
+                            <!-- Acciones RBAC -->
+                            {% if puede_administrar %}
+                                <td class="text-end pe-4">
+                                    <div class="d-inline-flex gap-1">
+                                        <!-- Botón Editar -->
+                                        <a href="{% url 'editar_municipio_web' m.id %}" class="btn btn-outline-pergamo btn-sm" title="Editar información del municipio">
+                                            <i class="bi bi-pencil-square me-1"></i> Editar
+                                        </a>
+
+                                        <!-- Botón Inactivar / Activar (Inactivación Lógica) -->
+                                        <form method="post" action="{% url 'alternar_estado_municipio_web' m.id %}" class="d-inline m-0">
+                                            {% csrf_token %}
+                                            {% if m.activo %}
+                                                <button
+                                                    type="submit"
+                                                    class="btn btn-outline-danger btn-sm"
+                                                    title="Inactivar lógicamente este municipio"
+                                                    onclick="return confirm('¿Está seguro de inactivar el municipio «{{ m.nombre }}»?{% if m.total_fincas > 0 %}\n\nNota: Tiene {{ m.total_fincas }} finca(s) asociada(s). Se conservarán intactas en el histórico, pero no se podrán registrar nuevas fincas con este municipio.{% endif %}');"
+                                                >
+                                                    <i class="bi bi-toggle-off me-1"></i> Inactivar
+                                                </button>
+                                            {% else %}
+                                                <button
+                                                    type="submit"
+                                                    class="btn btn-outline-success btn-sm"
+                                                    title="Reactivar municipio para admitir nuevas fincas"
+                                                    onclick="return confirm('¿Desea reactivar el municipio «{{ m.nombre }}» en el catálogo?');"
+                                                >
+                                                    <i class="bi bi-toggle-on me-1"></i> Activar
+                                                </button>
+                                            {% endif %}
+                                        </form>
+                                    </div>
+                                </td>
+                            {% endif %}
+                        </tr>
+                    {% empty %}
+                        <tr>
+                            <td colspan="{% if puede_administrar %}6{% else %}5{% endif %}" class="text-center py-5">
+                                <div class="text-muted mb-3">
+                                    <i class="bi bi-inbox fs-1 d-block mb-2 text-secondary"></i>
+                                    <span class="fw-semibold">No se encontraron municipios</span>
+                                    {% if query_q or filtro_dep or filtro_estado %}
+                                        <div class="small mt-1">No hay resultados para los filtros seleccionados. Intente restablecerlos.</div>
+                                    {% else %}
+                                        <div class="small mt-1">No hay municipios registrados en el catálogo.</div>
+                                    {% endif %}
+                                </div>
+                                {% if query_q or filtro_dep or filtro_estado %}
+                                    <a href="{% url 'admin_municipios' %}" class="btn btn-outline-pergamo btn-sm">
+                                        <i class="bi bi-arrow-counterclockwise me-1"></i> Restablecer filtros
+                                    </a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Pie de Tabla con Contador -->
+        <div class="card-footer bg-light border-top d-flex justify-content-between align-items-center py-2 px-4">
+            <span class="text-muted small">
+                Mostrando <strong>{{ municipios|length }}</strong> de <strong>{{ total_municipios }}</strong> municipios registrados
+            </span>
+            <span class="badge bg-white text-muted border small">
+                Catálogo DANE — Café Pérgamo
+            </span>
+        </div>
+    </div>
+    {% endwith %}
+
+</div>
+
+<!-- Modal para Crear Nuevo Municipio (SCRUM-111 / SCRUM-112) -->
+{% with puede_administrar=rol_actual|tiene_permiso:"catalogos_maestros.administrar" %}
+{% if puede_administrar %}
+<div class="modal fade" id="modalCrearMunicipio" tabindex="-1" aria-labelledby="modalCrearMunicipioLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-0 shadow">
+            <div class="modal-header border-bottom pb-3">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="rounded-circle bg-success-subtle text-success p-2 d-flex align-items-center justify-content-center" style="width: 36px; height: 36px;">
+                        <i class="bi bi-plus-lg"></i>
+                    </span>
+                    <div>
+                        <h5 class="modal-title fw-bold text-dark" id="modalCrearMunicipioLabel">Registrar Municipio</h5>
+                        <p class="text-muted small mb-0">Agregue un nuevo territorio al catálogo maestro.</p>
+                    </div>
+                </div>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+            </div>
+            
+            <form method="post" action="{% url 'crear_municipio_web' %}" novalidate>
+                {% csrf_token %}
+                <div class="modal-body p-4">
+                    <!-- Nombre del Municipio -->
+                    <div class="mb-3">
+                        <label for="{{ form_crear.nombre.id_for_label }}" class="form-label fw-semibold">
+                            Nombre del Municipio <span class="text-danger">*</span>
+                        </label>
+                        {{ form_crear.nombre }}
+                        {% if form_crear.nombre.errors %}
+                            <div class="invalid-feedback d-block">{{ form_crear.nombre.errors|striptags }}</div>
+                        {% endif %}
+                        <div class="form-text">Nombre oficial del municipio (p. ej. Salazar, Toledo, Ocaña).</div>
+                    </div>
+
+                    <!-- Departamento -->
+                    <div class="mb-3">
+                        <label for="{{ form_crear.departamento.id_for_label }}" class="form-label fw-semibold">
+                            Departamento / Región <span class="text-danger">*</span>
+                        </label>
+                        {{ form_crear.departamento }}
+                        {% if form_crear.departamento.errors %}
+                            <div class="invalid-feedback d-block">{{ form_crear.departamento.errors|striptags }}</div>
+                        {% endif %}
+                        <div class="form-text">Por defecto Norte de Santander. Puede especificarse otra región.</div>
+                    </div>
+
+                    <!-- Código DANE (Opcional) -->
+                    <div class="mb-3">
+                        <label for="{{ form_crear.codigo.id_for_label }}" class="form-label fw-semibold">
+                            Código DANE / Identificador <span class="text-muted fw-normal">(Opcional)</span>
+                        </label>
+                        {{ form_crear.codigo }}
+                        {% if form_crear.codigo.errors %}
+                            <div class="invalid-feedback d-block">{{ form_crear.codigo.errors|striptags }}</div>
+                        {% endif %}
+                        <div class="form-text">Si se deja vacío, el sistema asignará un código único sugerido automáticamente.</div>
+                    </div>
+
+                    <!-- Estado Activo -->
+                    <div class="form-check form-switch mt-3 pt-2 border-top">
+                        {{ form_crear.activo }}
+                        <label class="form-check-label fw-semibold" for="{{ form_crear.activo.id_for_label }}">
+                            Municipio activo para registro de fincas
+                        </label>
+                        <div class="form-text">Los municipios inactivos no podrán seleccionarse en nuevos registros prediales.</div>
+                    </div>
+                </div>
+
+                <div class="modal-footer border-top bg-light py-3">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">
+                        Cancelar
+                    </button>
+                    <button type="submit" class="btn btn-pergamo">
+                        <i class="bi bi-check-lg me-1"></i> Guardar Municipio
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endwith %}
+
+{% endblock %}

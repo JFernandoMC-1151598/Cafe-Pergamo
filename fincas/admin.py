@@ -10,10 +10,11 @@ from .models import Finca, Municipio
 
 @admin.register(Municipio)
 class MunicipioAdmin(admin.ModelAdmin):
-    list_display = ("nombre", "departamento", "codigo", "activo")
+    list_display = ("nombre", "departamento", "codigo", "activo", "actualizado_en")
     list_filter = ("departamento", "activo")
     search_fields = ("nombre", "codigo")
     ordering = ("nombre",)
+    readonly_fields = ("creado_en", "actualizado_en")
 
 
 @admin.register(Finca)
