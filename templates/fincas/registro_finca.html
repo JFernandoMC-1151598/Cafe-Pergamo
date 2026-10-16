@@ -62,9 +62,11 @@
                                 <label for="id_municipio" class="form-label fw-semibold text-dark">
                                     Municipio <span class="text-danger">*</span>
                                 </label>
-                                <input type="text" class="form-control" id="id_municipio" name="municipio" 
-                                       placeholder="Ej: Toledo, Arboledas, Salazar..." value="{{ form.municipio.value|default_if_none:'' }}" required>
-                                <div class="form-text small text-muted">Municipio productor en Norte de Santander.</div>
+                                {{ form.municipio }}
+                                {% if form.municipio.errors %}
+                                <div class="small text-danger mt-1">{{ form.municipio.errors|join:" " }}</div>
+                                {% endif %}
+                                <div class="form-text small text-muted">Seleccione el municipio del catálogo (Norte de Santander).</div>
                             </div>
                             <div class="col-md-6">
                                 <label for="id_vereda" class="form-label fw-semibold text-dark">
@@ -142,6 +144,16 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_css %}
+<!-- HU07: Leaflet + OpenStreetMap para el mapa interactivo de respaldo de
+     georreferenciación (static/js/georreferenciacion.js). Gratis, sin API
+     Key ni registro -- el CSS se carga aquí (liviano) y el JS se carga
+     perezosamente solo si el usuario abre el mapa. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin="">
 {% endblock %}
 
 {% block extra_js %}

@@ -18,6 +18,14 @@ class MunicipioRelatedField(serializers.RelatedField):
         return value.nombre if value else ""
 
     def to_internal_value(self, data):
+        """
+        Resuelve el municipio por id o por nombre exacto (sin distinguir
+        mayúsculas/acentos de caja), siempre contra el catálogo YA
+        existente. Antes, un nombre que no calzaba con ningún municipio
+        se "arreglaba" creando uno nuevo con `get_or_create` -- eso hacía
+        imposible rechazar un municipio inválido, que es justo el
+        criterio de aceptación de SCRUM-89 (HU06-ST4).
+        """
         if isinstance(data, Municipio):
             if not data.activo:
                 raise serializers.ValidationError("El municipio seleccionado se encuentra inactivo y no admite nuevos registros de fincas.")
@@ -39,13 +47,9 @@ class MunicipioRelatedField(serializers.RelatedField):
                 if not mun.activo:
                     raise serializers.ValidationError(f"El municipio '{mun.nombre}' se encuentra inactivo y no admite nuevos registros de fincas.")
                 return mun
-            mun = Municipio.objects.create(
-                nombre=nombre,
-                codigo=nombre.upper()[:20],
-                departamento="Norte de Santander",
-                activo=True,
+            raise serializers.ValidationError(
+                "El municipio seleccionado no es válido. Debe elegirlo del catálogo existente."
             )
-            return mun
         raise serializers.ValidationError("Formato de municipio inválido.")
 
 

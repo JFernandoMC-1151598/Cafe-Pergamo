@@ -13,6 +13,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const inputLat = document.getElementById('id_latitud');
     const inputLng = document.getElementById('id_longitud');
     const btnGps = document.getElementById('btn-detectar-gps');
+    const btnMapa = document.getElementById('btn-ubicar-mapa');
+    const mapaWrapper = document.getElementById('mapa-georreferenciacion-wrapper');
+    const mapaContenedor = document.getElementById('mapa-georreferenciacion');
     const btnLimpiar = document.getElementById('btn-limpiar-geo');
     const statusAlert = document.getElementById('geo-status-alert');
     const statusText = document.getElementById('geo-status-text');
@@ -192,6 +195,127 @@ document.addEventListener('DOMContentLoaded', () => {
                     maximumAge: 0
                 }
             );
+        });
+    }
+
+    // Mapa interactivo de respaldo (HU07): alternativa a la captura GPS para
+    // cuando el dispositivo no tiene GPS o la señal es imprecisa. Usa
+    // Leaflet + OpenStreetMap (gratis, sin API Key ni registro). Centrado
+    // por defecto en Norte de Santander; se carga perezosamente (solo si el
+    // usuario pulsa el botón) para no cargar la librería en cada visita.
+    const LEAFLET_VERSION = '1.9.4';
+    const CENTRO_NORTE_DE_SANTANDER = { lat: 7.8891, lng: -72.4967 };
+    let mapaInstancia = null;
+    let marcadorMapa = null;
+    let estadoScriptMaps = 'ninguno'; // 'ninguno' | 'cargando' | 'listo' | 'error'
+
+    function mostrarAvisoMapaNoDisponible(mensaje) {
+        if (!mapaContenedor) return;
+        mapaContenedor.innerHTML = `
+            <div class="d-flex flex-column align-items-center justify-content-center text-center h-100 p-3 text-muted small">
+                <i class="bi bi-map fs-3 mb-2"></i>
+                <span>${mensaje}</span>
+            </div>
+        `;
+    }
+
+    function posicionInicialMapa() {
+        const lat = parseFloat(inputLat.value);
+        const lng = parseFloat(inputLng.value);
+        if (!isNaN(lat) && !isNaN(lng)) {
+            return { lat, lng };
+        }
+        return CENTRO_NORTE_DE_SANTANDER;
+    }
+
+    function colocarCoordenadasDesdeMapa(lat, lng) {
+        inputLat.value = lat.toFixed(6);
+        inputLng.value = lng.toFixed(6);
+        actualizarEstadoGeorreferenciacion();
+        mostrarMensajeStatus(
+            'success',
+            `Ubicación tomada del mapa: ${lat.toFixed(6)}, ${lng.toFixed(6)}.`,
+            'bi-check-circle-fill'
+        );
+    }
+
+    function inicializarMapaLeaflet() {
+        estadoScriptMaps = 'listo';
+        if (!mapaContenedor || typeof L === 'undefined') return;
+
+        mapaContenedor.innerHTML = ''; // limpia el aviso de "Cargando mapa..."
+
+        const centro = posicionInicialMapa();
+        const esCentroPorDefecto = (centro === CENTRO_NORTE_DE_SANTANDER);
+
+        mapaInstancia = L.map(mapaContenedor).setView([centro.lat, centro.lng], esCentroPorDefecto ? 9 : 15);
+
+        // tile.openstreetmap.org (OSMF) bloquea cada vez más el acceso
+        // directo embebido ("osm.wiki/Blocked"), y CARTO ya exige API Key
+        // para sus basemaps públicos. Se usan en su lugar los tiles de Esri
+        // World Street Map (ArcGIS Online), que sí son de uso público
+        // gratuito sin necesidad de registrarse ni de una clave.
+        // Nota: a diferencia de los servicios XYZ estándar, ArcGIS ordena
+        // la ruta como {z}/{y}/{x} (no {z}/{x}/{y}).
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+            maxZoom: 19,
+            attribution: 'Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), Esri (Thailand), TomTom',
+        }).addTo(mapaInstancia);
+
+        marcadorMapa = L.marker([centro.lat, centro.lng], { draggable: true }).addTo(mapaInstancia);
+
+        marcadorMapa.on('dragend', () => {
+            const pos = marcadorMapa.getLatLng();
+            colocarCoordenadasDesdeMapa(pos.lat, pos.lng);
+        });
+
+        mapaInstancia.on('click', (evento) => {
+            marcadorMapa.setLatLng(evento.latlng);
+            colocarCoordenadasDesdeMapa(evento.latlng.lat, evento.latlng.lng);
+        });
+
+        // El contenedor estaba oculto (d-none) justo antes de crear el mapa;
+        // Leaflet necesita recalcular el tamaño una vez que es visible.
+        setTimeout(() => mapaInstancia.invalidateSize(), 100);
+    }
+
+    function cargarLeaflet() {
+        estadoScriptMaps = 'cargando';
+        mostrarAvisoMapaNoDisponible('Cargando mapa...');
+
+        const script = document.createElement('script');
+        script.src = `https://unpkg.com/leaflet@${LEAFLET_VERSION}/dist/leaflet.js`;
+        script.integrity = 'sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=';
+        script.crossOrigin = '';
+        script.onload = inicializarMapaLeaflet;
+        script.onerror = () => {
+            estadoScriptMaps = 'error';
+            mostrarAvisoMapaNoDisponible(
+                'No se pudo cargar el mapa (sin conexión o el servicio no respondió). Usa "Capturar mi ubicación GPS" o ingresa las coordenadas manualmente.'
+            );
+        };
+        document.head.appendChild(script);
+    }
+
+    // Botón "Ubicar en el mapa": muestra/oculta el mapa, cargándolo solo la primera vez
+    if (btnMapa && mapaWrapper) {
+        btnMapa.addEventListener('click', () => {
+            const estaOculto = mapaWrapper.classList.contains('d-none');
+
+            if (estaOculto) {
+                mapaWrapper.classList.remove('d-none');
+                if (estadoScriptMaps === 'ninguno') {
+                    cargarLeaflet();
+                } else if (estadoScriptMaps === 'listo' && mapaInstancia) {
+                    // Ya estaba cargado: solo recentrar por si el usuario ya tenía coordenadas
+                    const centro = posicionInicialMapa();
+                    mapaInstancia.setView([centro.lat, centro.lng], mapaInstancia.getZoom());
+                    marcadorMapa?.setLatLng([centro.lat, centro.lng]);
+                    setTimeout(() => mapaInstancia.invalidateSize(), 50);
+                }
+            } else {
+                mapaWrapper.classList.add('d-none');
+            }
         });
     }
 

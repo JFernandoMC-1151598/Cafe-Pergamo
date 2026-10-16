@@ -2,6 +2,7 @@
 Rutas URL del módulo de Fincas - CAFÉ PÉRGAMO
 Subtarea: SCRUM-95 / HU07-ST1: Diseñar el campo opcional de coordenadas para georreferenciación.
 Subtarea: SCRUM-96: Guardar georreferenciación en backend.
+Subtarea: SCRUM-92 / HU06-ST6: Listar fincas registradas por productor.
 """
 
 from django.urls import path
@@ -10,6 +11,7 @@ from . import views
 urlpatterns = [
     # Interfaz Web de Fincas (HU-06 / HU-07)
     path('registro/', views.registrar_finca_view, name='finca_registro'),
+    path('mis-fincas/', views.mis_fincas_view, name='mis_fincas'),
 
     # Interfaz Web de Catálogo de Municipios (HU-09 / SCRUM-111)
     path('municipios/', views.admin_municipios_view, name='admin_municipios'),

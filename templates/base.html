@@ -84,8 +84,8 @@
                             <span>Hola, {{ user.first_name|default:user.username }}</span>
                         </span>
 
-                        <!-- Botón de acceso a Mi Panel / Dashboard -->
-                        <a href="{% url 'home' %}" class="btn btn-outline-pergamo btn-sm me-2" title="Ir a Mi Panel">
+                        <!-- Botón de acceso a Mi Panel (HU06-ST6 / SCRUM-92: muestra las fincas del productor autenticado) -->
+                        <a href="{% url 'mis_fincas' %}" class="btn btn-outline-pergamo btn-sm me-2" title="Ver mis fincas registradas">
                             <i class="bi bi-speedometer2 me-1"></i> Mi Panel
                         </a>
 

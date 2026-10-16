@@ -29,10 +29,14 @@ Criterios de Aceptación Cumplidos:
             </div>
 
             <!-- Botones de Ayuda de Entrada Rápida -->
-            <div class="d-flex align-items-center gap-2">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
                 <button type="button" class="btn btn-sm btn-outline-success d-flex align-items-center gap-1 shadow-sm" id="btn-detectar-gps" title="Obtener coordenadas usando el GPS de tu dispositivo">
                     <i class="bi bi-crosshair"></i>
                     <span>Capturar mi ubicación GPS</span>
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-primary d-flex align-items-center gap-1 shadow-sm" id="btn-ubicar-mapa" title="Ubicar tu finca manualmente en el mapa (alternativa si no tienes o no confías en el GPS)">
+                    <i class="bi bi-map"></i>
+                    <span>Ubicar en el mapa</span>
                 </button>
                 <button type="button" class="btn btn-sm btn-outline-secondary d-none align-items-center gap-1 shadow-sm" id="btn-limpiar-geo" title="Borrar coordenadas ingresadas">
                     <i class="bi bi-x-circle"></i>
@@ -54,6 +58,15 @@ Criterios de Aceptación Cumplidos:
         <div id="geo-status-alert" class="alert d-none py-2 px-3 mb-3 small" role="alert">
             <i class="bi bi-info-circle me-1" id="geo-status-icon"></i>
             <span id="geo-status-text"></span>
+        </div>
+
+        <!-- Mapa interactivo de respaldo (alternativa al GPS): oculto hasta que el usuario pulsa "Ubicar en el mapa" -->
+        <div id="mapa-georreferenciacion-wrapper" class="d-none mb-3">
+            <div class="small text-muted mb-2 d-flex align-items-center gap-1">
+                <i class="bi bi-cursor-fill"></i>
+                <span>Arrastra el marcador o haz clic en el mapa para ubicar tu finca. Las coordenadas se completan automáticamente.</span>
+            </div>
+            <div id="mapa-georreferenciacion" class="border rounded-3 overflow-hidden" style="width: 100%; height: 320px; background-color: #eef2ef;"></div>
         </div>
 
         <!-- Grilla de Inputs para Latitud y Longitud -->
