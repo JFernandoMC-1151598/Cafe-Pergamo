@@ -7,7 +7,8 @@ Subtarea: SCRUM-96: Guardar georreferenciación en backend.
 import uuid
 
 from django.contrib import messages
-from django.http import JsonResponse
+from django.db.models import Count, Q
+from django.http import JsonResponse, HttpResponseNotAllowed, HttpResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication
@@ -18,11 +19,19 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
-from .forms import FincaRegistroForm, FincaModelForm
+from .forms import FincaRegistroForm, FincaModelForm, MunicipioForm
 from .models import Finca, Municipio
 from .permissions import rol_puede_administrar_catalogos
 from .serializers import FincaGeorreferenciacionSerializer, MunicipioSerializer
+from .services import (
+    crear_municipio,
+    editar_municipio,
+    inactivar_municipio,
+    reactivar_municipio,
+    toggle_estado_municipio,
+)
 from usuarios.models import Usuario
+from usuarios.permissions import permiso_requerido_sesion
 
 
 def registrar_finca_view(request):
@@ -362,3 +371,175 @@ def api_municipio_toggle_activo_view(request, pk):
     data = MunicipioSerializer(municipio_res).data
     data["mensaje"] = mensaje
     return Response(data, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# Vistas Web de Administración del Catálogo de Municipios (HU-09 / SCRUM-111)
+# ==============================================================================
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.consultar",
+    forbidden_on_denied=True,
+)
+def admin_municipios_view(request):
+    """
+    Pantalla web principal de administración del catálogo de municipios (SCRUM-111).
+    - Permite consultar municipios con filtros combinados por búsqueda de texto, departamento y estado.
+    - Presenta métricas clave del catálogo y fincas vinculadas.
+    - Ofrece acciones para crear, editar e inactivar/activar territorios según permisos RBAC.
+    """
+    queryset = Municipio.objects.annotate(total_fincas=Count("fincas")).order_by("departamento", "nombre")
+
+    q = request.GET.get("q", "").strip()
+    if q:
+        queryset = queryset.filter(Q(nombre__icontains=q) | Q(codigo__icontains=q))
+
+    filtro_dep = request.GET.get("departamento", "").strip()
+    if filtro_dep:
+        queryset = queryset.filter(departamento__iexact=filtro_dep)
+
+    filtro_estado = request.GET.get("estado", "").strip().lower()
+    if filtro_estado in ("activos", "activas"):
+        queryset = queryset.filter(activo=True)
+    elif filtro_estado in ("inactivos", "inactivas"):
+        queryset = queryset.filter(activo=False)
+    else:
+        filtro_estado = ""
+
+    total_municipios = Municipio.objects.count()
+    activos = Municipio.objects.filter(activo=True).count()
+    inactivos = Municipio.objects.filter(activo=False).count()
+    total_fincas = Finca.objects.filter(municipio__isnull=False).count()
+
+    departamentos = (
+        Municipio.objects.values_list("departamento", flat=True)
+        .distinct()
+        .order_by("departamento")
+    )
+
+    form_crear = MunicipioForm()
+
+    return render(
+        request,
+        "fincas/admin_municipios.html",
+        {
+            "municipios": queryset,
+            "total_municipios": total_municipios,
+            "metricas": {
+                "total": total_municipios,
+                "activos": activos,
+                "inactivos": inactivos,
+                "total_fincas": total_fincas,
+            },
+            "departamentos": departamentos,
+            "query_q": q,
+            "filtro_dep": filtro_dep,
+            "filtro_estado": filtro_estado,
+            "form_crear": form_crear,
+        },
+    )
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def crear_municipio_web_view(request):
+    """
+    Procesa la creación web de un nuevo municipio en el catálogo (SCRUM-111 / SCRUM-112).
+    Aplica Service Layer con validación completa y feedback mediante messages.
+    """
+    if request.method == "POST":
+        form = MunicipioForm(request.POST)
+        if form.is_valid():
+            nombre = form.cleaned_data["nombre"]
+            departamento = form.cleaned_data["departamento"]
+            codigo = form.cleaned_data.get("codigo")
+            activo = form.cleaned_data.get("activo", True)
+
+            try:
+                municipio = crear_municipio(
+                    nombre=nombre,
+                    departamento=departamento,
+                    codigo=codigo,
+                    activo=activo,
+                )
+                messages.success(
+                    request,
+                    f"Municipio «{municipio.nombre}» registrado exitosamente con código {municipio.codigo}.",
+                )
+                return redirect("admin_municipios")
+            except Exception as e:
+                messages.error(request, f"Error al registrar el municipio: {e}")
+        else:
+            messages.error(request, "Por favor revise los errores señalados en el formulario.")
+    else:
+        form = MunicipioForm()
+
+    return render(request, "fincas/crear_municipio.html", {"form": form})
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def editar_municipio_web_view(request, pk):
+    """
+    Muestra y procesa el formulario de edición de un municipio existente (SCRUM-111 / SCRUM-110).
+    """
+    municipio = get_object_or_404(Municipio, pk=pk)
+
+    if request.method == "POST":
+        form = MunicipioForm(request.POST, instance=municipio)
+        if form.is_valid():
+            try:
+                municipio_actualizado = editar_municipio(
+                    municipio,
+                    nombre=form.cleaned_data["nombre"],
+                    departamento=form.cleaned_data["departamento"],
+                    codigo=form.cleaned_data.get("codigo"),
+                    activo=form.cleaned_data.get("activo"),
+                )
+                messages.success(
+                    request,
+                    f"Municipio «{municipio_actualizado.nombre}» actualizado exitosamente.",
+                )
+                return redirect("admin_municipios")
+            except Exception as e:
+                messages.error(request, f"Error al actualizar el municipio: {e}")
+        else:
+            messages.error(request, "Por favor revise los errores señalados en el formulario.")
+    else:
+        form = MunicipioForm(instance=municipio)
+
+    total_fincas = municipio.total_fincas_asociadas
+
+    return render(
+        request,
+        "fincas/editar_municipio.html",
+        {
+            "form": form,
+            "municipio": municipio,
+            "total_fincas": total_fincas,
+        },
+    )
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def alternar_estado_municipio_web_view(request, pk):
+    """
+    Activa o inactiva lógicamente un municipio desde la interfaz web (SCRUM-111 / SCRUM-113).
+    Preserva intacta la integridad referencial con fincas asociadas.
+    """
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    municipio = get_object_or_404(Municipio, pk=pk)
+    municipio_res, mensaje = toggle_estado_municipio(municipio)
+
+    messages.success(request, mensaje)
+    return redirect("admin_municipios")
+

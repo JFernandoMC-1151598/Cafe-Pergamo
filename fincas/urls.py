@@ -8,8 +8,14 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
-    # Interfaz Web
+    # Interfaz Web de Fincas (HU-06 / HU-07)
     path('registro/', views.registrar_finca_view, name='finca_registro'),
+
+    # Interfaz Web de Catálogo de Municipios (HU-09 / SCRUM-111)
+    path('municipios/', views.admin_municipios_view, name='admin_municipios'),
+    path('municipios/crear/', views.crear_municipio_web_view, name='crear_municipio_web'),
+    path('municipios/<int:pk>/editar/', views.editar_municipio_web_view, name='editar_municipio_web'),
+    path('municipios/<int:pk>/alternar-estado/', views.alternar_estado_municipio_web_view, name='alternar_estado_municipio_web'),
 
     # API REST de Fincas y Georreferenciación (SCRUM-96)
     path('api/', views.api_crear_finca_view, name='api_finca_crear'),

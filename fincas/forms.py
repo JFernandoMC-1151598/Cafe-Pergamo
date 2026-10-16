@@ -235,34 +235,55 @@ class FincaModelForm(forms.ModelForm):
 
 class MunicipioForm(forms.ModelForm):
     """
-    Formulario para creación y edición de municipios en el catálogo (HU09-ST6 / SCRUM-115).
+    Formulario para creación y edición de municipios en el catálogo (HU09-ST6 / SCRUM-115 / SCRUM-111).
     Aplica validaciones de obligatoriedad, formato y bloqueo de duplicados por departamento.
     """
+
+    codigo = forms.CharField(
+        max_length=20,
+        required=False,
+        label="Código DANE / Identificador",
+        help_text="Código corto o DANE (p. ej. 54518). Si se deja vacío se autogenerará automáticamente.",
+        widget=forms.TextInput(attrs={
+            "class": "form-control",
+            "id": "id_codigo",
+            "placeholder": "Ej: 54518 (Opcional)",
+            "autocomplete": "off",
+        }),
+    )
 
     class Meta:
         model = Municipio
         fields = ["codigo", "nombre", "departamento", "activo"]
         widgets = {
-            "codigo": forms.TextInput(attrs={
-                "class": "form-control",
-                "id": "id_codigo",
-                "placeholder": "Ej: 54518 (Opcional, se autogenera si se omite)",
-            }),
             "nombre": forms.TextInput(attrs={
                 "class": "form-control",
                 "id": "id_nombre",
                 "placeholder": "Ej: Pamplona",
+                "autocomplete": "off",
             }),
             "departamento": forms.TextInput(attrs={
                 "class": "form-control",
                 "id": "id_departamento",
                 "placeholder": "Ej: Norte de Santander",
+                "autocomplete": "off",
             }),
             "activo": forms.CheckboxInput(attrs={
                 "class": "form-check-input",
                 "id": "id_activo",
             }),
         }
+
+    def clean_codigo(self):
+        codigo = self.cleaned_data.get("codigo", "")
+        if codigo:
+            codigo = codigo.strip().upper()
+            qs = Municipio.objects.filter(codigo=codigo)
+            if self.instance and self.instance.pk:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                raise forms.ValidationError(f"Ya existe un municipio con el código '{codigo}'.")
+        return codigo
 
     def clean_nombre(self):
         nombre = self.cleaned_data.get("nombre", "").strip()
