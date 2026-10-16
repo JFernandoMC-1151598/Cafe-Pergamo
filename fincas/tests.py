@@ -1552,3 +1552,246 @@ class TestScrum112CrearMunicipioServicioYApi(TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("nombre", response.json())
+
+
+# =============================================================================
+# SUITE HU-09: SCRUM-110 (HU09-ST1) - SERVICIOS Y API PARA EDITAR MUNICIPIOS
+# =============================================================================
+
+
+class TestScrum110EditarMunicipioServicioYApi(TestCase):
+    """
+    Subtarea: SCRUM-110 / HU09-ST1: Implementar servicios y API para editar municipios.
+
+    Criterios de Aceptación (DoD):
+    1. Servicio de dominio `editar_municipio`:
+       - Permite actualizar nombre, departamento, código y estado activo.
+       - Permite guardar cambios manteniendo el mismo nombre (sin auto-bloqueo por unicidad).
+       - Bloquea duplicados si el nuevo nombre colisiona con otro municipio en el mismo departamento.
+       - Valida que nombre o departamento no queden vacíos.
+    2. Endpoint REST `GET /fincas/api/municipios/<pk>/`:
+       - Retorna 200 OK con los datos del municipio.
+       - Retorna 404 Not Found si no existe.
+    3. Endpoint REST `PUT / PATCH /fincas/api/municipios/<pk>/`:
+       - Retorna 200 OK y datos actualizados para roles autorizados (ASOCIACION / ADMINISTRADOR).
+       - Retorna 401 Unauthorized para peticiones anónimas sin token.
+       - Retorna 403 Forbidden para roles no autorizados (PRODUCTOR, COMPRADOR, etc.).
+       - Retorna 400 Bad Request ante duplicados en el mismo departamento o datos inválidos.
+       - Retorna 404 Not Found si el ID no existe.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.muni_pamplona = Municipio.objects.create(
+            codigo="54518",
+            nombre="Pamplona",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        self.muni_cucuta = Municipio.objects.create(
+            codigo="54001",
+            nombre="Cúcuta",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        self.url_detalle = reverse("api_municipio_detalle", kwargs={"pk": self.muni_pamplona.pk})
+
+    def _auth_headers(self, user, role_code="ASOCIACION"):
+        """Genera encabezados de autorización Bearer JWT con el role_code indicado."""
+        from rest_framework_simplejwt.tokens import AccessToken
+        token = AccessToken.for_user(user)
+        token["role_code"] = role_code
+        return {"HTTP_AUTHORIZATION": f"Bearer {str(token)}"}
+
+    # -------------------------------------------------------------------------
+    # 1. Pruebas de la Capa de Servicio (editar_municipio)
+    # -------------------------------------------------------------------------
+
+    def test_servicio_editar_municipio_actualiza_campos_exitosamente(self):
+        """El servicio actualiza el nombre y código correctamente."""
+        from fincas.services import editar_municipio
+
+        muni_editado = editar_municipio(
+            self.muni_pamplona,
+            nombre="Nueva Pamplona",
+            codigo="54519",
+        )
+        self.assertEqual(muni_editado.nombre, "Nueva Pamplona")
+        self.assertEqual(muni_editado.codigo, "54519")
+
+        self.muni_pamplona.refresh_from_db()
+        self.assertEqual(self.muni_pamplona.nombre, "Nueva Pamplona")
+        self.assertEqual(self.muni_pamplona.codigo, "54519")
+
+    def test_servicio_editar_municipio_por_id_exitoso(self):
+        """El servicio acepta tanto una instancia de modelo como un ID numérico."""
+        from fincas.services import editar_municipio
+
+        muni_editado = editar_municipio(
+            self.muni_pamplona.pk,
+            activo=False,
+        )
+        self.assertFalse(muni_editado.activo)
+        self.muni_pamplona.refresh_from_db()
+        self.assertFalse(self.muni_pamplona.activo)
+
+    def test_servicio_editar_municipio_permite_mantener_el_mismo_nombre(self):
+        """No debe bloquearse a sí mismo cuando se guardan cambios manteniendo el mismo nombre."""
+        from fincas.services import editar_municipio
+
+        muni_editado = editar_municipio(
+            self.muni_pamplona,
+            nombre="Pamplona",
+            activo=True,
+        )
+        self.assertEqual(muni_editado.nombre, "Pamplona")
+
+    def test_servicio_editar_municipio_bloquea_duplicado_con_otro_municipio(self):
+        """Rechaza la edición si el nuevo nombre ya pertenece a otro municipio en el departamento."""
+        from fincas.services import editar_municipio
+
+        with self.assertRaises(ValidationError) as ctx:
+            editar_municipio(self.muni_pamplona, nombre="Cúcuta")
+        self.assertIn("nombre", ctx.exception.message_dict)
+
+    def test_servicio_editar_municipio_rechaza_nombre_vacio(self):
+        """El servicio rechaza la actualización con nombre vacío."""
+        from fincas.services import editar_municipio
+
+        with self.assertRaises(ValidationError) as ctx:
+            editar_municipio(self.muni_pamplona, nombre="   ")
+        self.assertIn("nombre", ctx.exception.message_dict)
+
+    def test_servicio_editar_municipio_inexistente_lanza_error(self):
+        """El servicio lanza ValidationError si el ID no corresponde a ningún municipio."""
+        from fincas.services import editar_municipio
+
+        with self.assertRaises(ValidationError):
+            editar_municipio(99999, nombre="Inexistente")
+
+    # -------------------------------------------------------------------------
+    # 2. Pruebas de la API REST - Consulta de Detalle (GET)
+    # -------------------------------------------------------------------------
+
+    def test_api_get_detalle_municipio_existente_retorna_200(self):
+        """GET /fincas/api/municipios/<pk>/ retorna 200 OK con la información completa."""
+        response = self.client.get(self.url_detalle)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["id"], self.muni_pamplona.id)
+        self.assertEqual(data["nombre"], "Pamplona")
+        self.assertEqual(data["codigo"], "54518")
+
+    def test_api_get_detalle_municipio_inexistente_retorna_404(self):
+        """GET /fincas/api/municipios/99999/ retorna 404 Not Found."""
+        url_inexistente = reverse("api_municipio_detalle", kwargs={"pk": 99999})
+        response = self.client.get(url_inexistente)
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("error", response.json())
+
+    # -------------------------------------------------------------------------
+    # 3. Pruebas de la API REST - Edición y Control RBAC (PUT / PATCH)
+    # -------------------------------------------------------------------------
+
+    def test_api_patch_sin_autenticacion_retorna_401(self):
+        """Petición PATCH anónima sin token retorna HTTP 401 Unauthorized."""
+        response = self.client.patch(
+            self.url_detalle,
+            {"nombre": "Pamplona Renombrada"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("error", response.json())
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=False)
+    def test_api_patch_con_rol_no_autorizado_retorna_403(self, _mock_rol):
+        """Petición PATCH con rol no autorizado (ej. PRODUCTOR) retorna HTTP 403 Forbidden."""
+        user = User.objects.create_user(username="productor_edit", password="Password123!")
+        headers = self._auth_headers(user, role_code="PRODUCTOR")
+
+        response = self.client.patch(
+            self.url_detalle,
+            {"nombre": "Pamplona Renombrada"},
+            content_type="application/json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("error", response.json())
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=True)
+    def test_api_patch_con_rol_autorizado_actualiza_exitosamente_200(self, _mock_rol):
+        """Petición PATCH con rol autorizado (ASOCIACION / ADMIN) actualiza y retorna 200 OK."""
+        user = User.objects.create_user(username="asoc_edit", password="Password123!")
+        headers = self._auth_headers(user, role_code="ASOCIACION")
+
+        response = self.client.patch(
+            self.url_detalle,
+            {"nombre": "Pamplona Alta", "codigo": "54519"},
+            content_type="application/json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["nombre"], "Pamplona Alta")
+        self.assertEqual(data["codigo"], "54519")
+
+        self.muni_pamplona.refresh_from_db()
+        self.assertEqual(self.muni_pamplona.nombre, "Pamplona Alta")
+        self.assertEqual(self.muni_pamplona.codigo, "54519")
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=True)
+    def test_api_put_con_rol_autorizado_actualiza_todos_los_campos_200(self, _mock_rol):
+        """Petición PUT con rol autorizado actualiza el municipio completo."""
+        user = User.objects.create_user(username="admin_edit", password="Password123!")
+        headers = self._auth_headers(user, role_code="ADMINISTRADOR")
+
+        payload = {
+            "codigo": "54520",
+            "nombre": "Ciudad Mitrada",
+            "departamento": "Norte de Santander",
+            "activo": False,
+        }
+        response = self.client.put(
+            self.url_detalle,
+            payload,
+            content_type="application/json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["nombre"], "Ciudad Mitrada")
+        self.assertFalse(data["activo"])
+
+        self.muni_pamplona.refresh_from_db()
+        self.assertEqual(self.muni_pamplona.nombre, "Ciudad Mitrada")
+        self.assertFalse(self.muni_pamplona.activo)
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=True)
+    def test_api_patch_con_duplicado_mismo_departamento_retorna_400(self, _mock_rol):
+        """Petición PATCH intentando renombrar al nombre de otro municipio existente retorna HTTP 400."""
+        user = User.objects.create_user(username="asoc_edit2", password="Password123!")
+        headers = self._auth_headers(user, role_code="ASOCIACION")
+
+        response = self.client.patch(
+            self.url_detalle,
+            {"nombre": "cúcuta"},
+            content_type="application/json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("nombre", response.json())
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=True)
+    def test_api_patch_inexistente_retorna_404(self, _mock_rol):
+        """Petición PATCH hacia un ID inexistente retorna HTTP 404 Not Found."""
+        user = User.objects.create_user(username="asoc_edit3", password="Password123!")
+        headers = self._auth_headers(user, role_code="ASOCIACION")
+
+        url_inexistente = reverse("api_municipio_detalle", kwargs={"pk": 88888})
+        response = self.client.patch(
+            url_inexistente,
+            {"nombre": "No Existe"},
+            content_type="application/json",
+            **headers,
+        )
+        self.assertEqual(response.status_code, 404)

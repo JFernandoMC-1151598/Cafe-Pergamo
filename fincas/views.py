@@ -223,3 +223,71 @@ def api_municipios_coleccion_view(request):
         municipio = serializer.save()
         return Response(MunicipioSerializer(municipio).data, status=status.HTTP_201_CREATED)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["GET", "PUT", "PATCH"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_municipio_detalle_view(request, pk):
+    """
+    Endpoint REST para consultar y editar municipios del catálogo (SCRUM-110).
+    - GET: Obtiene la información detallada de un municipio (200 OK o 404 Not Found).
+    - PUT / PATCH: Actualiza los campos de un municipio. Requiere rol autorizado (ADMINISTRADOR o ASOCIACION).
+      Valida reglas de negocio (unicidad en departamento, campos no vacíos).
+      Retorna 200 OK con los datos actualizados, 401 si no hay token, 403 si el rol no tiene permisos,
+      404 si el municipio no existe o 400 Bad Request si los datos son inválidos.
+    """
+    try:
+        municipio = Municipio.objects.get(pk=pk)
+    except Municipio.DoesNotExist:
+        return Response(
+            {"error": "Municipio no encontrado."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if request.method == "GET":
+        serializer = MunicipioSerializer(municipio)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    # PUT / PATCH: Editar municipio
+    auth = JWTAuthentication()
+    token = getattr(request, "auth", None)
+    if token is None:
+        try:
+            res = auth.authenticate(request)
+            if res is not None:
+                user_auth, token = res
+                request.user = user_auth
+                request.auth = token
+        except (InvalidToken, TokenError):
+            pass
+
+    usuario_autenticado = getattr(request.user, "is_authenticated", False) or (token is not None)
+    if not usuario_autenticado:
+        return Response(
+            {"error": "Se requiere un token de autenticación válido."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    role_code = ""
+    if token and hasattr(token, "get"):
+        role_code = token.get("role_code", "") or ""
+    if not role_code and hasattr(request, "session"):
+        role_code = request.session.get("rol", "")
+    if not role_code and hasattr(request.user, "rol") and hasattr(request.user.rol, "codigo"):
+        role_code = request.user.rol.codigo
+
+    es_super = getattr(request.user, "is_superuser", False)
+
+    if not es_super and (not role_code or not rol_puede_administrar_catalogos(role_code)):
+        return Response(
+            {"error": "No tiene permiso para acceder a este recurso."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    partial = (request.method == "PATCH")
+    serializer = MunicipioSerializer(municipio, data=request.data, partial=partial)
+    if serializer.is_valid():
+        municipio_actualizado = serializer.save()
+        return Response(MunicipioSerializer(municipio_actualizado).data, status=status.HTTP_200_OK)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

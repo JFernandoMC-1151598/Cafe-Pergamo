@@ -135,29 +135,46 @@ class MunicipioSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         from django.core.exceptions import ValidationError as DjangoValidationError
 
-        nombre = (attrs.get("nombre") or "").strip()
-        departamento = (attrs.get("departamento") or "Norte de Santander").strip()
+        nombre = attrs.get("nombre")
+        departamento = attrs.get("departamento")
 
-        if not nombre:
-            raise serializers.ValidationError({"nombre": "El nombre del municipio no puede estar vacío."})
-        if not departamento:
-            raise serializers.ValidationError({"departamento": "El departamento no puede estar vacío."})
+        if self.instance:
+            if nombre is None:
+                nombre = self.instance.nombre
+            if departamento is None:
+                departamento = self.instance.departamento
+        else:
+            if departamento is None:
+                departamento = "Norte de Santander"
+
+        nombre_limpio = (nombre or "").strip()
+        dep_limpio = (departamento or "").strip()
+
+        if not self.instance or "nombre" in attrs:
+            if not nombre_limpio:
+                raise serializers.ValidationError({"nombre": "El nombre del municipio no puede estar vacío."})
+
+        if not self.instance or "departamento" in attrs:
+            if not dep_limpio:
+                raise serializers.ValidationError({"departamento": "El departamento no puede estar vacío."})
 
         # Bloqueo de duplicados en el mismo departamento (case-insensitive)
         queryset = Municipio.objects.filter(
-            departamento__iexact=departamento,
-            nombre__iexact=nombre,
+            departamento__iexact=dep_limpio,
+            nombre__iexact=nombre_limpio,
         )
         if self.instance:
             queryset = queryset.exclude(pk=self.instance.pk)
 
         if queryset.exists():
             raise serializers.ValidationError({
-                "nombre": f"Ya existe un municipio con el nombre '{nombre}' en el departamento '{departamento}'."
+                "nombre": f"Ya existe un municipio con el nombre '{nombre_limpio}' en el departamento '{dep_limpio}'."
             })
 
-        attrs["nombre"] = nombre
-        attrs["departamento"] = departamento
+        if "nombre" in attrs:
+            attrs["nombre"] = nombre_limpio
+        if "departamento" in attrs:
+            attrs["departamento"] = dep_limpio
         return attrs
 
     def create(self, validated_data):
@@ -166,6 +183,17 @@ class MunicipioSerializer(serializers.ModelSerializer):
 
         try:
             return crear_municipio(**validated_data)
+        except DjangoValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                raise serializers.ValidationError(exc.message_dict)
+            raise serializers.ValidationError(exc.messages)
+
+    def update(self, instance, validated_data):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .services import editar_municipio
+
+        try:
+            return editar_municipio(instance, **validated_data)
         except DjangoValidationError as exc:
             if hasattr(exc, "message_dict"):
                 raise serializers.ValidationError(exc.message_dict)

@@ -69,3 +69,54 @@ def crear_municipio(
     municipio.full_clean()
     municipio.save()
     return municipio
+
+
+def editar_municipio(
+    municipio_o_id,
+    *,
+    nombre: Optional[str] = None,
+    departamento: Optional[str] = None,
+    codigo: Optional[str] = None,
+    activo: Optional[bool] = None,
+) -> Municipio:
+    """
+    Actualiza los datos de un municipio existente en el catálogo (SCRUM-110 / HU09-ST1).
+
+    Reglas aplicadas:
+    1. Si se actualiza el nombre o departamento, no pueden ser cadenas vacías.
+    2. Bloqueo de duplicados en el mismo departamento (excluyendo el registro actual).
+    3. Si se actualiza el código, debe ser único en el sistema.
+    4. Validación integral de modelo mediante `full_clean()`.
+    """
+    if isinstance(municipio_o_id, Municipio):
+        municipio = municipio_o_id
+    else:
+        try:
+            municipio = Municipio.objects.get(pk=municipio_o_id)
+        except Municipio.DoesNotExist:
+            raise ValidationError({"id": "Municipio no encontrado."})
+
+    if nombre is not None:
+        nombre_limpio = str(nombre).strip()
+        if not nombre_limpio:
+            raise ValidationError({"nombre": "El nombre del municipio no puede estar vacío."})
+        municipio.nombre = nombre_limpio
+
+    if departamento is not None:
+        dep_limpio = str(departamento).strip()
+        if not dep_limpio:
+            raise ValidationError({"departamento": "El departamento no puede estar vacío."})
+        municipio.departamento = dep_limpio
+
+    if codigo is not None:
+        cod_limpio = str(codigo).strip().upper()
+        if not cod_limpio:
+            raise ValidationError({"codigo": "El código del municipio no puede estar vacío."})
+        municipio.codigo = cod_limpio
+
+    if activo is not None:
+        municipio.activo = bool(activo)
+
+    municipio.full_clean()
+    municipio.save()
+    return municipio
