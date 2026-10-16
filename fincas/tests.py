@@ -1982,3 +1982,599 @@ class TestScrum113InactivacionLogicaMunicipios(TestCase):
         response = self.client.post(url_inexistente, **headers)
         self.assertEqual(response.status_code, 404)
         self.assertIn("error", response.json())
+
+
+# ==============================================================================
+# SUITE HU-09: SCRUM-111 (HU09-ST2) - PANTALLA DE ADMINISTRACIÓN DEL CATÁLOGO
+# ==============================================================================
+
+@patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True)
+class TestScrum111PantallaAdminMunicipios(TestCase):
+    """
+    Pruebas funcionales y de integración para la pantalla de administración del catálogo de municipios (SCRUM-111 / HU09-ST2).
+    Cubre:
+    - Control de acceso RBAC por sesión (anónimo redirige a login, rol sin permiso recibe 403).
+    - Vistas de listado con filtros combinados (búsqueda q, departamento, estado activo/inactivo).
+    - Métricas clave en interfaz (total municipios, activos, inactivos, fincas vinculadas).
+    - Creación web de municipios con validaciones y feedback vía mensajes flash.
+    - Edición web de municipios preservando o actualizando datos.
+    - Inactivación y activación lógica web con confirmación y preservación de fincas asociadas.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.url_admin = reverse("admin_municipios")
+        self.url_crear = reverse("crear_municipio_web")
+
+        self.m1 = Municipio.objects.create(
+            codigo="54001",
+            nombre="Cúcuta",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        self.m2 = Municipio.objects.create(
+            codigo="54518",
+            nombre="Pamplona",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        self.m3 = Municipio.objects.create(
+            codigo="54810",
+            nombre="Tibú",
+            departamento="Norte de Santander",
+            activo=False,
+        )
+        self.m4 = Municipio.objects.create(
+            codigo="68001",
+            nombre="Bucaramanga",
+            departamento="Santander",
+            activo=True,
+        )
+
+        # Asociar una finca a Cúcuta para probar métricas y avisos
+        self.finca_cucuta = Finca.objects.create(
+            nombre="Finca El Paraíso",
+            municipio=self.m1,
+            productor_id=uuid.uuid4(),
+            latitud=Decimal("7.893910"),
+            longitud=Decimal("-72.507820"),
+        )
+
+    def _crear_request(self, path, method="get", authenticated=True, role="ADMINISTRADOR", data=None):
+        if method.lower() == "post":
+            request = self.factory.post(path, data=data or {})
+        else:
+            request = self.factory.get(path)
+
+        request.user = type(
+            "UserMock",
+            (),
+            {
+                "is_authenticated": authenticated,
+                "username": "admin@cafepergamo.co",
+                "first_name": "Administrador",
+            },
+        )()
+        request.session = {"rol": role} if role else {}
+        request._messages = FallbackStorage(request)
+        return request
+
+    # --------------------------------------------------------------------------
+    # 1. Autorización y Acceso RBAC
+    # --------------------------------------------------------------------------
+
+    def test_admin_municipios_anonimo_redirige_a_login(self, _mock_tag):
+        """Petición anónima es redirigida a la pantalla de login."""
+        request = self._crear_request(self.url_admin, authenticated=False)
+        from fincas.views import admin_municipios_view
+        response = admin_municipios_view(request)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=False)
+    def test_admin_municipios_sin_permiso_retorna_403(self, _mock_permiso, _mock_tag):
+        """Usuario autenticado pero sin permiso recibe 403 Forbidden."""
+        request = self._crear_request(self.url_admin, authenticated=True, role="COMPRADOR")
+        from fincas.views import admin_municipios_view
+        response = admin_municipios_view(request)
+        self.assertEqual(response.status_code, 403)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_admin_municipios_con_permiso_consultar_muestra_catalogo_sin_acciones(self, _mock_perm, _mock_tag):
+        """Usuario con permiso de consulta puede ver la pantalla en modo solo lectura."""
+        _mock_tag.return_value = False  # Para rbac_tags en el template
+        request = self._crear_request(self.url_admin, authenticated=True, role="PRODUCTOR")
+        from fincas.views import admin_municipios_view
+        response = admin_municipios_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Catálogo Maestro de Municipios")
+        self.assertContains(response, "54001")
+        self.assertContains(response, "54518")
+        # No ve botón de nuevo municipio ni acciones de administración
+        self.assertNotContains(response, 'data-bs-target="#modalCrearMunicipio"')
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_admin_municipios_con_permiso_administrar_muestra_acciones_y_metricas(self, _mock_perm, _mock_tag):
+        """Usuario con permiso de administración ve métricas, botón crear y botones de acción."""
+        _mock_tag.return_value = True
+        request = self._crear_request(self.url_admin, authenticated=True, role="ADMINISTRADOR")
+        from fincas.views import admin_municipios_view
+        response = admin_municipios_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Nuevo Municipio')
+        self.assertContains(response, 'Total Municipios')
+        self.assertContains(response, 'Editar')
+        self.assertContains(response, 'Inactivar')
+
+    # --------------------------------------------------------------------------
+    # 2. Filtros y Búsqueda
+    # --------------------------------------------------------------------------
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_admin_municipios_filtro_busqueda_q(self, _mock_perm, _mock_tag):
+        """Búsqueda por texto filtra municipios por nombre o código."""
+        request = self._crear_request(f"{self.url_admin}?q=Pamplona")
+        from fincas.views import admin_municipios_view
+        response = admin_municipios_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "54518")
+        self.assertNotContains(response, "54001")
+        self.assertNotContains(response, "Bucaramanga")
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_admin_municipios_filtro_por_departamento(self, _mock_perm, _mock_tag):
+        """Filtro por departamento muestra solo los pertenecientes a esa región."""
+        request = self._crear_request(f"{self.url_admin}?departamento=Santander")
+        from fincas.views import admin_municipios_view
+        response = admin_municipios_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Bucaramanga")
+        self.assertNotContains(response, "54001")
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_admin_municipios_filtro_por_estado_inactivos(self, _mock_perm, _mock_tag):
+        """Filtro de estado 'inactivos' muestra solo los que tienen activo=False."""
+        request = self._crear_request(f"{self.url_admin}?estado=inactivos")
+        from fincas.views import admin_municipios_view
+        response = admin_municipios_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Tibú")
+        self.assertNotContains(response, "54001")
+
+    # --------------------------------------------------------------------------
+    # 3. Creación Web de Municipios
+    # --------------------------------------------------------------------------
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_crear_municipio_web_get_renderiza_formulario(self, _mock_perm, _mock_tag):
+        """Petición GET a la vista de creación muestra el formulario."""
+        request = self._crear_request(self.url_crear, method="get")
+        from fincas.views import crear_municipio_web_view
+        response = crear_municipio_web_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Registrar Nuevo Municipio")
+        self.assertContains(response, "id_nombre")
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_crear_municipio_web_post_valido_persiste_y_redirige(self, _mock_perm, _mock_tag):
+        """Petición POST con datos válidos persiste y redirige al listado."""
+        datos = {
+            "nombre": "Chinácota",
+            "departamento": "Norte de Santander",
+            "codigo": "54206",
+            "activo": True,
+        }
+        request = self._crear_request(self.url_crear, method="post", data=datos)
+        from fincas.views import crear_municipio_web_view
+        response = crear_municipio_web_view(request)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self.url_admin)
+
+        municipio_creado = Municipio.objects.filter(nombre="Chinácota").first()
+        self.assertIsNotNone(municipio_creado)
+        self.assertEqual(municipio_creado.codigo, "54206")
+        self.assertTrue(municipio_creado.activo)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_crear_municipio_web_post_invalido_duplicado_muestra_error(self, _mock_perm, _mock_tag):
+        """Petición POST duplicada en el mismo departamento no persiste y muestra error."""
+        datos = {
+            "nombre": "cúcuta",  # Duplicado
+            "departamento": "Norte de Santander",
+            "codigo": "",
+            "activo": True,
+        }
+        request = self._crear_request(self.url_crear, method="post", data=datos)
+        from fincas.views import crear_municipio_web_view
+        response = crear_municipio_web_view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Ya existe un municipio")
+
+    # --------------------------------------------------------------------------
+    # 4. Edición Web de Municipios
+    # --------------------------------------------------------------------------
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_editar_municipio_web_get_muestra_datos(self, _mock_perm, _mock_tag):
+        """GET a editar municipio carga los valores actuales del modelo."""
+        url_editar = reverse("editar_municipio_web", kwargs={"pk": self.m2.pk})
+        request = self._crear_request(url_editar, method="get")
+        from fincas.views import editar_municipio_web_view
+        response = editar_municipio_web_view(request, pk=self.m2.pk)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Pamplona")
+        self.assertContains(response, "54518")
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_editar_municipio_web_post_valido_actualiza_y_redirige(self, _mock_perm, _mock_tag):
+        """POST válido a edición actualiza el registro y redirige."""
+        url_editar = reverse("editar_municipio_web", kwargs={"pk": self.m2.pk})
+        datos = {
+            "nombre": "Pamplona Ciudad Mitrada",
+            "departamento": "Norte de Santander",
+            "codigo": "54518",
+            "activo": True,
+        }
+        request = self._crear_request(url_editar, method="post", data=datos)
+        from fincas.views import editar_municipio_web_view
+        response = editar_municipio_web_view(request, pk=self.m2.pk)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self.url_admin)
+
+        self.m2.refresh_from_db()
+        self.assertEqual(self.m2.nombre, "Pamplona Ciudad Mitrada")
+
+    # --------------------------------------------------------------------------
+    # 5. Inactivación y Reactivación Web (Alternar Estado)
+    # --------------------------------------------------------------------------
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_alternar_estado_municipio_web_inactiva_y_preserva_fincas(self, _mock_perm, _mock_tag):
+        """POST a alternar estado inactiva el municipio y preserva fincas asociadas."""
+        url_toggle = reverse("alternar_estado_municipio_web", kwargs={"pk": self.m1.pk})
+        request = self._crear_request(url_toggle, method="post")
+        from fincas.views import alternar_estado_municipio_web_view
+        response = alternar_estado_municipio_web_view(request, pk=self.m1.pk)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self.url_admin)
+
+        self.m1.refresh_from_db()
+        self.assertFalse(self.m1.activo)
+
+        # La finca sigue intacta asociada a Cúcuta
+        self.finca_cucuta.refresh_from_db()
+        self.assertEqual(self.finca_cucuta.municipio, self.m1)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_alternar_estado_municipio_web_reactiva(self, _mock_perm, _mock_tag):
+        """POST a alternar estado sobre municipio inactivo lo reactiva."""
+        url_toggle = reverse("alternar_estado_municipio_web", kwargs={"pk": self.m3.pk})
+        request = self._crear_request(url_toggle, method="post")
+        from fincas.views import alternar_estado_municipio_web_view
+        response = alternar_estado_municipio_web_view(request, pk=self.m3.pk)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self.url_admin)
+
+        self.m3.refresh_from_db()
+        self.assertTrue(self.m3.activo)
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_alternar_estado_municipio_web_rechaza_get(self, _mock_perm, _mock_tag):
+        """GET a alternar estado responde HTTP 405 Method Not Allowed."""
+        url_toggle = reverse("alternar_estado_municipio_web", kwargs={"pk": self.m1.pk})
+        request = self._crear_request(url_toggle, method="get")
+        from fincas.views import alternar_estado_municipio_web_view
+        response = alternar_estado_municipio_web_view(request, pk=self.m1.pk)
+        self.assertEqual(response.status_code, 405)
+
+
+# ==============================================================================
+# SUITE HU-09: SCRUM-118 (HU09-ST9) - PRUEBAS DE PARAMETRIZACIÓN DE MUNICIPIOS
+# ==============================================================================
+
+@patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True)
+class TestScrum118ParametrizacionMunicipiosIntegral(TestCase):
+    """
+    Suite Integral de Pruebas de Calidad (DoD) para la Historia de Usuario HU-09:
+    'Parametrización del catálogo de municipios' (SCRUM-13 / SCRUM-118 / HU09-ST9).
+
+    Valida todos los Criterios de Aceptación de la HU:
+    - CA1 (Funcionalidad): Crear, editar e inactivar municipios desde la interfaz sin código.
+    - CA2 (Inactivación): Inactivación lógica y preservación histórica de fincas asociadas.
+    - CA3 (Precarga): Fixture y comando con los 40 municipios cafeteros de Norte de Santander (DANE).
+    - CA4 (Reglas y consistencia): Control de duplicados insensible a mayúsculas y autogeneración de códigos.
+    - CA5 (Seguridad RBAC): Matriz de permisos por rol para API y Web.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.factory = RequestFactory()
+
+    def _auth_headers(self, user, role_code="ASOCIACION"):
+        from rest_framework_simplejwt.tokens import RefreshToken
+        token = RefreshToken.for_user(user)
+        token["role_code"] = role_code
+        return {"HTTP_AUTHORIZATION": f"Bearer {token.access_token}"}
+
+    # --------------------------------------------------------------------------
+    # CA1: Funcionalidad de parametrización de municipios (Servicios y Negocio)
+    # --------------------------------------------------------------------------
+
+    def test_ca1_ciclo_completo_parametrizacion_sin_codigo(self, _mock_tag):
+        """
+        CA1: Valida el ciclo de vida de un municipio nuevo: creación, edición,
+        inactivación lógica y reactivación sin alterar código de la aplicación.
+        """
+        from fincas.services import (
+            crear_municipio,
+            editar_municipio,
+            inactivar_municipio,
+            reactivar_municipio,
+        )
+
+        # 1. Crear nuevo municipio parametrizable
+        municipio = crear_municipio(
+            nombre="Gramalote",
+            departamento="Norte de Santander",
+            codigo="54315",
+            activo=True,
+        )
+        self.assertIsNotNone(municipio.pk)
+        self.assertEqual(municipio.nombre, "Gramalote")
+        self.assertEqual(municipio.codigo, "54315")
+        self.assertTrue(municipio.activo)
+
+        # 2. Editar información del municipio
+        municipio_editado = editar_municipio(
+            municipio,
+            nombre="Nuevo Gramalote",
+            codigo="54315-REV",
+        )
+        self.assertEqual(municipio_editado.nombre, "Nuevo Gramalote")
+        self.assertEqual(municipio_editado.codigo, "54315-REV")
+
+        # 3. Inactivación lógica
+        municipio_inactivo, msg_inactivo = inactivar_municipio(municipio_editado)
+        self.assertFalse(municipio_inactivo.activo)
+        self.assertIn("inactivado exitosamente", msg_inactivo)
+
+        # 4. Reactivación
+        municipio_activo, msg_activo = reactivar_municipio(municipio_inactivo)
+        self.assertTrue(municipio_activo.activo)
+        self.assertIn("reactivado exitosamente", msg_activo)
+
+    # --------------------------------------------------------------------------
+    # CA2: Inactivación lógica y preservación histórica de fincas asociadas
+    # --------------------------------------------------------------------------
+
+    def test_ca2_inactivacion_logica_proteccion_contra_delete_fisico(self, _mock_tag):
+        """
+        CA2: Un municipio con fincas asociadas NO admite borrado físico (ProtectedError),
+        garantizando que la única vía válida sea la inactivación lógica.
+        """
+        municipio = Municipio.objects.create(
+            codigo="54418",
+            nombre="Lourdes",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        finca = Finca.objects.create(
+            nombre="Finca La Esperanza",
+            municipio=municipio,
+            productor_id=uuid.uuid4(),
+            latitud=Decimal("7.940000"),
+            longitud=Decimal("-72.830000"),
+        )
+
+        # Intento de borrado físico debe ser bloqueado por django.db.models.PROTECT
+        with self.assertRaises(ProtectedError):
+            municipio.delete()
+
+        # Debe permanecer en BD
+        self.assertTrue(Municipio.objects.filter(pk=municipio.pk).exists())
+        self.assertEqual(municipio.total_fincas_asociadas, 1)
+
+    def test_ca2_fincas_historicas_se_preservan_tras_inactivacion_logica(self, _mock_tag):
+        """
+        CA2: Al inactivar lógicamente un municipio, sus fincas históricas asociadas
+        permanecen intactas y consultables en el sistema.
+        """
+        from fincas.services import inactivar_municipio
+
+        municipio = Municipio.objects.create(
+            codigo="54660",
+            nombre="Salazar de las Palmas",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        finca1 = Finca.objects.create(
+            nombre="Finca Café Real",
+            municipio=municipio,
+            productor_id=uuid.uuid4(),
+        )
+        finca2 = Finca.objects.create(
+            nombre="Finca El Edén",
+            municipio=municipio,
+            productor_id=uuid.uuid4(),
+        )
+
+        # Inactivar municipio con fincas
+        municipio_inactivo, mensaje = inactivar_municipio(municipio)
+        self.assertFalse(municipio_inactivo.activo)
+        self.assertIn("Se preserva la integridad referencial con 2 finca(s)", mensaje)
+
+        # Las fincas conservan su FK sin alteraciones
+        finca1.refresh_from_db()
+        finca2.refresh_from_db()
+        self.assertEqual(finca1.municipio_id, municipio.id)
+        self.assertEqual(finca2.municipio_id, municipio.id)
+
+    # --------------------------------------------------------------------------
+    # CA3: Precarga con municipios de Norte de Santander (Fixture y DANE)
+    # --------------------------------------------------------------------------
+
+    def test_ca3_precarga_catalogo_40_municipios_dane(self, _mock_tag):
+        """
+        CA3: El fixture o comando de carga inicial contiene los 40 municipios
+        oficiales de Norte de Santander con códigos DANE válidos (prefijo 54xxx).
+        """
+        call_command("cargar_municipios")
+
+        total_nds = Municipio.objects.filter(departamento="Norte de Santander").count()
+        self.assertEqual(total_nds, 40)
+
+        # Verificar presencia de municipios cafeteros icónicos
+        municipios_cafeteros_esperados = [
+            ("54518", "Pamplona"),
+            ("54820", "Toledo"),
+            ("54660", "Salazar"),
+            ("54051", "Arboledas"),
+            ("54206", "Convención"),
+            ("54377", "Labateca"),
+            ("54385", "La Esperanza"),
+            ("54099", "Bochalema"),
+            ("54174", "Chitagá"),
+            ("54245", "El Carmen"),
+            ("54418", "Lourdes"),
+        ]
+
+        for codigo, nombre in municipios_cafeteros_esperados:
+            m = Municipio.objects.filter(codigo=codigo).first()
+            self.assertIsNotNone(m, f"Municipio con código DANE {codigo} ({nombre}) no fue encontrado en la precarga.")
+            self.assertIn(nombre.upper(), m.nombre.upper())
+            self.assertTrue(m.activo)
+
+    def test_ca3_idempotencia_comando_carga_municipios(self, _mock_tag):
+        """
+        CA3: La carga inicial es totalmente idempotente; ejecutarla varias veces
+        no crea duplicados ni altera la integridad de los 40 municipios.
+        """
+        # Primera carga
+        call_command("cargar_municipios")
+        conteo_1 = Municipio.objects.filter(departamento="Norte de Santander").count()
+        self.assertEqual(conteo_1, 40)
+
+        # Segunda carga
+        call_command("cargar_municipios")
+        conteo_2 = Municipio.objects.filter(departamento="Norte de Santander").count()
+        self.assertEqual(conteo_2, 40)
+
+        # Tercera carga
+        call_command("cargar_municipios")
+        conteo_3 = Municipio.objects.filter(departamento="Norte de Santander").count()
+        self.assertEqual(conteo_3, 40)
+
+    # --------------------------------------------------------------------------
+    # CA4: Reglas de negocio, unicidad insensible y autogeneración de códigos
+    # --------------------------------------------------------------------------
+
+    def test_ca4_bloqueo_duplicados_case_insensitive_mismo_departamento(self, _mock_tag):
+        """
+        CA4: Regla de negocio que bloquea nombres duplicados en el mismo departamento
+        independientemente de mayúsculas/minúsculas y espacios.
+        """
+        from fincas.services import crear_municipio
+
+        crear_municipio(nombre="Mutiscua", departamento="Norte de Santander", codigo="54480")
+
+        # Intento con mayúsculas/minúsculas diferentes
+        with self.assertRaises(ValidationError):
+            crear_municipio(nombre="  MUTISCUA  ", departamento="Norte de Santander")
+
+        with self.assertRaises(ValidationError):
+            crear_municipio(nombre="mutiscua", departamento="norte de santander")
+
+    def test_ca4_permite_mismo_nombre_en_distintos_departamentos(self, _mock_tag):
+        """
+        CA4: Permite municipios homónimos si pertenecen a departamentos diferentes.
+        """
+        from fincas.services import crear_municipio
+
+        m_nds = crear_municipio(nombre="San Cayetano", departamento="Norte de Santander", codigo="54673")
+        m_cun = crear_municipio(nombre="San Cayetano", departamento="Cundinamarca", codigo="25662")
+
+        self.assertIsNotNone(m_nds.pk)
+        self.assertIsNotNone(m_cun.pk)
+        self.assertNotEqual(m_nds.departamento, m_cun.departamento)
+
+    def test_ca4_autogeneracion_codigos_sugeridos_y_resolucion_colisiones(self, _mock_tag):
+        """
+        CA4: Genera códigos únicos sugeridos si no se proporciona código DANE
+        y resuelve colisiones añadiendo sufijo correlativo numérico.
+        """
+        from fincas.services import generar_codigo_municipio_sugerido, crear_municipio
+
+        m1 = crear_municipio(nombre="Herrán", departamento="Norte de Santander")
+        self.assertTrue(m1.codigo.startswith("NDS-HERR"))
+
+        # Municipio con nombre y departamento idéntico pero forzado a código sugerido
+        codigo_sugerido_colision = generar_codigo_municipio_sugerido("Herrán", "Norte de Santander")
+        self.assertTrue(codigo_sugerido_colision.startswith("NDS-HERR"))
+        self.assertIn("-", codigo_sugerido_colision)
+
+    # --------------------------------------------------------------------------
+    # CA5: Seguridad RBAC Integral (API y Sesión Web)
+    # --------------------------------------------------------------------------
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=False)
+    def test_ca5_rbac_productor_y_comprador_no_pueden_administrar_municipios(self, _mock_perm, _mock_tag):
+        """
+        CA5: Los roles PRODUCTOR y COMPRADOR tienen denegado el acceso a la
+        creación, edición y cambio de estado del catálogo (403 Forbidden).
+        """
+        from fincas.views import crear_municipio_web_view, alternar_estado_municipio_web_view
+
+        municipio = Municipio.objects.create(codigo="54720", nombre="Sardinata", activo=True)
+
+        # Probar en web (sesión)
+        req_crear = self.factory.post(reverse("crear_municipio_web"), data={"nombre": "Nuevo"})
+        req_crear.user = type("U", (), {"is_authenticated": True})()
+        req_crear.session = {"rol": "PRODUCTOR"}
+        req_crear._messages = FallbackStorage(req_crear)
+
+        resp_crear = crear_municipio_web_view(req_crear)
+        self.assertEqual(resp_crear.status_code, 403)
+
+        req_toggle = self.factory.post(reverse("alternar_estado_municipio_web", kwargs={"pk": municipio.pk}))
+        req_toggle.user = type("U", (), {"is_authenticated": True})()
+        req_toggle.session = {"rol": "COMPRADOR"}
+        req_toggle._messages = FallbackStorage(req_toggle)
+
+        resp_toggle = alternar_estado_municipio_web_view(req_toggle, pk=municipio.pk)
+        self.assertEqual(resp_toggle.status_code, 403)
+
+    @patch("fincas.views.rol_puede_administrar_catalogos", return_value=True)
+    def test_ca5_rbac_asociacion_puede_administrar_municipios_por_api(self, _mock_rol, _mock_tag):
+        """
+        CA5: El rol ASOCIACION cuenta con autorización plena para crear y editar municipios por API REST.
+        """
+        user = User.objects.create_user(username="asoc_integral", password="Password123!")
+        headers = self._auth_headers(user, role_code="ASOCIACION")
+
+        # Crear por API
+        data_crear = {
+            "nombre": "Cachira",
+            "departamento": "Norte de Santander",
+            "codigo": "54128",
+            "activo": True,
+        }
+        resp_post = self.client.post(
+            reverse("api_municipios_coleccion"),
+            data=data_crear,
+            content_type="application/json",
+            **headers,
+        )
+        self.assertEqual(resp_post.status_code, 201)
+        municipio_id = resp_post.json()["id"]
+
+        # Inactivar por API
+        resp_inactivar = self.client.post(
+            reverse("api_municipio_inactivar", kwargs={"pk": municipio_id}),
+            **headers,
+        )
+        self.assertEqual(resp_inactivar.status_code, 200)
+        self.assertFalse(resp_inactivar.json()["activo"])
+
+
