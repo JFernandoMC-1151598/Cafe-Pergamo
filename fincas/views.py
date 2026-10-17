@@ -6,9 +6,11 @@ Subtarea: SCRUM-91 / HU06-ST3: Crear formulario de registro de finca(s) en la in
 Subtarea: SCRUM-89 / HU06-ST4: Validar campos obligatorios y consistencia de datos del registro.
 Subtarea: SCRUM-90 / HU06-ST5: Implementar servicio/API para registrar fincas.
 Subtarea: SCRUM-92 / HU06-ST6: Listar fincas registradas por productor.
+Subtarea: SCRUM-142 / HU13-ST2: Implementar servicio/API para registrar lotes.
 """
 
 from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.db.models import Count, Q
 from django.http import JsonResponse, HttpResponseNotAllowed, HttpResponse
 from django.shortcuts import render, redirect, get_object_or_404
@@ -23,10 +25,11 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
 from .forms import FincaRegistroForm, FincaModelForm, MunicipioForm
-from .models import Finca, Municipio
+from .models import Cosecha, Finca, Lote, Municipio
 from .permissions import rol_puede_administrar_catalogos
-from .serializers import FincaGeorreferenciacionSerializer, MunicipioSerializer
+from .serializers import FincaGeorreferenciacionSerializer, LoteSerializer, MunicipioSerializer
 from .services import (
+    crear_lote,
     crear_municipio,
     editar_municipio,
     inactivar_municipio,
@@ -635,3 +638,64 @@ def mis_fincas_view(request):
         "fincas/mis_fincas.html",
         {"fincas": fincas, "fincas_geo": fincas_geo},
     )
+
+
+@api_view(["POST"])
+def api_crear_lote_view(request):
+    """
+    Endpoint REST para registrar lotes de café a partir de una cosecha
+    existente (HU13-ST2 / SCRUM-142).
+    POST /fincas/api/lotes/
+    Body: {"cosecha": <id>, "cantidad": <decimal>, "codigo": <str opcional>}
+
+    Igual que `api_crear_finca_view`, el productor se resuelve del
+    usuario realmente autenticado (`_resolver_productor_id`), nunca de un
+    campo del body. Además se verifica que la cosecha indicada pertenezca
+    a una finca de ESE productor (aislamiento entre usuarios, mismo
+    criterio que ya se exige en HU06-ST6/ST7): nadie puede crear lotes a
+    partir de la cosecha de otro productor.
+
+    Toda la lógica de negocio (código único, cantidad vs. saldo
+    disponible, descuento transaccional) vive en `services.crear_lote`;
+    esta vista solo identifica al productor, autoriza y traduce el
+    resultado a una respuesta HTTP.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        return Response(
+            {"error": "No se pudo identificar al productor autenticado."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    cosecha_id = request.data.get("cosecha") or request.data.get("cosecha_id")
+    if not cosecha_id:
+        return Response(
+            {"cosecha": ["Este campo es obligatorio."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        cosecha = Cosecha.objects.select_related("finca").get(pk=cosecha_id)
+    except (Cosecha.DoesNotExist, ValueError, TypeError):
+        return Response(
+            {"cosecha": ["La cosecha indicada no existe."]},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if str(cosecha.finca.productor_id) != str(productor_id):
+        return Response(
+            {"error": "La cosecha indicada no pertenece a su cuenta de productor."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        lote = crear_lote(
+            cosecha_id=cosecha_id,
+            cantidad=request.data.get("cantidad"),
+            codigo=request.data.get("codigo"),
+        )
+    except ValidationError as exc:
+        detalle = exc.message_dict if hasattr(exc, "message_dict") else {"error": exc.messages}
+        return Response(detalle, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response(LoteSerializer(lote).data, status=status.HTTP_201_CREATED)

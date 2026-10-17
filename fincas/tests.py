@@ -5,6 +5,8 @@ Integración de:
 - HU-06 (SCRUM-87, SCRUM-88): Modelo de datos de fincas, relación con productor y catálogo de municipios.
 - HU-07 (SCRUM-95, SCRUM-96, SCRUM-97, SCRUM-98, SCRUM-99): Registro de georreferenciación opcional,
   validación de formato cartográfico decimal WGS84 [-90, 90] y [-180, 180], persistencia y API REST.
+- HU-13 (SCRUM-141, SCRUM-142): Modelo de datos Cosecha-Lote y registro de lotes de café a partir
+  de una cosecha, con validación de código único, cantidad vs. saldo disponible y descuento transaccional.
 """
 
 import uuid
@@ -29,7 +31,8 @@ from fincas.forms import (
     GeorreferenciacionFormMixin,
     MunicipioForm,
 )
-from fincas.models import Finca, Municipio
+from fincas.models import Cosecha, Finca, Lote, Municipio
+from fincas.services import crear_lote, generar_codigo_lote
 from fincas.validators import (
     validar_latitud,
     validar_longitud,
@@ -2856,3 +2859,282 @@ class TestScrum118ParametrizacionMunicipiosIntegral(TestCase):
         )
         self.assertEqual(resp_inactivar.status_code, 200)
         self.assertFalse(resp_inactivar.json()["activo"])
+
+
+# =============================================================================
+# SUITE HU-13: MODELO COSECHA-LOTE Y CREACIÓN DE LOTES DE CAFÉ
+# (SCRUM-141 / HU13-ST1, SCRUM-142 / HU13-ST2)
+# =============================================================================
+
+
+class CosechaModeloTests(TestCase):
+    """
+    Pruebas del modelo mínimo Cosecha (HU13-ST1 / SCRUM-141): la
+    estructura de persistencia que sirve de base para los lotes, con su
+    saldo disponible y la restricción de que nunca puede ser mayor que
+    el total cosechado.
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(codigo="TEST_COSECHA_MUN", nombre="Chinácota (prueba)")
+        self.finca = Finca.objects.create(
+            nombre="Finca Las Delicias",
+            productor_id=uuid.uuid4(),
+            municipio=self.municipio,
+        )
+
+    def test_cantidad_disponible_toma_el_total_por_defecto_al_crear(self):
+        """Si no se indica `cantidad_disponible` al crear, arranca igual a `cantidad_total`."""
+        cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-03-01",
+            cantidad_total=Decimal("500.00"),
+        )
+        self.assertEqual(cosecha.cantidad_disponible, Decimal("500.00"))
+
+    def test_variedad_es_opcional(self):
+        """La variedad de café (catálogo HU10) es opcional en la cosecha mínima."""
+        cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-03-01",
+            cantidad_total=Decimal("120.00"),
+        )
+        self.assertIsNone(cosecha.variedad)
+
+    def test_no_permite_cantidad_disponible_mayor_al_total(self):
+        """
+        La restricción `cosecha_disponible_no_supera_total` (CheckConstraint)
+        rechaza a nivel de base de datos un saldo disponible mayor al total
+        cosechado, incluso si algún código intentara forzarlo.
+        """
+        cosecha = Cosecha(
+            finca=self.finca,
+            fecha_cosecha="2026-03-01",
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("150.00"),
+        )
+        with self.assertRaises(IntegrityError):
+            cosecha.save()
+
+    def test_str_incluye_finca_y_saldo(self):
+        cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-03-01",
+            cantidad_total=Decimal("80.00"),
+        )
+        self.assertIn("Las Delicias", str(cosecha))
+        self.assertIn("80.00", str(cosecha))
+
+
+class CrearLoteServicioTests(TestCase):
+    """
+    Pruebas del servicio `crear_lote` (HU13-ST2 / SCRUM-142), que aplica
+    las tres reglas de negocio pedidas por Jira: código único
+    alfanumérico, cantidad del lote no mayor al saldo disponible de la
+    cosecha, y descuento transaccional automático de ese saldo.
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(codigo="TEST_LOTE_SERV_MUN", nombre="Salazar (prueba)")
+        self.finca = Finca.objects.create(
+            nombre="Finca El Progreso",
+            productor_id=uuid.uuid4(),
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-04-10",
+            cantidad_total=Decimal("1000.00"),
+        )
+
+    def test_crea_lote_con_codigo_explicito_y_descuenta_saldo(self):
+        lote = crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("300.00"), codigo="L0001")
+        self.assertEqual(lote.codigo, "L0001")
+        self.assertEqual(lote.cantidad, Decimal("300.00"))
+
+        self.cosecha.refresh_from_db()
+        self.assertEqual(self.cosecha.cantidad_disponible, Decimal("700.00"))
+
+    def test_genera_codigo_automaticamente_si_no_se_proporciona(self):
+        lote = crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("50.00"))
+        self.assertTrue(lote.codigo.isalnum())
+        self.assertTrue(lote.codigo.startswith(f"LOTE{self.cosecha.pk}"))
+
+    def test_generar_codigo_lote_coincide_con_el_que_usa_crear_lote(self):
+        """`generar_codigo_lote` es la misma función que `crear_lote` usa internamente."""
+        codigo_esperado = generar_codigo_lote(self.cosecha)
+        lote = crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("50.00"))
+        self.assertEqual(lote.codigo, codigo_esperado)
+
+    def test_rechaza_codigo_no_alfanumerico(self):
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("10.00"), codigo="L-0001!!")
+        self.assertIn("codigo", ctx.exception.message_dict)
+
+    def test_rechaza_codigo_duplicado(self):
+        crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("10.00"), codigo="UNICO123")
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("10.00"), codigo="unico123")
+        self.assertIn("codigo", ctx.exception.message_dict)
+
+    def test_rechaza_cantidad_que_supera_el_saldo_disponible(self):
+        """Criterio de aceptación HU-13: la cantidad del lote no puede superar el saldo de la cosecha."""
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("1500.00"))
+        self.assertIn("cantidad", ctx.exception.message_dict)
+
+        self.cosecha.refresh_from_db()
+        self.assertEqual(self.cosecha.cantidad_disponible, Decimal("1000.00"))
+
+    def test_rechaza_cantidad_cero_o_negativa(self):
+        with self.assertRaises(ValidationError):
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("0.00"))
+        with self.assertRaises(ValidationError):
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("-5.00"))
+
+    def test_rechaza_cantidad_no_numerica(self):
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad="no-es-un-numero")
+        self.assertIn("cantidad", ctx.exception.message_dict)
+
+    def test_rechaza_cosecha_inexistente(self):
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=999999, cantidad=Decimal("10.00"))
+        self.assertIn("cosecha", ctx.exception.message_dict)
+
+    def test_rechaza_cosecha_inactiva(self):
+        self.cosecha.activo = False
+        self.cosecha.save(update_fields=["activo"])
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("10.00"))
+        self.assertIn("cosecha", ctx.exception.message_dict)
+
+    def test_descuento_es_acumulativo_y_automatico_en_varios_lotes_sucesivos(self):
+        """
+        El descuento transaccional automático (tercer criterio de HU-13) se
+        aplica en cada creación, así que varios lotes sucesivos contra la
+        misma cosecha siguen respetando el saldo restante, nunca el total
+        original.
+        """
+        crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("400.00"))
+        self.cosecha.refresh_from_db()
+        self.assertEqual(self.cosecha.cantidad_disponible, Decimal("600.00"))
+
+        crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("600.00"))
+        self.cosecha.refresh_from_db()
+        self.assertEqual(self.cosecha.cantidad_disponible, Decimal("0.00"))
+
+        # Ya no queda saldo: un tercer lote, aunque sea mínimo, debe rechazarse.
+        with self.assertRaises(ValidationError):
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("0.01"))
+
+
+class ApiCrearLoteViewTests(TestCase):
+    """
+    Pruebas del endpoint `POST /fincas/api/lotes/` (HU13-ST2 / SCRUM-142):
+    identificación del productor, aislamiento entre cuentas (una cosecha
+    de otro productor nunca es visible) y traducción de las reglas de
+    negocio de `crear_lote` a códigos de estado HTTP.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_api = reverse("api_lote_crear")
+        self.municipio = Municipio.objects.create(codigo="TEST_LOTE_API_MUN", nombre="Herrán (prueba)")
+
+    def _crear_finca_y_cosecha(self, productor_id, cantidad_total="200.00"):
+        finca = Finca.objects.create(
+            nombre="Finca API Lotes",
+            productor_id=productor_id,
+            municipio=self.municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-05-01",
+            cantidad_total=Decimal(cantidad_total),
+        )
+        return finca, cosecha
+
+    def test_sin_autenticacion_responde_401(self):
+        response = self.client.post(
+            self.url_api, {"cosecha": 1, "cantidad": "10.00"}, content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 401)
+
+    @patch("fincas.views.Usuario")
+    def test_falta_cosecha_responde_400(self, mock_usuario_model):
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=uuid.uuid4())
+        response = self.client.post(
+            self.url_api, {"cantidad": "10.00"}, content_type="application/json", **_jwt_bearer_headers()
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("cosecha", response.json())
+
+    @patch("fincas.views.Usuario")
+    def test_cosecha_inexistente_responde_404(self, mock_usuario_model):
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=uuid.uuid4())
+        response = self.client.post(
+            self.url_api,
+            {"cosecha": 999999, "cantidad": "10.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 404)
+
+    @patch("fincas.views.Usuario")
+    def test_cosecha_de_otro_productor_responde_403(self, mock_usuario_model):
+        """
+        Aislamiento entre cuentas: un productor no puede crear lotes a
+        partir de la cosecha de otro productor, aunque conozca su id.
+        """
+        productor_autenticado = uuid.uuid4()
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=productor_autenticado)
+
+        _, cosecha_de_otro = self._crear_finca_y_cosecha(productor_id=uuid.uuid4())
+
+        response = self.client.post(
+            self.url_api,
+            {"cosecha": cosecha_de_otro.pk, "cantidad": "10.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 403)
+
+    @patch("fincas.views.Usuario")
+    def test_cantidad_supera_saldo_responde_400(self, mock_usuario_model):
+        productor_autenticado = uuid.uuid4()
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=productor_autenticado)
+
+        _, cosecha = self._crear_finca_y_cosecha(productor_id=productor_autenticado, cantidad_total="50.00")
+
+        response = self.client.post(
+            self.url_api,
+            {"cosecha": cosecha.pk, "cantidad": "999.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("cantidad", response.json())
+
+    @patch("fincas.views.Usuario")
+    def test_creacion_exitosa_responde_201_y_descuenta_saldo(self, mock_usuario_model):
+        productor_autenticado = uuid.uuid4()
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=productor_autenticado)
+
+        finca, cosecha = self._crear_finca_y_cosecha(productor_id=productor_autenticado, cantidad_total="300.00")
+
+        response = self.client.post(
+            self.url_api,
+            {"cosecha": cosecha.pk, "cantidad": "120.00", "codigo": "APILOTE01"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 201)
+        cuerpo = response.json()
+        self.assertEqual(cuerpo["codigo"], "APILOTE01")
+        self.assertEqual(cuerpo["cantidad"], "120.00")
+        self.assertEqual(cuerpo["finca"], finca.nombre)
+        self.assertEqual(cuerpo["cantidad_disponible_cosecha"], "180.00")
+
+        cosecha.refresh_from_db()
+        self.assertEqual(cosecha.cantidad_disponible, Decimal("180.00"))

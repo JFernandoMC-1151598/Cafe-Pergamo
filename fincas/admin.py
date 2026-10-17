@@ -5,7 +5,7 @@ Subtarea: SCRUM-98 / HU07-ST5 (Georreferenciación).
 """
 
 from django.contrib import admin
-from .models import Finca, Municipio
+from .models import Cosecha, Finca, Lote, Municipio
 
 
 @admin.register(Municipio)
@@ -44,3 +44,21 @@ class FincaAdmin(admin.ModelAdmin):
     @admin.display(boolean=True, description="¿Georreferenciada?")
     def tiene_georreferenciacion(self, obj):
         return obj.tiene_georreferenciacion
+
+
+@admin.register(Cosecha)
+class CosechaAdmin(admin.ModelAdmin):
+    list_display = ("finca", "variedad", "fecha_cosecha", "cantidad_total", "cantidad_disponible", "activo")
+    list_filter = ("activo", "fecha_cosecha", "variedad")
+    search_fields = ("finca__nombre",)
+    ordering = ("-fecha_cosecha",)
+    readonly_fields = ("creado_en", "actualizado_en")
+
+
+@admin.register(Lote)
+class LoteAdmin(admin.ModelAdmin):
+    list_display = ("codigo", "cosecha", "cantidad", "activo", "creado_en")
+    list_filter = ("activo", "creado_en")
+    search_fields = ("codigo", "cosecha__finca__nombre")
+    ordering = ("-creado_en",)
+    readonly_fields = ("creado_en",)

@@ -1,13 +1,16 @@
 """
 Servicios de dominio para el módulo de Fincas y Catálogos - CAFÉ PÉRGAMO
 Subtarea: SCRUM-112 / HU09-ST3: Implementar servicios y API para crear municipios.
+Subtarea: SCRUM-142 / HU13-ST2: Implementar lógica de negocio para registrar lotes.
 """
 
+from decimal import Decimal
 from typing import Optional
+
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
-from .models import Municipio
+from .models import Cosecha, Lote, Municipio
 
 
 def generar_codigo_municipio_sugerido(nombre: str, departamento: str) -> str:
@@ -183,3 +186,89 @@ def toggle_estado_municipio(municipio_o_id):
     if municipio.activo:
         return inactivar_municipio(municipio)
     return reactivar_municipio(municipio)
+
+
+def generar_codigo_lote(cosecha: Cosecha) -> str:
+    """
+    Genera un código único alfanumérico para un lote cuando no se
+    proporciona uno explícito (HU13: "el lote debe tener un código único
+    alfanumérico"). Formato: LOTE + id de la cosecha + correlativo de 4
+    dígitos, p. ej. "LOTE30001".
+    """
+    prefijo = f"LOTE{cosecha.pk}"
+    contador = Lote.objects.filter(cosecha=cosecha).count() + 1
+    codigo = f"{prefijo}{contador:04d}"
+    while Lote.objects.filter(codigo__iexact=codigo).exists():
+        contador += 1
+        codigo = f"{prefijo}{contador:04d}"
+    return codigo
+
+
+def crear_lote(*, cosecha_id, cantidad, codigo: Optional[str] = None) -> Lote:
+    """
+    Crea un lote de café a partir de una cosecha existente, descontando
+    la cantidad del saldo disponible de la cosecha de forma
+    transaccional y automática (HU13-ST2 / SCRUM-142).
+
+    Criterios de aceptación aplicados:
+    1. "El lote debe tener un código único alfanumérico": si no se
+       proporciona uno, se genera automáticamente (`generar_codigo_lote`);
+       si se proporciona, se valida que sea alfanumérico y único.
+    2. "La cantidad del lote no debe superar el saldo disponible de la
+       cosecha": se rechaza con ValidationError si lo supera.
+    3. "El descuento debe hacerse de forma transaccional automática": se
+       usa `transaction.atomic()` + `select_for_update()` sobre la fila
+       de la cosecha, así que dos lotes creados al mismo tiempo contra la
+       misma cosecha nunca pueden, juntos, superar su saldo (se procesan
+       uno a la vez, nunca leen un saldo "desactualizado").
+    """
+    if cantidad is None:
+        raise ValidationError({"cantidad": "La cantidad del lote es obligatoria."})
+    try:
+        cantidad = Decimal(str(cantidad))
+    except Exception:
+        raise ValidationError({"cantidad": "La cantidad del lote debe ser un valor numérico."})
+    if cantidad <= 0:
+        raise ValidationError({"cantidad": "La cantidad del lote debe ser mayor a cero."})
+
+    with transaction.atomic():
+        try:
+            # select_for_update() bloquea la fila hasta que termine esta
+            # transacción: una segunda creación concurrente contra la
+            # misma cosecha espera a que esta termine, en vez de leer un
+            # saldo que ya está desactualizado.
+            cosecha = Cosecha.objects.select_for_update().get(pk=cosecha_id)
+        except Cosecha.DoesNotExist:
+            raise ValidationError({"cosecha": "La cosecha indicada no existe."})
+
+        if not cosecha.activo:
+            raise ValidationError({"cosecha": "No se pueden crear lotes de una cosecha inactiva."})
+
+        if cantidad > cosecha.cantidad_disponible:
+            raise ValidationError({
+                "cantidad": (
+                    f"La cantidad del lote ({cantidad} kg) supera el saldo disponible "
+                    f"de la cosecha ({cosecha.cantidad_disponible} kg)."
+                )
+            })
+
+        codigo_limpio = str(codigo).strip().upper() if codigo else ""
+        if codigo_limpio:
+            if not codigo_limpio.isalnum():
+                raise ValidationError({"codigo": "El código del lote debe ser alfanumérico."})
+            if Lote.objects.filter(codigo__iexact=codigo_limpio).exists():
+                raise ValidationError({"codigo": f"Ya existe un lote con el código '{codigo_limpio}'."})
+            codigo_final = codigo_limpio
+        else:
+            codigo_final = generar_codigo_lote(cosecha)
+
+        lote = Lote.objects.create(
+            codigo=codigo_final,
+            cosecha=cosecha,
+            cantidad=cantidad,
+        )
+
+        cosecha.cantidad_disponible = cosecha.cantidad_disponible - cantidad
+        cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
+
+    return lote

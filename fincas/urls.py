@@ -3,6 +3,7 @@ Rutas URL del módulo de Fincas - CAFÉ PÉRGAMO
 Subtarea: SCRUM-95 / HU07-ST1: Diseñar el campo opcional de coordenadas para georreferenciación.
 Subtarea: SCRUM-96: Guardar georreferenciación en backend.
 Subtarea: SCRUM-92 / HU06-ST6: Listar fincas registradas por productor.
+Subtarea: SCRUM-142 / HU13-ST2: Implementar servicio/API para registrar lotes.
 """
 
 from django.urls import path
@@ -28,4 +29,7 @@ urlpatterns = [
     path('api/municipios/<int:pk>/', views.api_municipio_detalle_view, name='api_municipio_detalle'),
     path('api/municipios/<int:pk>/inactivar/', views.api_municipio_toggle_activo_view, name='api_municipio_inactivar'),
     path('api/municipios/<int:pk>/toggle-activo/', views.api_municipio_toggle_activo_view, name='api_municipio_toggle_activo'),
+
+    # API REST de Lotes (HU-13 / SCRUM-142)
+    path('api/lotes/', views.api_crear_lote_view, name='api_lote_crear'),
 ]
