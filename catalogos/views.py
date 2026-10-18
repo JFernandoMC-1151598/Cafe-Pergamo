@@ -23,6 +23,7 @@ from .forms import (
 )
 from .models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from .api_permissions import CatalogosTrazabilidadPermission
+from .audit import registrar_cambio_catalogo, snapshot_catalogo
 from .serializers import EstadoLoteSerializer, ProcesoBeneficioSerializer
 
 
@@ -42,8 +43,10 @@ def api_procesos_beneficio_view(request: HttpRequest) -> Response:
 
     serializer = ProcesoBeneficioSerializer(data=request.data)
     if serializer.is_valid():
+        proceso = serializer.save()
+        registrar_cambio_catalogo(request, proceso, "CREAR")
         return Response(
-            ProcesoBeneficioSerializer(serializer.save()).data,
+            ProcesoBeneficioSerializer(proceso).data,
             status=status.HTTP_201_CREATED,
         )
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -67,7 +70,15 @@ def api_proceso_beneficio_detalle_view(
         partial=request.method == "PATCH",
     )
     if serializer.is_valid():
-        return Response(ProcesoBeneficioSerializer(serializer.save()).data)
+        valores_anteriores = snapshot_catalogo(proceso)
+        proceso = serializer.save()
+        registrar_cambio_catalogo(
+            request,
+            proceso,
+            "EDITAR",
+            valores_anteriores,
+        )
+        return Response(ProcesoBeneficioSerializer(proceso).data)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -77,6 +88,7 @@ def api_proceso_beneficio_detalle_view(
 def api_proceso_beneficio_toggle_view(request: HttpRequest, pk: int) -> Response:
     """Activa o inactiva un proceso sin eliminarlo."""
     proceso = get_object_or_404(ProcesoBeneficio, pk=pk)
+    valores_anteriores = snapshot_catalogo(proceso)
     proceso.activo = not proceso.activo
     try:
         proceso.save(update_fields=["activo", "actualizado_en"])
@@ -85,6 +97,12 @@ def api_proceso_beneficio_toggle_view(request: HttpRequest, pk: int) -> Response
             exc.message_dict,
             status=status.HTTP_400_BAD_REQUEST,
         )
+    registrar_cambio_catalogo(
+        request,
+        proceso,
+        "ACTIVAR" if proceso.activo else "INACTIVAR",
+        valores_anteriores,
+    )
     return Response(ProcesoBeneficioSerializer(proceso).data)
 
 
@@ -104,8 +122,10 @@ def api_estados_lote_view(request: HttpRequest) -> Response:
 
     serializer = EstadoLoteSerializer(data=request.data)
     if serializer.is_valid():
+        estado = serializer.save()
+        registrar_cambio_catalogo(request, estado, "CREAR")
         return Response(
-            EstadoLoteSerializer(serializer.save()).data,
+            EstadoLoteSerializer(estado).data,
             status=status.HTTP_201_CREATED,
         )
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -126,7 +146,15 @@ def api_estado_lote_detalle_view(request: HttpRequest, pk: int) -> Response:
         partial=request.method == "PATCH",
     )
     if serializer.is_valid():
-        return Response(EstadoLoteSerializer(serializer.save()).data)
+        valores_anteriores = snapshot_catalogo(estado)
+        estado = serializer.save()
+        registrar_cambio_catalogo(
+            request,
+            estado,
+            "EDITAR",
+            valores_anteriores,
+        )
+        return Response(EstadoLoteSerializer(estado).data)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -136,6 +164,7 @@ def api_estado_lote_detalle_view(request: HttpRequest, pk: int) -> Response:
 def api_estado_lote_toggle_view(request: HttpRequest, pk: int) -> Response:
     """Activa o inactiva un estado sin eliminarlo."""
     estado = get_object_or_404(EstadoLote, pk=pk)
+    valores_anteriores = snapshot_catalogo(estado)
     estado.activo = not estado.activo
     try:
         estado.save(update_fields=["activo", "actualizado_en"])
@@ -144,6 +173,12 @@ def api_estado_lote_toggle_view(request: HttpRequest, pk: int) -> Response:
             exc.message_dict,
             status=status.HTTP_400_BAD_REQUEST,
         )
+    registrar_cambio_catalogo(
+        request,
+        estado,
+        "ACTIVAR" if estado.activo else "INACTIVAR",
+        valores_anteriores,
+    )
     return Response(EstadoLoteSerializer(estado).data)
 
 
@@ -199,7 +234,16 @@ def _guardar_catalogo_view(request, form_class, instance=None):
     if request.method == "POST":
         form = form_class(request.POST, instance=instance)
         if form.is_valid():
-            form.save()
+            valores_anteriores = (
+                snapshot_catalogo(instance) if instance else None
+            )
+            proceso = form.save()
+            registrar_cambio_catalogo(
+                request,
+                proceso,
+                "EDITAR" if instance else "CREAR",
+                valores_anteriores,
+            )
             messages.success(request, "El registro se guardó correctamente.")
             return redirect("administrar_trazabilidad")
         messages.error(request, "Revise los errores del formulario.")
@@ -255,11 +299,18 @@ def _alternar_catalogo_view(request, instance):
         return redirect("administrar_trazabilidad")
 
     instance.activo = not instance.activo
+    valores_anteriores = snapshot_catalogo(instance)
     try:
         instance.save(update_fields=["activo", "actualizado_en"])
     except ValidationError as exc:
         messages.error(request, exc.messages[0])
     else:
+        registrar_cambio_catalogo(
+            request,
+            instance,
+            "ACTIVAR" if instance.activo else "INACTIVAR",
+            valores_anteriores,
+        )
         messages.success(request, "El estado del registro se actualizó.")
     return redirect("administrar_trazabilidad")
 

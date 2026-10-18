@@ -198,3 +198,28 @@ class EstadoLote(CatalogoTrazabilidadBase):
 
     def __str__(self):
         return f"{self.codigo} - {self.nombre}"
+
+
+class BitacoraCatalogoTrazabilidad(models.Model):
+    """Historial inmutable de operaciones sobre los catálogos de trazabilidad."""
+
+    catalogo = models.CharField(max_length=50)
+    registro_id = models.PositiveBigIntegerField()
+    registro_codigo = models.CharField(max_length=30)
+    registro_nombre = models.CharField(max_length=100)
+    accion = models.CharField(max_length=20)
+    valores_anteriores = models.JSONField(default=dict)
+    valores_nuevos = models.JSONField(default=dict)
+    realizado_por_id = models.CharField(max_length=100, null=True, blank=True)
+    realizado_por_correo = models.EmailField(null=True, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "catalogos_bitacora_trazabilidad"
+        ordering = ["-creado_en"]
+        verbose_name = "Entrada de bitácora de catálogo"
+        verbose_name_plural = "Bitácora de catálogos"
+
+    def __str__(self):
+        return f"{self.catalogo} {self.accion} {self.registro_codigo}"

@@ -8,7 +8,12 @@ from django.core.exceptions import ValidationError
 from django.test import Client, RequestFactory, TestCase
 from django.urls import reverse
 
-from .models import EstadoLote, ProcesoBeneficio, VariedadCafe
+from .models import (
+    BitacoraCatalogoTrazabilidad,
+    EstadoLote,
+    ProcesoBeneficio,
+    VariedadCafe,
+)
 from .views import (
     alternar_estado_variedad_view,
     administrar_trazabilidad_view,
@@ -126,6 +131,13 @@ class CatalogosTrazabilidadApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["nombre"], "Lavado")
+        auditoria = BitacoraCatalogoTrazabilidad.objects.order_by(
+            "-creado_en"
+        ).first()
+        self.assertEqual(auditoria.accion, "CREAR")
+        self.assertEqual(auditoria.registro_codigo, "LAVADO")
+        self.assertEqual(auditoria.valores_anteriores, {})
+        self.assertEqual(auditoria.valores_nuevos["nombre"], "Lavado")
 
     @patch(
         "catalogos.api_permissions.usuario_tiene_permiso",
@@ -150,6 +162,12 @@ class CatalogosTrazabilidadApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["activo"])
+        auditoria = BitacoraCatalogoTrazabilidad.objects.order_by(
+            "-creado_en"
+        ).first()
+        self.assertEqual(auditoria.accion, "INACTIVAR")
+        self.assertTrue(auditoria.valores_anteriores["activo"])
+        self.assertFalse(auditoria.valores_nuevos["activo"])
 
     @patch(
         "catalogos.api_permissions.usuario_tiene_permiso",
@@ -238,6 +256,8 @@ class CatalogosTrazabilidadMaintenanceViewTests(TestCase):
         )
         proceso = ProcesoBeneficio.objects.get()
         self.assertEqual(proceso.codigo, "LAVADO")
+        auditoria = BitacoraCatalogoTrazabilidad.objects.get()
+        self.assertEqual(auditoria.realizado_por_correo, "admin-web")
 
     @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
     def test_edita_y_alterna_estado_desde_la_pantalla(self, _mock_permission):
@@ -273,6 +293,12 @@ class CatalogosTrazabilidadMaintenanceViewTests(TestCase):
         )
         estado.refresh_from_db()
         self.assertFalse(estado.activo)
+        auditoria = BitacoraCatalogoTrazabilidad.objects.order_by(
+            "-creado_en"
+        ).first()
+        self.assertEqual(auditoria.accion, "INACTIVAR")
+        self.assertEqual(auditoria.registro_codigo, "SECADO")
+        self.assertEqual(auditoria.valores_anteriores["nombre"], "Secado final")
 
 
 class VariedadCafeEspeciesTests(TestCase):
