@@ -195,6 +195,86 @@ class CatalogosTrazabilidadApiTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
 
+class CatalogosTrazabilidadMaintenanceViewTests(TestCase):
+    """Verifica el mantenimiento web de procesos y estados."""
+
+    def setUp(self):
+        self.client = Client()
+        self.usuario = User.objects.create_user(
+            username="admin-web",
+            password="test-password",
+        )
+        self.client.force_login(self.usuario)
+        session = self.client.session
+        session["rol"] = "ADMINISTRADOR"
+        session.save()
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True)
+    def test_pantalla_muestra_acciones_de_mantenimiento(
+        self, _mock_template_permission, _mock_permission
+    ):
+        response = self.client.get(reverse("administrar_trazabilidad"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Nuevo")
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_crea_proceso_desde_la_pantalla(self, _mock_permission):
+        response = self.client.post(
+            reverse("crear_proceso_beneficio"),
+            {
+                "codigo": "lavado",
+                "nombre": "Lavado",
+                "descripcion": "Proceso húmedo",
+                "orden": 1,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"],
+            reverse("administrar_trazabilidad"),
+        )
+        proceso = ProcesoBeneficio.objects.get()
+        self.assertEqual(proceso.codigo, "LAVADO")
+
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_edita_y_alterna_estado_desde_la_pantalla(self, _mock_permission):
+        estado = EstadoLote.objects.create(
+            codigo="SECADO",
+            nombre="Secado",
+        )
+
+        response = self.client.post(
+            reverse("editar_estado_lote", args=[estado.pk]),
+            {
+                "codigo": "SECADO",
+                "nombre": "Secado final",
+                "descripcion": "",
+                "orden": 2,
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"],
+            reverse("administrar_trazabilidad"),
+        )
+        estado.refresh_from_db()
+        self.assertEqual(estado.nombre, "Secado final")
+
+        response = self.client.post(
+            reverse("alternar_estado_lote", args=[estado.pk])
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"],
+            reverse("administrar_trazabilidad"),
+        )
+        estado.refresh_from_db()
+        self.assertFalse(estado.activo)
+
+
 class VariedadCafeEspeciesTests(TestCase):
     """Verifica las cuatro especies disponibles en el catálogo."""
 
@@ -256,6 +336,46 @@ class CatalogosTrazabilidadModelTests(TestCase):
         self.assertEqual(
             set(contexto.exception.message_dict),
             {"codigo", "nombre"},
+        )
+
+    def test_catalogo_rechaza_orden_negativo(self):
+        proceso = ProcesoBeneficio(
+            codigo="LAVADO",
+            nombre="Lavado",
+            orden=-1,
+        )
+
+        with self.assertRaises(ValidationError) as contexto:
+            proceso.full_clean()
+
+        self.assertIn("orden", contexto.exception.message_dict)
+
+    def test_catalogo_sin_lotes_relacionados_permite_inactivacion(self):
+        proceso = ProcesoBeneficio.objects.create(
+            codigo="NATURAL",
+            nombre="Natural",
+        )
+
+        proceso.activo = False
+        proceso.save()
+
+        self.assertFalse(
+            ProcesoBeneficio.objects.get(pk=proceso.pk).activo
+        )
+
+    def test_edita_registro_que_ya_estaba_inactivo(self):
+        proceso = ProcesoBeneficio.objects.create(
+            codigo="NATURAL",
+            nombre="Natural",
+            activo=False,
+        )
+
+        proceso.nombre = "Natural actualizado"
+        proceso.save()
+
+        self.assertEqual(
+            ProcesoBeneficio.objects.get(pk=proceso.pk).nombre,
+            "Natural actualizado",
         )
 
     def test_codigos_y_nombres_son_unicos_sin_distinguir_mayusculas(self):

@@ -73,9 +73,9 @@
                 {% with puede_administrar=rol_actual|tiene_permiso:"catalogos_maestros.administrar" %}
                     {% if puede_administrar %}
                         <div class="d-flex gap-2">
-                            <button type="button" class="btn btn-pergamo btn-sm" disabled title="Disponible al habilitar el mantenimiento del catálogo">
+                            <a href="{% if pestana_activa == 'procesos' %}{% url 'crear_proceso_beneficio' %}{% else %}{% url 'crear_estado_lote' %}{% endif %}" class="btn btn-pergamo btn-sm">
                                 <i class="bi bi-plus-circle me-1"></i> Nuevo
-                            </button>
+                            </a>
                         </div>
                     {% endif %}
                 {% endwith %}
@@ -123,12 +123,15 @@
                                         </td>
                                         {% if puede_administrar %}
                                             <td>
-                                                <button type="button" class="btn btn-outline-pergamo btn-sm" disabled title="Disponible en el mantenimiento del catálogo">
+                                                <a href="{% url 'editar_proceso_beneficio' item.id %}" class="btn btn-outline-pergamo btn-sm">
                                                     <i class="bi bi-pencil-square me-1"></i> Editar
-                                                </button>
-                                                <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="Disponible en el mantenimiento del catálogo">
+                                                </a>
+                                                <form method="post" action="{% url 'alternar_proceso_beneficio' item.id %}" class="d-inline">
+                                                    {% csrf_token %}
+                                                    <button type="submit" class="btn btn-outline-secondary btn-sm">
                                                     {% if item.activo %}Inactivar{% else %}Activar{% endif %}
-                                                </button>
+                                                    </button>
+                                                </form>
                                             </td>
                                         {% endif %}
                                     </tr>
@@ -151,12 +154,15 @@
                                         </td>
                                         {% if puede_administrar %}
                                             <td>
-                                                <button type="button" class="btn btn-outline-pergamo btn-sm" disabled title="Disponible en el mantenimiento del catálogo">
+                                                <a href="{% url 'editar_estado_lote' item.id %}" class="btn btn-outline-pergamo btn-sm">
                                                     <i class="bi bi-pencil-square me-1"></i> Editar
-                                                </button>
-                                                <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="Disponible en el mantenimiento del catálogo">
+                                                </a>
+                                                <form method="post" action="{% url 'alternar_estado_lote' item.id %}" class="d-inline">
+                                                    {% csrf_token %}
+                                                    <button type="submit" class="btn btn-outline-secondary btn-sm">
                                                     {% if item.activo %}Inactivar{% else %}Activar{% endif %}
-                                                </button>
+                                                    </button>
+                                                </form>
                                             </td>
                                         {% endif %}
                                     </tr>

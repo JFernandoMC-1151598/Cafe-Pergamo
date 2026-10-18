@@ -1,6 +1,7 @@
 """Vistas del catálogo maestro de variedades de café (HU10)."""
 
 from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from rest_framework import status
@@ -15,7 +16,11 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from usuarios.permissions import permiso_requerido_sesion
 
-from .forms import VariedadCafeForm
+from .forms import (
+    EstadoLoteForm,
+    ProcesoBeneficioForm,
+    VariedadCafeForm,
+)
 from .models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from .api_permissions import CatalogosTrazabilidadPermission
 from .serializers import EstadoLoteSerializer, ProcesoBeneficioSerializer
@@ -73,7 +78,13 @@ def api_proceso_beneficio_toggle_view(request: HttpRequest, pk: int) -> Response
     """Activa o inactiva un proceso sin eliminarlo."""
     proceso = get_object_or_404(ProcesoBeneficio, pk=pk)
     proceso.activo = not proceso.activo
-    proceso.save(update_fields=["activo", "actualizado_en"])
+    try:
+        proceso.save(update_fields=["activo", "actualizado_en"])
+    except ValidationError as exc:
+        return Response(
+            exc.message_dict,
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     return Response(ProcesoBeneficioSerializer(proceso).data)
 
 
@@ -126,7 +137,13 @@ def api_estado_lote_toggle_view(request: HttpRequest, pk: int) -> Response:
     """Activa o inactiva un estado sin eliminarlo."""
     estado = get_object_or_404(EstadoLote, pk=pk)
     estado.activo = not estado.activo
-    estado.save(update_fields=["activo", "actualizado_en"])
+    try:
+        estado.save(update_fields=["activo", "actualizado_en"])
+    except ValidationError as exc:
+        return Response(
+            exc.message_dict,
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     return Response(EstadoLoteSerializer(estado).data)
 
 
@@ -175,6 +192,97 @@ def administrar_trazabilidad_view(request: HttpRequest) -> HttpResponse:
                 ).count(),
             },
         },
+    )
+
+
+def _guardar_catalogo_view(request, form_class, instance=None):
+    if request.method == "POST":
+        form = form_class(request.POST, instance=instance)
+        if form.is_valid():
+            form.save()
+            messages.success(request, "El registro se guardó correctamente.")
+            return redirect("administrar_trazabilidad")
+        messages.error(request, "Revise los errores del formulario.")
+    else:
+        form = form_class(instance=instance)
+
+    return render(
+        request,
+        "catalogos/formulario_trazabilidad.html",
+        {"form": form, "modo_edicion": instance is not None},
+    )
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def crear_proceso_beneficio_view(request: HttpRequest) -> HttpResponse:
+    return _guardar_catalogo_view(request, ProcesoBeneficioForm)
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def editar_proceso_beneficio_view(
+    request: HttpRequest,
+    pk: int,
+) -> HttpResponse:
+    proceso = get_object_or_404(ProcesoBeneficio, pk=pk)
+    return _guardar_catalogo_view(request, ProcesoBeneficioForm, proceso)
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def crear_estado_lote_view(request: HttpRequest) -> HttpResponse:
+    return _guardar_catalogo_view(request, EstadoLoteForm)
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def editar_estado_lote_view(request: HttpRequest, pk: int) -> HttpResponse:
+    estado = get_object_or_404(EstadoLote, pk=pk)
+    return _guardar_catalogo_view(request, EstadoLoteForm, estado)
+
+
+def _alternar_catalogo_view(request, instance):
+    if request.method != "POST":
+        return redirect("administrar_trazabilidad")
+
+    instance.activo = not instance.activo
+    try:
+        instance.save(update_fields=["activo", "actualizado_en"])
+    except ValidationError as exc:
+        messages.error(request, exc.messages[0])
+    else:
+        messages.success(request, "El estado del registro se actualizó.")
+    return redirect("administrar_trazabilidad")
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def alternar_proceso_beneficio_view(request: HttpRequest, pk: int) -> HttpResponse:
+    return _alternar_catalogo_view(
+        request,
+        get_object_or_404(ProcesoBeneficio, pk=pk),
+    )
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def alternar_estado_lote_view(request: HttpRequest, pk: int) -> HttpResponse:
+    return _alternar_catalogo_view(
+        request,
+        get_object_or_404(EstadoLote, pk=pk),
     )
 
 

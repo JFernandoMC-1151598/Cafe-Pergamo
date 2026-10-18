@@ -1,6 +1,6 @@
 """Modelos de catálogos maestros (HU10)."""
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import FieldDoesNotExist, ValidationError
 from django.db import models
 from django.db.models.functions import Lower
 
@@ -106,9 +106,54 @@ class CatalogoTrazabilidadBase(models.Model):
             errores["codigo"] = "El código es obligatorio."
         if not self.nombre:
             errores["nombre"] = "El nombre es obligatorio."
+        if self.esta_inactivando and self.tiene_lotes_activos:
+            errores["activo"] = (
+                "No se puede inactivar este registro porque está vinculado "
+                "a lotes activos."
+            )
 
         if errores:
             raise ValidationError(errores)
+
+    @property
+    def esta_inactivando(self):
+        """Indica si la operación actual cambia el registro a inactivo."""
+        if not self.pk or self.activo:
+            return False
+
+        estado_actual = type(self).objects.filter(pk=self.pk).values(
+            "activo"
+        ).first()
+        return bool(estado_actual and estado_actual["activo"])
+
+    @property
+    def tiene_lotes_activos(self):
+        """Indica si un modelo de lotes relacionado conserva registros activos."""
+        if not self.pk:
+            return False
+
+        for relation in self._meta.related_objects:
+            related_model = relation.related_model
+            model_name = related_model._meta.model_name.lower()
+            table_name = related_model._meta.db_table.lower()
+            if "lote" not in model_name and "lote" not in table_name:
+                continue
+
+            try:
+                activo_field = related_model._meta.get_field("activo")
+            except FieldDoesNotExist:
+                continue
+            manager = getattr(self, relation.get_accessor_name(), None)
+            if manager is not None and manager.filter(
+                **{f"{activo_field.name}": True}
+            ).exists():
+                return True
+
+        return False
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
 
 class ProcesoBeneficio(CatalogoTrazabilidadBase):

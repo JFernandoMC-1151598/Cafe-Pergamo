@@ -41,6 +41,36 @@ urlpatterns = [
         views.administrar_trazabilidad_view,
         name="administrar_trazabilidad",
     ),
+    path(
+        "trazabilidad/procesos/crear/",
+        views.crear_proceso_beneficio_view,
+        name="crear_proceso_beneficio",
+    ),
+    path(
+        "trazabilidad/procesos/<int:pk>/editar/",
+        views.editar_proceso_beneficio_view,
+        name="editar_proceso_beneficio",
+    ),
+    path(
+        "trazabilidad/procesos/<int:pk>/estado/",
+        views.alternar_proceso_beneficio_view,
+        name="alternar_proceso_beneficio",
+    ),
+    path(
+        "trazabilidad/estados/crear/",
+        views.crear_estado_lote_view,
+        name="crear_estado_lote",
+    ),
+    path(
+        "trazabilidad/estados/<int:pk>/editar/",
+        views.editar_estado_lote_view,
+        name="editar_estado_lote",
+    ),
+    path(
+        "trazabilidad/estados/<int:pk>/estado/",
+        views.alternar_estado_lote_view,
+        name="alternar_estado_lote",
+    ),
     path("variedades/", views.lista_variedades_view, name="lista_variedades"),
     path(
         "variedades/crear/",
