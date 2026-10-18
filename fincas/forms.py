@@ -5,11 +5,17 @@ Subtarea: SCRUM-98 / HU07-ST5: Actualizar el modelo o esquema de datos para geor
 Subtarea: SCRUM-97: Validar formato de coordenadas.
 Subtarea: SCRUM-91 / HU06-ST3: Crear formulario de registro de finca(s) en la interfaz.
 Subtarea: SCRUM-89 / HU06-ST4: Validar campos obligatorios y consistencia de datos del registro.
+Subtarea: SCRUM-144 / HU13: Crear formulario o pantalla de registro de lotes.
+Nota: para que ese formulario tenga cosechas entre las cuales elegir, también se agrega
+aquí un formulario de registro de cosechas (complemento necesario: ninguna subtarea de
+Jira lo pedía todavía, pero sin él el formulario de lotes no se puede usar de principio
+a fin -- decisión acordada explícitamente con el equipo).
 """
 
 from django import forms
 from django.db import models
-from .models import Finca, Municipio
+from catalogos.models import VariedadCafe
+from .models import Cosecha, Finca, Lote, Municipio
 
 from .validators import (
     validar_latitud,
@@ -371,3 +377,169 @@ class MunicipioForm(forms.ModelForm):
                 )
 
         return cleaned_data
+
+
+class CosechaRegistroForm(forms.ModelForm):
+    """
+    Formulario de registro de cosechas (complemento de HU-13, ver nota en
+    el docstring del módulo). El campo `finca` solo ofrece las fincas del
+    productor autenticado -- nunca las de otro productor -- por eso el
+    queryset se recalcula en `__init__` en vez de quedar fijo a nivel de
+    clase (el productor solo se conoce en tiempo de request).
+    """
+
+    fecha_cosecha = forms.DateField(
+        required=True,
+        label="Fecha de la cosecha",
+        widget=forms.DateInput(attrs={
+            "class": "form-control",
+            "id": "id_fecha_cosecha",
+            "type": "date",
+        }),
+        error_messages={
+            "required": "La fecha de la cosecha es obligatoria.",
+            "invalid": "Ingrese una fecha válida.",
+        },
+    )
+
+    cantidad_total = forms.DecimalField(
+        required=True,
+        max_digits=10,
+        decimal_places=2,
+        min_value=0.01,
+        label="Cantidad total cosechada (kg)",
+        widget=forms.NumberInput(attrs={
+            "class": "form-control",
+            "id": "id_cantidad_total",
+            "step": "0.01",
+            "min": "0.01",
+            "placeholder": "Ej: 500.00",
+        }),
+        error_messages={
+            "required": "La cantidad total cosechada es obligatoria.",
+            "invalid": "Ingrese un valor numérico válido.",
+            "min_value": "La cantidad total debe ser mayor a cero.",
+        },
+    )
+
+    class Meta:
+        model = Cosecha
+        fields = ["finca", "variedad", "fecha_cosecha", "cantidad_total"]
+        widgets = {
+            "finca": forms.Select(attrs={"class": "form-select", "id": "id_finca"}),
+            "variedad": forms.Select(attrs={"class": "form-select", "id": "id_variedad"}),
+        }
+        labels = {
+            "finca": "Finca de origen",
+            "variedad": "Variedad de café",
+        }
+        error_messages = {
+            "finca": {"required": "Debe seleccionar la finca de donde proviene la cosecha."},
+        }
+
+    def __init__(self, *args, productor_id=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["finca"].queryset = Finca.objects.filter(
+            productor_id=productor_id, activo=True
+        ).order_by("nombre")
+        self.fields["finca"].empty_label = "Seleccione una de sus fincas..."
+
+        self.fields["variedad"].queryset = VariedadCafe.objects.filter(activo=True).order_by("nombre")
+        self.fields["variedad"].required = False
+        self.fields["variedad"].empty_label = "Sin variedad especificada (opcional)"
+
+        self._productor_id = productor_id
+
+    def clean_finca(self):
+        """
+        Verificación redundante de aislamiento entre productores (además
+        de limitar el queryset en `__init__`): si alguien manipulara el
+        POST para mandar el id de una finca ajena, igual se rechaza acá.
+        """
+        finca = self.cleaned_data.get("finca")
+        if finca and str(finca.productor_id) != str(self._productor_id):
+            raise forms.ValidationError("La finca seleccionada no pertenece a su cuenta de productor.")
+        return finca
+
+
+class LoteRegistroForm(forms.Form):
+    """
+    Formulario de registro de lotes (HU13-ST4 / SCRUM-144): el productor
+    selecciona una de SUS cosechas con saldo disponible, ingresa la
+    cantidad del lote y, opcionalmente, un código propio.
+
+    Este formulario solo captura y valida el FORMATO de los datos de
+    entrada (que el código, si se indica, sea alfanumérico; que la
+    cantidad sea positiva). Las reglas de NEGOCIO -- unicidad real del
+    código (HU013-ST3 / SCRUM-143), cantidad vs. saldo disponible y el
+    descuento transaccional -- las aplica `fincas.services.crear_lote`,
+    que es quien realmente crea el `Lote` (ver `registrar_lote_view`).
+    Así se evita duplicar esas reglas en dos lugares distintos.
+    """
+
+    cosecha = forms.ModelChoiceField(
+        queryset=Cosecha.objects.none(),
+        required=True,
+        label="Cosecha de origen",
+        empty_label="Seleccione una cosecha con saldo disponible...",
+        widget=forms.Select(attrs={"class": "form-select", "id": "id_cosecha"}),
+        error_messages={
+            "required": "Debe seleccionar la cosecha de la que proviene el lote.",
+            "invalid_choice": "La cosecha seleccionada no es válida o no tiene saldo disponible.",
+        },
+    )
+
+    codigo = forms.CharField(
+        max_length=30,
+        required=False,
+        label="Código del lote",
+        help_text="Alfanumérico, único. Si se deja vacío, se genera automáticamente.",
+        widget=forms.TextInput(attrs={
+            "class": "form-control",
+            "id": "id_codigo",
+            "placeholder": "Ej: LOTE0001 (opcional)",
+            "autocomplete": "off",
+        }),
+    )
+
+    cantidad = forms.DecimalField(
+        required=True,
+        max_digits=10,
+        decimal_places=2,
+        min_value=0.01,
+        label="Cantidad del lote (kg)",
+        widget=forms.NumberInput(attrs={
+            "class": "form-control",
+            "id": "id_cantidad",
+            "step": "0.01",
+            "min": "0.01",
+            "placeholder": "Ej: 120.00",
+        }),
+        error_messages={
+            "required": "La cantidad del lote es obligatoria.",
+            "invalid": "Ingrese un valor numérico válido.",
+            "min_value": "La cantidad del lote debe ser mayor a cero.",
+        },
+    )
+
+    def __init__(self, *args, productor_id=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["cosecha"].queryset = (
+            Cosecha.objects.filter(
+                finca__productor_id=productor_id,
+                activo=True,
+                cantidad_disponible__gt=0,
+            )
+            .select_related("finca")
+            .order_by("-fecha_cosecha")
+        )
+        self.fields["cosecha"].label_from_instance = lambda c: (
+            f"{c.finca.nombre} — {c.fecha_cosecha} ({c.cantidad_disponible} kg disponibles)"
+        )
+
+    def clean_codigo(self):
+        codigo = self.cleaned_data.get("codigo", "")
+        codigo = codigo.strip().upper() if codigo else ""
+        if codigo and not codigo.isalnum():
+            raise forms.ValidationError("El código del lote debe ser alfanumérico (sin espacios ni símbolos).")
+        return codigo

@@ -1,0 +1,139 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Registro de Lote — Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-8 col-xl-7">
+            <!-- Breadcrumb de Navegación -->
+            <nav aria-label="breadcrumb" class="mb-4">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{% url 'home' %}" class="text-decoration-none">Inicio</a></li>
+                    <li class="breadcrumb-item"><a href="{% url 'mis_fincas' %}" class="text-decoration-none">Mis Fincas</a></li>
+                    <li class="breadcrumb-item active" aria-current="page">Registro de Lote</li>
+                </ol>
+            </nav>
+
+            <div class="card border-0 shadow-sm rounded-4 overflow-hidden">
+                <!-- Encabezado del Formulario -->
+                <div class="card-header bg-white p-4 border-bottom">
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="bg-success text-white rounded-3 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+                            <i class="bi bi-box-seam fs-4"></i>
+                        </div>
+                        <div>
+                            <h1 class="h4 mb-0 fw-bold text-dark">Registrar Lote</h1>
+                            <p class="text-muted small mb-0">Cree un lote de café a partir de una de sus cosechas con saldo disponible</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card-body p-4">
+                    {% if messages %}
+                        {% for message in messages %}
+                            <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+                                {{ message }}
+                                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                            </div>
+                        {% endfor %}
+                    {% endif %}
+                    {% if form.non_field_errors %}
+                        <div class="alert alert-danger" role="alert">{{ form.non_field_errors|join:" " }}</div>
+                    {% endif %}
+
+                    <form method="POST" action="" id="formRegistroLote" novalidate>
+                        {% csrf_token %}
+
+                        <div class="mb-3">
+                            <label for="id_cosecha" class="form-label fw-semibold text-dark">
+                                Cosecha de origen <span class="text-danger">*</span>
+                            </label>
+                            {{ form.cosecha }}
+                            {% if form.cosecha.errors %}
+                            <div class="small text-danger mt-1">{{ form.cosecha.errors|join:" " }}</div>
+                            {% endif %}
+                            <div class="form-text small text-muted">Solo se listan cosechas suyas, activas y con saldo disponible.</div>
+                        </div>
+
+                        <div class="row g-3 mb-4">
+                            <div class="col-md-6">
+                                <label for="id_codigo" class="form-label fw-semibold text-dark">
+                                    Código del lote <span class="badge bg-secondary-subtle text-secondary small fw-normal">Opcional</span>
+                                </label>
+                                {{ form.codigo }}
+                                {% if form.codigo.errors %}
+                                <div class="small text-danger mt-1">{{ form.codigo.errors|join:" " }}</div>
+                                {% endif %}
+                                <div class="form-text small text-muted">{{ form.codigo.help_text }}</div>
+                            </div>
+                            <div class="col-md-6">
+                                <label for="id_cantidad" class="form-label fw-semibold text-dark">
+                                    Cantidad del lote (kg) <span class="text-danger">*</span>
+                                </label>
+                                {{ form.cantidad }}
+                                {% if form.cantidad.errors %}
+                                <div class="small text-danger mt-1">{{ form.cantidad.errors|join:" " }}</div>
+                                {% endif %}
+                                <div class="form-text small text-muted">No puede superar el saldo disponible de la cosecha elegida.</div>
+                            </div>
+                        </div>
+
+                        <!-- Acciones del Formulario -->
+                        <div class="d-flex align-items-center justify-content-end gap-2 pt-3 border-top">
+                            <a href="{% url 'mis_fincas' %}" class="btn btn-outline-secondary px-4">
+                                Cancelar
+                            </a>
+                            <button type="submit" class="btn btn-primary bg-primary px-4 fw-semibold" id="btn-guardar-lote">
+                                <i class="bi bi-check2-circle me-1"></i> Guardar Lote
+                            </button>
+                        </div>
+                    </form>
+
+                    {% if ultimos_lotes %}
+                    <hr class="my-4">
+                    <div class="mt-4">
+                        <h6 class="text-uppercase fw-bold text-muted small mb-3 letter-spacing-1">
+                            <i class="bi bi-clock-history me-1 text-secondary"></i> Lotes Registrados Recientemente
+                        </h6>
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle table-sm border rounded-3 overflow-hidden">
+                                <thead class="table-light">
+                                    <tr class="small text-muted">
+                                        <th>Código</th>
+                                        <th>Finca</th>
+                                        <th>Cosecha</th>
+                                        <th>Cantidad del lote</th>
+                                        <th>Saldo restante de la cosecha</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for l in ultimos_lotes %}
+                                    <tr>
+                                        <td class="fw-semibold text-dark">{{ l.codigo }}</td>
+                                        <td class="text-secondary small">{{ l.cosecha.finca.nombre }}</td>
+                                        <td class="text-secondary small">{{ l.cosecha.fecha_cosecha|date:"d/m/Y" }}</td>
+                                        <td class="small">
+                                            <span class="badge bg-success-subtle text-success border border-success-subtle">
+                                                {{ l.cantidad }} kg
+                                            </span>
+                                        </td>
+                                        <td class="small text-secondary">
+                                            <!-- SCRUM-146 / HU013-ST5: trazabilidad visible del saldo de la
+                                                 cosecha después del descuento aplicado por este lote. -->
+                                            {{ l.cosecha.cantidad_disponible }} / {{ l.cosecha.cantidad_total }} kg
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

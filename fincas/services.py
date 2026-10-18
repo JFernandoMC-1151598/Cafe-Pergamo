@@ -2,6 +2,8 @@
 Servicios de dominio para el módulo de Fincas y Catálogos - CAFÉ PÉRGAMO
 Subtarea: SCRUM-112 / HU09-ST3: Implementar servicios y API para crear municipios.
 Subtarea: SCRUM-142 / HU13-ST2: Implementar lógica de negocio para registrar lotes.
+Subtarea: SCRUM-145 / HU013-ST4: Validar cantidad disponible antes de crear el lote.
+Subtarea: SCRUM-146 / HU013-ST5: Actualizar trazabilidad de la cosecha al crear lotes.
 """
 
 from decimal import Decimal
@@ -244,6 +246,11 @@ def crear_lote(*, cosecha_id, cantidad, codigo: Optional[str] = None) -> Lote:
         if not cosecha.activo:
             raise ValidationError({"cosecha": "No se pueden crear lotes de una cosecha inactiva."})
 
+        # SCRUM-145 / HU013-ST4: "Verificar que la cantidad ingresada para el
+        # lote no supere la cantidad disponible en la cosecha asociada y
+        # mostrar un error cuando no cumpla la regla." -- el ValidationError
+        # de abajo es exactamente ese error (la vista web lo muestra como
+        # error de campo y la API lo traduce a 400).
         if cantidad > cosecha.cantidad_disponible:
             raise ValidationError({
                 "cantidad": (
@@ -268,6 +275,13 @@ def crear_lote(*, cosecha_id, cantidad, codigo: Optional[str] = None) -> Lote:
             cantidad=cantidad,
         )
 
+        # SCRUM-146 / HU013-ST5: "Descontar o reflejar la cantidad utilizada
+        # en la cosecha al crear un lote para mantener la trazabilidad y
+        # disponibilidad correcta." Este descuento ocurre DENTRO del mismo
+        # `transaction.atomic()` / `select_for_update()` de arriba, así que
+        # queda tan "transaccional y automático" como la creación del lote
+        # misma -- nunca puede quedar un lote creado sin que su cosecha
+        # refleje el nuevo saldo (o viceversa).
         cosecha.cantidad_disponible = cosecha.cantidad_disponible - cantidad
         cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
 

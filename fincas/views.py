@@ -7,6 +7,13 @@ Subtarea: SCRUM-89 / HU06-ST4: Validar campos obligatorios y consistencia de dat
 Subtarea: SCRUM-90 / HU06-ST5: Implementar servicio/API para registrar fincas.
 Subtarea: SCRUM-92 / HU06-ST6: Listar fincas registradas por productor.
 Subtarea: SCRUM-142 / HU13-ST2: Implementar servicio/API para registrar lotes.
+Subtarea: SCRUM-144 / HU13: Crear formulario o pantalla de registro de lotes.
+Subtarea: SCRUM-145 / HU013-ST4: Validar cantidad disponible antes de crear el lote
+(aplicada en services.crear_lote(), usada tanto por la vista web como por la API).
+Subtarea: SCRUM-146 / HU013-ST5: Actualizar trazabilidad de la cosecha al crear lotes
+(idem, el descuento del saldo vive en services.crear_lote()).
+Nota: incluye también una vista de registro de cosechas, complemento necesario para
+poder usar el formulario de lotes de principio a fin (ver nota en fincas/forms.py).
 """
 
 from django.contrib import messages
@@ -24,7 +31,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
-from .forms import FincaRegistroForm, FincaModelForm, MunicipioForm
+from .forms import CosechaRegistroForm, FincaRegistroForm, FincaModelForm, LoteRegistroForm, MunicipioForm
 from .models import Cosecha, Finca, Lote, Municipio
 from .permissions import rol_puede_administrar_catalogos
 from .serializers import FincaGeorreferenciacionSerializer, LoteSerializer, MunicipioSerializer
@@ -699,3 +706,139 @@ def api_crear_lote_view(request):
         return Response(detalle, status=status.HTTP_400_BAD_REQUEST)
 
     return Response(LoteSerializer(lote).data, status=status.HTTP_201_CREATED)
+
+
+def registrar_cosecha_view(request):
+    """
+    Vista web de registro de cosechas (complemento de HU-13, ver nota en
+    el docstring del módulo y en `fincas/forms.py`). El productor solo
+    puede registrar cosechas de SUS PROPIAS fincas -- el queryset del
+    formulario ya viene limitado por `productor_id`, y `clean_finca()`
+    lo vuelve a verificar por si el POST fue manipulado.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(
+            request,
+            "Debe iniciar sesión con su cuenta de productor para registrar una cosecha."
+        )
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    tiene_fincas = Finca.objects.filter(productor_id=productor_id, activo=True).exists()
+    if not tiene_fincas:
+        messages.warning(
+            request,
+            "Debe registrar al menos una finca antes de poder registrar una cosecha."
+        )
+        return redirect("mis_fincas")
+
+    if request.method == "POST":
+        form = CosechaRegistroForm(request.POST, productor_id=productor_id)
+        if form.is_valid():
+            cosecha = form.save()
+            messages.success(
+                request,
+                f"Cosecha registrada exitosamente para la finca '{cosecha.finca.nombre}' "
+                f"({cosecha.cantidad_total} kg)."
+            )
+            return redirect("cosecha_registro")
+        else:
+            messages.error(
+                request,
+                "Por favor revise los errores señalados en el formulario antes de continuar."
+            )
+    else:
+        form = CosechaRegistroForm(productor_id=productor_id)
+
+    ultimas_cosechas = (
+        Cosecha.objects.filter(finca__productor_id=productor_id)
+        .select_related("finca", "variedad")
+        .order_by("-creado_en")[:5]
+    )
+
+    return render(
+        request,
+        "fincas/registro_cosecha.html",
+        {"form": form, "ultimas_cosechas": ultimas_cosechas},
+    )
+
+
+def registrar_lote_view(request):
+    """
+    Vista web de registro de lotes (HU13-ST4 / SCRUM-144): formulario
+    para que el productor seleccione una de sus cosechas con saldo
+    disponible, ingrese el código del lote (opcional) y la cantidad.
+
+    Toda la lógica de negocio (código único, cantidad vs. saldo
+    disponible, descuento transaccional automático) vive en
+    `services.crear_lote` -- la misma función que usa
+    `api_crear_lote_view` -- así que el flujo web y el flujo API nunca
+    pueden quedar desincronizados en las reglas que aplican.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(
+            request,
+            "Debe iniciar sesión con su cuenta de productor para registrar un lote."
+        )
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    tiene_cosechas_con_saldo = Cosecha.objects.filter(
+        finca__productor_id=productor_id, activo=True, cantidad_disponible__gt=0
+    ).exists()
+    if not tiene_cosechas_con_saldo:
+        messages.warning(
+            request,
+            "Debe registrar una cosecha con saldo disponible antes de poder crear lotes."
+        )
+        return redirect("cosecha_registro")
+
+    if request.method == "POST":
+        form = LoteRegistroForm(request.POST, productor_id=productor_id)
+        if form.is_valid():
+            cosecha = form.cleaned_data["cosecha"]
+            try:
+                lote = crear_lote(
+                    cosecha_id=cosecha.pk,
+                    cantidad=form.cleaned_data["cantidad"],
+                    codigo=form.cleaned_data.get("codigo") or None,
+                )
+            except ValidationError as exc:
+                # Traduce los errores de negocio de crear_lote() (que no
+                # conoce nada de formularios web) a errores de campo del
+                # formulario, para que se muestren igual que cualquier
+                # otro error de validación.
+                errores = exc.message_dict if hasattr(exc, "message_dict") else {"__all__": exc.messages}
+                for campo, lista_errores in errores.items():
+                    destino = campo if campo in form.fields else None
+                    for error in lista_errores:
+                        form.add_error(destino, error)
+                messages.error(
+                    request,
+                    "Por favor revise los errores señalados en el formulario antes de continuar."
+                )
+            else:
+                messages.success(
+                    request,
+                    f"Lote '{lote.codigo}' registrado exitosamente ({lote.cantidad} kg)."
+                )
+                return redirect("lote_registro")
+        else:
+            messages.error(
+                request,
+                "Por favor revise los errores señalados en el formulario antes de continuar."
+            )
+    else:
+        form = LoteRegistroForm(productor_id=productor_id)
+
+    ultimos_lotes = (
+        Lote.objects.filter(cosecha__finca__productor_id=productor_id)
+        .select_related("cosecha", "cosecha__finca")
+        .order_by("-creado_en")[:5]
+    )
+
+    return render(
+        request,
+        "fincas/registro_lote.html",
+        {"form": form, "ultimos_lotes": ultimos_lotes},
+    )

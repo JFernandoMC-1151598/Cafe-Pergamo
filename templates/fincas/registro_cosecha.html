@@ -1,0 +1,144 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Registro de Cosecha — Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-8 col-xl-7">
+            <!-- Breadcrumb de Navegación -->
+            <nav aria-label="breadcrumb" class="mb-4">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{% url 'home' %}" class="text-decoration-none">Inicio</a></li>
+                    <li class="breadcrumb-item"><a href="{% url 'mis_fincas' %}" class="text-decoration-none">Mis Fincas</a></li>
+                    <li class="breadcrumb-item active" aria-current="page">Registro de Cosecha</li>
+                </ol>
+            </nav>
+
+            <div class="card border-0 shadow-sm rounded-4 overflow-hidden">
+                <!-- Encabezado del Formulario -->
+                <div class="card-header bg-white p-4 border-bottom">
+                    <div class="d-flex align-items-center gap-3">
+                        <div class="bg-success text-white rounded-3 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+                            <i class="bi bi-flower3 fs-4"></i>
+                        </div>
+                        <div>
+                            <h1 class="h4 mb-0 fw-bold text-dark">Registrar Cosecha</h1>
+                            <p class="text-muted small mb-0">Registre la cantidad cosechada en una de sus fincas, para poder crear lotes a partir de ella</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card-body p-4">
+                    {% if messages %}
+                        {% for message in messages %}
+                            <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+                                {{ message }}
+                                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                            </div>
+                        {% endfor %}
+                    {% endif %}
+
+                    <form method="POST" action="" id="formRegistroCosecha" novalidate>
+                        {% csrf_token %}
+
+                        <div class="mb-3">
+                            <label for="id_finca" class="form-label fw-semibold text-dark">
+                                Finca de origen <span class="text-danger">*</span>
+                            </label>
+                            {{ form.finca }}
+                            {% if form.finca.errors %}
+                            <div class="small text-danger mt-1">{{ form.finca.errors|join:" " }}</div>
+                            {% endif %}
+                            <div class="form-text small text-muted">Solo se listan sus propias fincas activas.</div>
+                        </div>
+
+                        <div class="row g-3 mb-4">
+                            <div class="col-md-6">
+                                <label for="id_variedad" class="form-label fw-semibold text-dark">
+                                    Variedad de café <span class="badge bg-secondary-subtle text-secondary small fw-normal">Opcional</span>
+                                </label>
+                                {{ form.variedad }}
+                                {% if form.variedad.errors %}
+                                <div class="small text-danger mt-1">{{ form.variedad.errors|join:" " }}</div>
+                                {% endif %}
+                            </div>
+                            <div class="col-md-6">
+                                <label for="id_fecha_cosecha" class="form-label fw-semibold text-dark">
+                                    Fecha de la cosecha <span class="text-danger">*</span>
+                                </label>
+                                {{ form.fecha_cosecha }}
+                                {% if form.fecha_cosecha.errors %}
+                                <div class="small text-danger mt-1">{{ form.fecha_cosecha.errors|join:" " }}</div>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="mb-4">
+                            <label for="id_cantidad_total" class="form-label fw-semibold text-dark">
+                                Cantidad total cosechada (kg) <span class="text-danger">*</span>
+                            </label>
+                            {{ form.cantidad_total }}
+                            {% if form.cantidad_total.errors %}
+                            <div class="small text-danger mt-1">{{ form.cantidad_total.errors|join:" " }}</div>
+                            {% endif %}
+                            <div class="form-text small text-muted">Esta cantidad queda disponible como saldo para crear lotes.</div>
+                        </div>
+
+                        <!-- Acciones del Formulario -->
+                        <div class="d-flex align-items-center justify-content-end gap-2 pt-3 border-top">
+                            <a href="{% url 'mis_fincas' %}" class="btn btn-outline-secondary px-4">
+                                Cancelar
+                            </a>
+                            <button type="submit" class="btn btn-primary bg-primary px-4 fw-semibold" id="btn-guardar-cosecha">
+                                <i class="bi bi-check2-circle me-1"></i> Guardar Cosecha
+                            </button>
+                        </div>
+                    </form>
+
+                    {% if ultimas_cosechas %}
+                    <hr class="my-4">
+                    <div class="mt-4">
+                        <h6 class="text-uppercase fw-bold text-muted small mb-3 letter-spacing-1">
+                            <i class="bi bi-clock-history me-1 text-secondary"></i> Cosechas Registradas Recientemente
+                        </h6>
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle table-sm border rounded-3 overflow-hidden">
+                                <thead class="table-light">
+                                    <tr class="small text-muted">
+                                        <th>Finca</th>
+                                        <th>Variedad</th>
+                                        <th>Fecha</th>
+                                        <th>Saldo disponible</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for c in ultimas_cosechas %}
+                                    <tr>
+                                        <td class="fw-semibold text-dark">{{ c.finca.nombre }}</td>
+                                        <td class="text-secondary small">{{ c.variedad.nombre|default:"—" }}</td>
+                                        <td class="text-secondary small">{{ c.fecha_cosecha|date:"d/m/Y" }}</td>
+                                        <td class="small">
+                                            <span class="badge bg-success-subtle text-success border border-success-subtle">
+                                                {{ c.cantidad_disponible }} / {{ c.cantidad_total }} kg
+                                            </span>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="text-end mt-3">
+                            <a href="{% url 'lote_registro' %}" class="btn btn-outline-pergamo btn-sm">
+                                <i class="bi bi-box-seam me-1"></i> Ir a registrar lotes
+                            </a>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
