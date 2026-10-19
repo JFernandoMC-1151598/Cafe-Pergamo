@@ -14,7 +14,7 @@ a fin -- decisión acordada explícitamente con el equipo).
 
 from django import forms
 from django.db import models
-from catalogos.models import VariedadCafe
+from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from .models import Cosecha, Finca, Lote, Municipio
 
 from .validators import (
@@ -489,6 +489,30 @@ class LoteRegistroForm(forms.Form):
         },
     )
 
+    proceso_beneficio = forms.ModelChoiceField(
+        queryset=ProcesoBeneficio.objects.none(),
+        required=True,
+        label="Proceso de beneficio",
+        empty_label="Seleccione un proceso de beneficio...",
+        widget=forms.Select(attrs={"class": "form-select", "id": "id_proceso_beneficio"}),
+        error_messages={
+            "required": "Debe seleccionar un proceso de beneficio.",
+            "invalid_choice": "El proceso seleccionado no está activo o no es válido.",
+        },
+    )
+
+    estado_lote = forms.ModelChoiceField(
+        queryset=EstadoLote.objects.none(),
+        required=True,
+        label="Estado del lote",
+        empty_label="Seleccione el estado inicial del lote...",
+        widget=forms.Select(attrs={"class": "form-select", "id": "id_estado_lote"}),
+        error_messages={
+            "required": "Debe seleccionar un estado para el lote.",
+            "invalid_choice": "El estado seleccionado no está activo o no es válido.",
+        },
+    )
+
     codigo = forms.CharField(
         max_length=30,
         required=False,
@@ -536,6 +560,12 @@ class LoteRegistroForm(forms.Form):
         self.fields["cosecha"].label_from_instance = lambda c: (
             f"{c.finca.nombre} — {c.fecha_cosecha} ({c.cantidad_disponible} kg disponibles)"
         )
+        self.fields["proceso_beneficio"].queryset = ProcesoBeneficio.objects.filter(
+            activo=True
+        ).order_by("orden", "nombre")
+        self.fields["estado_lote"].queryset = EstadoLote.objects.filter(
+            activo=True
+        ).order_by("orden", "nombre")
 
     def clean_codigo(self):
         codigo = self.cleaned_data.get("codigo", "")

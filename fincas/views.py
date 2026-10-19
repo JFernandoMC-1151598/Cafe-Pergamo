@@ -704,6 +704,8 @@ def api_crear_lote_view(request):
             cosecha_id=cosecha_id,
             cantidad=request.data.get("cantidad"),
             codigo=request.data.get("codigo"),
+            proceso_beneficio_id=request.data.get("proceso_beneficio_id"),
+            estado_lote_id=request.data.get("estado_lote_id"),
         )
     except ValidationError as exc:
         detalle = exc.message_dict if hasattr(exc, "message_dict") else {"error": exc.messages}
@@ -806,6 +808,10 @@ def registrar_lote_view(request):
                     cosecha_id=cosecha.pk,
                     cantidad=form.cleaned_data["cantidad"],
                     codigo=form.cleaned_data.get("codigo") or None,
+                    proceso_beneficio_id=form.cleaned_data[
+                        "proceso_beneficio"
+                    ].pk,
+                    estado_lote_id=form.cleaned_data["estado_lote"].pk,
                 )
             except ValidationError as exc:
                 # Traduce los errores de negocio de crear_lote() (que no
