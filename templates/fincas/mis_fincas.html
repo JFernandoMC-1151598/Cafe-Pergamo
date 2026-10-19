@@ -20,9 +20,23 @@
             <h1 class="h3 fw-bold text-dark mb-1">Mis Fincas</h1>
             <p class="text-muted mb-0">Predios cafeteros registrados a tu nombre en Café Pérgamo.</p>
         </div>
-        <a href="{% url 'finca_registro' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
-            <i class="bi bi-plus-circle me-1"></i> Registrar Finca
-        </a>
+        <div class="d-flex flex-wrap gap-2">
+            <a href="{% url 'finca_registro' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
+                <i class="bi bi-plus-circle me-1"></i> Registrar Finca
+            </a>
+            <a href="{% url 'cosecha_registro' %}" class="btn btn-outline-pergamo px-4 fw-semibold">
+                <i class="bi bi-flower3 me-1"></i> Registrar Cosecha
+            </a>
+            <a href="{% url 'lote_registro' %}" class="btn btn-outline-pergamo px-4 fw-semibold">
+                <i class="bi bi-box-seam me-1"></i> Registrar Lote
+            </a>
+            <!-- Pedido directamente por el productor al revisar HU-13 en local: poder
+                 consultar los lotes ya registrados, sin esperar a HU-14 (etapas de
+                 beneficio). Ver fincas/views.py::mis_lotes_view. -->
+            <a href="{% url 'mis_lotes' %}" class="btn btn-outline-secondary px-4 fw-semibold">
+                <i class="bi bi-list-check me-1"></i> Mis Lotes
+            </a>
+        </div>
     </div>
 
     {% if messages %}
