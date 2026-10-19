@@ -38,8 +38,15 @@ from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from .forms import CosechaRegistroForm, FincaRegistroForm, FincaModelForm, LoteRegistroForm, MunicipioForm
 from .models import Cosecha, Finca, Lote, Municipio
 from .permissions import rol_puede_administrar_catalogos
-from .serializers import FincaGeorreferenciacionSerializer, LoteSerializer, MunicipioSerializer
+from .serializers import (
+    CosechaCreateSerializer,
+    CosechaSerializer,
+    FincaGeorreferenciacionSerializer,
+    LoteSerializer,
+    MunicipioSerializer,
+)
 from .services import (
+    crear_cosecha,
     crear_lote,
     crear_municipio,
     editar_municipio,
@@ -649,6 +656,71 @@ def mis_fincas_view(request):
         "fincas/mis_fincas.html",
         {"fincas": fincas, "fincas_geo": fincas_geo},
     )
+
+
+@api_view(["POST"])
+def api_crear_cosecha_view(request):
+    """
+    Endpoint REST para registrar cosechas de café (HU-12 / SCRUM-137).
+    POST /fincas/api/cosechas/
+    Body: {
+        "finca": <id>,
+        "variedad": <id opcional>,
+        "fecha_cosecha": "YYYY-MM-DD",
+        "cantidad_total": <decimal>
+    }
+
+    Criterios de aceptación aplicados:
+    1. La finca y la variedad deben ser válidas (SCRUM-140):
+       - Identifica al productor autenticado (_resolver_productor_id).
+       - Verifica que la finca pertenezca a su cuenta (aislamiento).
+       - Valida existencia y estado activo de finca y variedad.
+    2. Las cantidades deben ser mayores a cero (cantidad_total > 0).
+    3. Se inicializa cantidad_disponible = cantidad_total (vía crear_cosecha).
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        return Response(
+            {"error": "No se pudo identificar al productor autenticado."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    serializer = CosechaCreateSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    finca_id = serializer.validated_data["finca"]
+    variedad_id = serializer.validated_data.get("variedad")
+    fecha_cosecha = serializer.validated_data["fecha_cosecha"]
+    cantidad_total = serializer.validated_data["cantidad_total"]
+
+    try:
+        finca = Finca.objects.get(pk=finca_id)
+    except (Finca.DoesNotExist, ValueError, TypeError):
+        return Response(
+            {"finca": ["La finca indicada no existe."]},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if str(finca.productor_id) != str(productor_id):
+        return Response(
+            {"error": "La finca indicada no pertenece a su cuenta de productor."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        cosecha = crear_cosecha(
+            finca_id=finca_id,
+            fecha_cosecha=fecha_cosecha,
+            cantidad_total=cantidad_total,
+            variedad_id=variedad_id,
+            productor_id=productor_id,
+        )
+    except ValidationError as exc:
+        detalle = exc.message_dict if hasattr(exc, "message_dict") else {"error": exc.messages}
+        return Response(detalle, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response(CosechaSerializer(cosecha).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(["POST"])

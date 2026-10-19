@@ -4,6 +4,7 @@ Subtarea: SCRUM-96: Guardar georreferenciación en backend.
 Subtarea: SCRUM-142 / HU13-ST2: Implementar servicio/API para registrar lotes.
 """
 
+from decimal import Decimal
 from rest_framework import serializers
 from .models import Cosecha, Finca, Lote, Municipio
 from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
@@ -243,3 +244,44 @@ class LoteSerializer(serializers.ModelSerializer):
             "creado_en",
         ]
         read_only_fields = fields
+
+
+class CosechaSerializer(serializers.ModelSerializer):
+    """
+    Serializador para representar una Cosecha en las respuestas de la API (HU-12 / SCRUM-137).
+    """
+
+    finca_id = serializers.IntegerField(source="finca.id", read_only=True)
+    finca_nombre = serializers.CharField(source="finca.nombre", read_only=True)
+    variedad_id = serializers.IntegerField(source="variedad.id", read_only=True, allow_null=True)
+    variedad_nombre = serializers.CharField(source="variedad.nombre", read_only=True, allow_null=True)
+
+    class Meta:
+        model = Cosecha
+        fields = [
+            "id",
+            "finca_id",
+            "finca_nombre",
+            "variedad_id",
+            "variedad_nombre",
+            "fecha_cosecha",
+            "cantidad_total",
+            "cantidad_disponible",
+            "activo",
+            "creado_en",
+            "actualizado_en",
+        ]
+        read_only_fields = fields
+
+
+class CosechaCreateSerializer(serializers.Serializer):
+    """
+    Serializador de entrada para el registro de cosechas vía API (HU-12 / SCRUM-137).
+    """
+
+    finca = serializers.IntegerField(required=True)
+    variedad = serializers.IntegerField(required=False, allow_null=True)
+    fecha_cosecha = serializers.DateField(required=True)
+    cantidad_total = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=Decimal("0.01"), required=True
+    )
