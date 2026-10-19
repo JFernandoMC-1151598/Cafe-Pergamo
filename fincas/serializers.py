@@ -1,10 +1,11 @@
 """
 Serializadores DRF para Fincas y Georreferenciación - CAFÉ PÉRGAMO
 Subtarea: SCRUM-96: Guardar georreferenciación en backend.
+Subtarea: SCRUM-142 / HU13-ST2: Implementar servicio/API para registrar lotes.
 """
 
 from rest_framework import serializers
-from .models import Finca, Municipio
+from .models import Cosecha, Finca, Lote, Municipio
 from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
 
 
@@ -210,3 +211,33 @@ class MunicipioSerializer(serializers.ModelSerializer):
             if hasattr(exc, "message_dict"):
                 raise serializers.ValidationError(exc.message_dict)
             raise serializers.ValidationError(exc.messages)
+
+
+class LoteSerializer(serializers.ModelSerializer):
+    """
+    Serializador de solo lectura para representar un Lote en las
+    respuestas de la API (HU13-ST2 / SCRUM-142). La creación real pasa
+    por `fincas.services.crear_lote`, que es quien aplica las reglas de
+    negocio (código único, cantidad vs. saldo disponible, descuento
+    transaccional) -- este serializador solo da forma a la salida.
+    """
+
+    cosecha_id = serializers.IntegerField(source="cosecha.id", read_only=True)
+    finca = serializers.CharField(source="cosecha.finca.nombre", read_only=True)
+    cantidad_disponible_cosecha = serializers.DecimalField(
+        source="cosecha.cantidad_disponible", max_digits=10, decimal_places=2, read_only=True
+    )
+
+    class Meta:
+        model = Lote
+        fields = [
+            "id",
+            "codigo",
+            "cosecha_id",
+            "finca",
+            "cantidad",
+            "cantidad_disponible_cosecha",
+            "activo",
+            "creado_en",
+        ]
+        read_only_fields = fields

@@ -62,10 +62,23 @@ main {
     font-size: 1.45rem;
 }
 
+/* Espaciado uniforme entre enlaces del navbar: antes dependía solo del
+   padding de cada .nav-link, lo que hacía que el hueco entre "Proceso de
+   Trazabilidad" y "Municipios" se viera más grande que el resto (ese es
+   justo el punto donde el bloque condicional de enlaces de administrador
+   -- Administrar Usuarios / Registrar Actor -- no renderiza nada para un
+   productor, dejando ese tramo con un padding distinto al de los demás).
+   Con `gap` fijo en el contenedor, el espacio entre enlaces queda
+   consistente sin importar cuántos enlaces condicionales se muestren. */
+.navbar-pergamo .navbar-nav {
+    gap: 0.15rem;
+}
+
 .navbar-pergamo .nav-link {
     font-weight: 500;
     color: #4A4A4A !important;
-    padding: 0.5rem 0.9rem !important;
+    padding: 0.5rem 0.75rem !important;
+    white-space: nowrap;
     transition: color 0.2s ease;
 }
 

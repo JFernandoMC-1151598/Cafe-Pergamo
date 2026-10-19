@@ -3,11 +3,25 @@ Modelos para el dominio de Fincas y Georreferenciación - CAFÉ PÉRGAMO
 Subtarea: SCRUM-87 / HU06-ST1: Definir modelo de datos para fincas y relación con productor y municipio.
 Subtarea: SCRUM-98 / HU07-ST5: Actualizar el modelo o esquema de datos para georreferenciación.
 Subtarea: SCRUM-97: Validar formato de coordenadas.
+Subtarea: SCRUM-141 / HU13-ST1: Definir modelo de datos y relación Cosecha-Lote.
 
 Cubre:
 - RF06: registrar fincas asociadas a cada productor (perfil usuarios.Usuario).
 - RF07: almacenar el municipio de cada finca referenciando el catálogo administrable Municipio.
 - RF08 / HU07: campos opcionales de georreferenciación (latitud y longitud WGS84) con validación cartográfica.
+- HU-13: lotes de café trazables individualmente, creados a partir de una cosecha existente.
+
+Nota sobre `Cosecha` (HU13-ST1): en todo el repositorio (main y cada rama
+de los demás integrantes) no existe todavia una historia de usuario que
+modele "Cosecha" -- sin embargo la matriz de permisos de usuarios/tests.py
+ya anticipa los codigos "cosechas.crear"/"cosechas.consultar", y HU13
+("Crear lotes de café") depende explicitamente de que un Lote se cree "a
+partir de una cosecha existente" y no supere su "saldo disponible". Por
+eso este archivo agrega un modelo Cosecha MINIMO (finca, variedad, fecha,
+cantidad total y saldo disponible) -- lo estrictamente indispensable para
+que Lote pueda relacionarse y validar cantidades. No reemplaza una futura
+historia de usuario completa de Cosechas (pantallas propias, reglas de
+negocio adicionales, etc.), que queda pendiente en el backlog del equipo.
 """
 
 from decimal import Decimal
@@ -16,6 +30,7 @@ from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
+from catalogos.models import VariedadCafe
 from usuarios.models import Usuario
 from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
 
@@ -223,3 +238,128 @@ class Finca(models.Model):
         """Valida la consistencia cartográfica a nivel de modelo (SCRUM-97)."""
         super().clean()
         validar_par_coordenadas(self.latitud, self.longitud)
+
+
+class Cosecha(models.Model):
+    """
+    Cosecha de café de una finca (modelo mínimo -- ver nota en el
+    docstring del módulo). Guarda cuánto se cosechó en total
+    (`cantidad_total`) y cuánto queda todavía sin asignar a ningún lote
+    (`cantidad_disponible`), que es lo que HU13-ST2 necesita para poder
+    rechazar un lote que exceda el saldo.
+    """
+
+    finca = models.ForeignKey(
+        Finca,
+        on_delete=models.PROTECT,
+        related_name="cosechas",
+        verbose_name="Finca",
+        help_text="Finca de la que proviene la cosecha.",
+    )
+
+    variedad = models.ForeignKey(
+        VariedadCafe,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="cosechas",
+        verbose_name="Variedad de café",
+        help_text="Variedad cosechada, del catálogo de HU10 (opcional).",
+    )
+
+    fecha_cosecha = models.DateField(
+        verbose_name="Fecha de la cosecha",
+        help_text="Fecha en que se realizó la cosecha.",
+    )
+
+    cantidad_total = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        verbose_name="Cantidad total cosechada (kg)",
+        help_text="Cantidad total cosechada, en kilogramos.",
+    )
+
+    cantidad_disponible = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.00"))],
+        verbose_name="Cantidad disponible (kg)",
+        help_text="Saldo sin asignar a ningún lote todavía. Se descuenta automáticamente al crear lotes (HU13-ST2).",
+    )
+
+    activo = models.BooleanField(default=True, verbose_name="Cosecha activa")
+    creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de registro")
+    actualizado_en = models.DateTimeField(auto_now=True, verbose_name="Última actualización")
+
+    class Meta:
+        managed = True
+        db_table = "cosechas"
+        verbose_name = "Cosecha"
+        verbose_name_plural = "Cosechas"
+        ordering = ["-fecha_cosecha", "-creado_en"]
+        constraints = [
+            models.CheckConstraint(
+                # Django 6.0 renombró `check` a `condition` en CheckConstraint
+                # (este proyecto corre Django 6.1.1): con `check=` directamente
+                # lanza `TypeError: unexpected keyword argument 'check'`.
+                condition=models.Q(cantidad_disponible__lte=models.F("cantidad_total")),
+                name="cosecha_disponible_no_supera_total",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"Cosecha {self.finca.nombre} ({self.fecha_cosecha}) "
+            f"- {self.cantidad_disponible}/{self.cantidad_total} kg disponibles"
+        )
+
+    def save(self, *args, **kwargs):
+        """Al crear la cosecha, si no se indicó `cantidad_disponible`, arranca igual a `cantidad_total`."""
+        if self._state.adding and self.cantidad_disponible is None:
+            self.cantidad_disponible = self.cantidad_total
+        super().save(*args, **kwargs)
+
+
+class Lote(models.Model):
+    """
+    Lote de café creado a partir de una cosecha existente (HU-13 /
+    SCRUM-141 / SCRUM-142), para trazabilidad individual de porciones de
+    una misma cosecha.
+    """
+
+    codigo = models.CharField(
+        max_length=30,
+        unique=True,
+        verbose_name="Código del lote",
+        help_text="Código único alfanumérico del lote (criterio de aceptación HU13).",
+    )
+
+    cosecha = models.ForeignKey(
+        Cosecha,
+        on_delete=models.PROTECT,
+        related_name="lotes",
+        verbose_name="Cosecha de origen",
+        help_text="Cosecha existente a partir de la cual se crea el lote.",
+    )
+
+    cantidad = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        verbose_name="Cantidad del lote (kg)",
+        help_text="Cantidad asignada a este lote; no puede superar el saldo disponible de la cosecha.",
+    )
+
+    activo = models.BooleanField(default=True, verbose_name="Lote activo")
+    creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de creación")
+
+    class Meta:
+        managed = True
+        db_table = "lotes"
+        verbose_name = "Lote"
+        verbose_name_plural = "Lotes"
+        ordering = ["-creado_en"]
+
+    def __str__(self):
+        return f"Lote {self.codigo} ({self.cantidad} kg) de {self.cosecha}"
