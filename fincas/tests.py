@@ -5,6 +5,13 @@ Integración de:
 - HU-06 (SCRUM-87, SCRUM-88): Modelo de datos de fincas, relación con productor y catálogo de municipios.
 - HU-07 (SCRUM-95, SCRUM-96, SCRUM-97, SCRUM-98, SCRUM-99): Registro de georreferenciación opcional,
   validación de formato cartográfico decimal WGS84 [-90, 90] y [-180, 180], persistencia y API REST.
+- HU-13 (SCRUM-141 a SCRUM-147): Modelo de datos Cosecha-Lote; registro de lotes de café a partir de
+  una cosecha (código único, cantidad vs. saldo disponible, descuento transaccional); validación de
+  código único de lote a nivel de aplicación y de persistencia (ST3 / SCRUM-143); validación de que la
+  cantidad del lote no supere el saldo disponible (ST4 / SCRUM-145); descuento del saldo de la cosecha
+  al crear el lote para mantener su trazabilidad (ST5 / SCRUM-146); formularios web de registro de
+  cosechas (complemento) y de lotes (SCRUM-144); y cobertura de pruebas de código único, restricción de
+  cantidad y flujo exitoso de registro (ST6 / SCRUM-147).
 """
 
 import uuid
@@ -24,12 +31,16 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 
 from fincas.forms import (
+    CosechaRegistroForm,
     FincaModelForm,
     FincaRegistroForm,
     GeorreferenciacionFormMixin,
+    LoteRegistroForm,
     MunicipioForm,
 )
-from fincas.models import Finca, Municipio
+from fincas.models import Cosecha, Finca, Lote, Municipio
+from fincas.services import crear_lote, generar_codigo_lote
+from catalogos.models import EstadoLote, ProcesoBeneficio
 from fincas.validators import (
     validar_latitud,
     validar_longitud,
@@ -2856,3 +2867,663 @@ class TestScrum118ParametrizacionMunicipiosIntegral(TestCase):
         )
         self.assertEqual(resp_inactivar.status_code, 200)
         self.assertFalse(resp_inactivar.json()["activo"])
+
+
+# =============================================================================
+# SUITE HU-13: MODELO COSECHA-LOTE Y CREACIÓN DE LOTES DE CAFÉ
+# (SCRUM-141 / HU13-ST1, SCRUM-142 / HU13-ST2)
+# =============================================================================
+
+
+class CosechaModeloTests(TestCase):
+    """
+    Pruebas del modelo mínimo Cosecha (HU13-ST1 / SCRUM-141): la
+    estructura de persistencia que sirve de base para los lotes, con su
+    saldo disponible y la restricción de que nunca puede ser mayor que
+    el total cosechado.
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(codigo="TEST_COSECHA_MUN", nombre="Chinácota (prueba)")
+        self.finca = Finca.objects.create(
+            nombre="Finca Las Delicias",
+            productor_id=uuid.uuid4(),
+            municipio=self.municipio,
+        )
+
+    def test_cantidad_disponible_toma_el_total_por_defecto_al_crear(self):
+        """Si no se indica `cantidad_disponible` al crear, arranca igual a `cantidad_total`."""
+        cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-03-01",
+            cantidad_total=Decimal("500.00"),
+        )
+        self.assertEqual(cosecha.cantidad_disponible, Decimal("500.00"))
+
+    def test_variedad_es_opcional(self):
+        """La variedad de café (catálogo HU10) es opcional en la cosecha mínima."""
+        cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-03-01",
+            cantidad_total=Decimal("120.00"),
+        )
+        self.assertIsNone(cosecha.variedad)
+
+    def test_no_permite_cantidad_disponible_mayor_al_total(self):
+        """
+        La restricción `cosecha_disponible_no_supera_total` (CheckConstraint)
+        rechaza a nivel de base de datos un saldo disponible mayor al total
+        cosechado, incluso si algún código intentara forzarlo.
+        """
+        cosecha = Cosecha(
+            finca=self.finca,
+            fecha_cosecha="2026-03-01",
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("150.00"),
+        )
+        with self.assertRaises(IntegrityError):
+            cosecha.save()
+
+    def test_str_incluye_finca_y_saldo(self):
+        cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-03-01",
+            cantidad_total=Decimal("80.00"),
+        )
+        self.assertIn("Las Delicias", str(cosecha))
+        self.assertIn("80.00", str(cosecha))
+
+
+class CrearLoteServicioTests(TestCase):
+    """
+    Pruebas del servicio `crear_lote` (HU13-ST2 / SCRUM-142), que aplica
+    las tres reglas de negocio pedidas por Jira: código único
+    alfanumérico, cantidad del lote no mayor al saldo disponible de la
+    cosecha, y descuento transaccional automático de ese saldo.
+
+    También satisface, a nivel de servicio, SCRUM-147 / HU013-ST6
+    ("Cubrir con pruebas la creación de lotes, validando el código
+    único, la restricción de cantidad y el flujo exitoso de registro"):
+    cada una de esas tres cosas tiene su propio test en esta clase.
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(codigo="TEST_LOTE_SERV_MUN", nombre="Salazar (prueba)")
+        self.finca = Finca.objects.create(
+            nombre="Finca El Progreso",
+            productor_id=uuid.uuid4(),
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-04-10",
+            cantidad_total=Decimal("1000.00"),
+        )
+
+    def test_crea_lote_con_codigo_explicito_y_descuenta_saldo(self):
+        """SCRUM-146 / HU013-ST5: el saldo de la cosecha refleja la cantidad usada por el lote."""
+        lote = crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("300.00"), codigo="L0001")
+        self.assertEqual(lote.codigo, "L0001")
+        self.assertEqual(lote.cantidad, Decimal("300.00"))
+
+        self.cosecha.refresh_from_db()
+        self.assertEqual(self.cosecha.cantidad_disponible, Decimal("700.00"))
+
+    def test_genera_codigo_automaticamente_si_no_se_proporciona(self):
+        lote = crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("50.00"))
+        self.assertTrue(lote.codigo.isalnum())
+        self.assertTrue(lote.codigo.startswith(f"LOTE{self.cosecha.pk}"))
+
+    def test_generar_codigo_lote_coincide_con_el_que_usa_crear_lote(self):
+        """`generar_codigo_lote` es la misma función que `crear_lote` usa internamente."""
+        codigo_esperado = generar_codigo_lote(self.cosecha)
+        lote = crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("50.00"))
+        self.assertEqual(lote.codigo, codigo_esperado)
+
+    def test_rechaza_codigo_no_alfanumerico(self):
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("10.00"), codigo="L-0001!!")
+        self.assertIn("codigo", ctx.exception.message_dict)
+
+    def test_rechaza_codigo_duplicado(self):
+        """
+        HU013-ST3 / SCRUM-143: validación de unicidad a nivel de
+        APLICACIÓN -- `crear_lote` rechaza el duplicado (incluso con
+        distinto uso de mayúsculas/minúsculas) antes de intentar
+        persistirlo, con un ValidationError claro en vez de dejar que
+        la base de datos reviente con un IntegrityError genérico.
+        """
+        crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("10.00"), codigo="UNICO123")
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("10.00"), codigo="unico123")
+        self.assertIn("codigo", ctx.exception.message_dict)
+
+    def test_codigo_unico_tambien_se_exige_a_nivel_de_persistencia(self):
+        """
+        HU013-ST3 / SCRUM-143: validación de unicidad a nivel de
+        PERSISTENCIA -- el campo `Lote.codigo` tiene `unique=True` en el
+        modelo (y en la migración 0005), así que aunque algún código
+        futuro cree un `Lote` directamente por fuera de `crear_lote()`
+        (saltándose la validación de aplicación), la base de datos
+        sigue rechazando el duplicado exacto.
+        """
+        Lote.objects.create(codigo="DBUNICO001", cosecha=self.cosecha, cantidad=Decimal("5.00"))
+        with self.assertRaises(IntegrityError):
+            Lote.objects.create(codigo="DBUNICO001", cosecha=self.cosecha, cantidad=Decimal("5.00"))
+
+    def test_rechaza_cantidad_que_supera_el_saldo_disponible(self):
+        """
+        SCRUM-145 / HU013-ST4: "Verificar que la cantidad ingresada para el
+        lote no supere la cantidad disponible en la cosecha asociada y
+        mostrar un error cuando no cumpla la regla."
+        """
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("1500.00"))
+        self.assertIn("cantidad", ctx.exception.message_dict)
+
+        self.cosecha.refresh_from_db()
+        self.assertEqual(self.cosecha.cantidad_disponible, Decimal("1000.00"))
+
+    def test_rechaza_cantidad_cero_o_negativa(self):
+        with self.assertRaises(ValidationError):
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("0.00"))
+        with self.assertRaises(ValidationError):
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("-5.00"))
+
+    def test_rechaza_cantidad_no_numerica(self):
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad="no-es-un-numero")
+        self.assertIn("cantidad", ctx.exception.message_dict)
+
+    def test_rechaza_cosecha_inexistente(self):
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=999999, cantidad=Decimal("10.00"))
+        self.assertIn("cosecha", ctx.exception.message_dict)
+
+    def test_rechaza_cosecha_inactiva(self):
+        self.cosecha.activo = False
+        self.cosecha.save(update_fields=["activo"])
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("10.00"))
+        self.assertIn("cosecha", ctx.exception.message_dict)
+
+    def test_descuento_es_acumulativo_y_automatico_en_varios_lotes_sucesivos(self):
+        """
+        SCRUM-146 / HU013-ST5: "Descontar o reflejar la cantidad utilizada
+        en la cosecha al crear un lote para mantener la trazabilidad y
+        disponibilidad correcta." El descuento se aplica en cada creación,
+        así que varios lotes sucesivos contra la misma cosecha siguen
+        respetando el saldo restante, nunca el total original.
+        """
+        crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("400.00"))
+        self.cosecha.refresh_from_db()
+        self.assertEqual(self.cosecha.cantidad_disponible, Decimal("600.00"))
+
+        crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("600.00"))
+        self.cosecha.refresh_from_db()
+        self.assertEqual(self.cosecha.cantidad_disponible, Decimal("0.00"))
+
+        # Ya no queda saldo: un tercer lote, aunque sea mínimo, debe rechazarse.
+        with self.assertRaises(ValidationError):
+            crear_lote(cosecha_id=self.cosecha.pk, cantidad=Decimal("0.01"))
+
+
+class ApiCrearLoteViewTests(TestCase):
+    """
+    Pruebas del endpoint `POST /fincas/api/lotes/` (HU13-ST2 / SCRUM-142):
+    identificación del productor, aislamiento entre cuentas (una cosecha
+    de otro productor nunca es visible) y traducción de las reglas de
+    negocio de `crear_lote` a códigos de estado HTTP.
+
+    También satisface, a nivel de API, SCRUM-147 / HU013-ST6: código
+    único, restricción de cantidad y flujo exitoso de registro, cada uno
+    con su propio test en esta clase.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_api = reverse("api_lote_crear")
+        self.municipio = Municipio.objects.create(codigo="TEST_LOTE_API_MUN", nombre="Herrán (prueba)")
+
+    def _crear_finca_y_cosecha(self, productor_id, cantidad_total="200.00"):
+        finca = Finca.objects.create(
+            nombre="Finca API Lotes",
+            productor_id=productor_id,
+            municipio=self.municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-05-01",
+            cantidad_total=Decimal(cantidad_total),
+        )
+        return finca, cosecha
+
+    def test_sin_autenticacion_responde_401(self):
+        response = self.client.post(
+            self.url_api, {"cosecha": 1, "cantidad": "10.00"}, content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 401)
+
+    @patch("fincas.views.Usuario")
+    def test_falta_cosecha_responde_400(self, mock_usuario_model):
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=uuid.uuid4())
+        response = self.client.post(
+            self.url_api, {"cantidad": "10.00"}, content_type="application/json", **_jwt_bearer_headers()
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("cosecha", response.json())
+
+    @patch("fincas.views.Usuario")
+    def test_cosecha_inexistente_responde_404(self, mock_usuario_model):
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=uuid.uuid4())
+        response = self.client.post(
+            self.url_api,
+            {"cosecha": 999999, "cantidad": "10.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 404)
+
+    @patch("fincas.views.Usuario")
+    def test_cosecha_de_otro_productor_responde_403(self, mock_usuario_model):
+        """
+        Aislamiento entre cuentas: un productor no puede crear lotes a
+        partir de la cosecha de otro productor, aunque conozca su id.
+        """
+        productor_autenticado = uuid.uuid4()
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=productor_autenticado)
+
+        _, cosecha_de_otro = self._crear_finca_y_cosecha(productor_id=uuid.uuid4())
+
+        response = self.client.post(
+            self.url_api,
+            {"cosecha": cosecha_de_otro.pk, "cantidad": "10.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 403)
+
+    @patch("fincas.views.Usuario")
+    def test_cantidad_supera_saldo_responde_400(self, mock_usuario_model):
+        """SCRUM-145 / HU013-ST4, a nivel de API: error 400 (no 500) con el detalle del campo "cantidad"."""
+        productor_autenticado = uuid.uuid4()
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=productor_autenticado)
+
+        _, cosecha = self._crear_finca_y_cosecha(productor_id=productor_autenticado, cantidad_total="50.00")
+
+        response = self.client.post(
+            self.url_api,
+            {"cosecha": cosecha.pk, "cantidad": "999.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("cantidad", response.json())
+
+    @patch("fincas.views.Usuario")
+    def test_creacion_exitosa_responde_201_y_descuenta_saldo(self, mock_usuario_model):
+        """SCRUM-146 / HU013-ST5, a nivel de API: la respuesta y la BD reflejan el saldo ya descontado."""
+        productor_autenticado = uuid.uuid4()
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=productor_autenticado)
+
+        finca, cosecha = self._crear_finca_y_cosecha(productor_id=productor_autenticado, cantidad_total="300.00")
+
+        response = self.client.post(
+            self.url_api,
+            {"cosecha": cosecha.pk, "cantidad": "120.00", "codigo": "APILOTE01"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 201)
+        cuerpo = response.json()
+        self.assertEqual(cuerpo["codigo"], "APILOTE01")
+        self.assertEqual(cuerpo["cantidad"], "120.00")
+        self.assertEqual(cuerpo["finca"], finca.nombre)
+        self.assertEqual(cuerpo["cantidad_disponible_cosecha"], "180.00")
+
+        cosecha.refresh_from_db()
+        self.assertEqual(cosecha.cantidad_disponible, Decimal("180.00"))
+
+
+# =============================================================================
+# SUITE HU-13: FORMULARIOS WEB DE REGISTRO DE COSECHAS Y LOTES
+# (SCRUM-144 / "Crear formulario o pantalla de registro de lotes";
+#  el registro de cosechas es un complemento necesario, ver nota en
+#  fincas/forms.py y fincas/views.py)
+# =============================================================================
+
+
+class RegistrarCosechaViewTests(TestCase):
+    """Pruebas de la vista web `registrar_cosecha_view`."""
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse("cosecha_registro")
+        self.municipio = Municipio.objects.create(codigo="TEST_COSECHA_VW_MUN", nombre="Toledo (prueba)")
+
+    def test_redirige_a_login_si_no_hay_sesion(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+
+    def test_redirige_a_mis_fincas_si_el_productor_no_tiene_fincas(self):
+        _iniciar_sesion_productor(self.client)
+        response = self.client.get(self.url)
+        self.assertRedirects(response, reverse("mis_fincas"))
+
+    def test_formulario_solo_ofrece_fincas_del_productor_autenticado(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        finca_propia = Finca.objects.create(nombre="Finca Propia", productor_id=productor_id, municipio=self.municipio)
+        Finca.objects.create(nombre="Finca Ajena", productor_id=uuid.uuid4(), municipio=self.municipio)
+
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        fincas_en_form = list(response.context["form"].fields["finca"].queryset)
+        self.assertEqual(fincas_en_form, [finca_propia])
+
+    def test_post_crea_cosecha_exitosamente_para_finca_propia(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        finca = Finca.objects.create(nombre="Finca Cosechera", productor_id=productor_id, municipio=self.municipio)
+
+        response = self.client.post(self.url, {
+            "finca": finca.pk,
+            "fecha_cosecha": "2026-06-01",
+            "cantidad_total": "450.00",
+        })
+        self.assertEqual(response.status_code, 302)
+
+        cosecha = Cosecha.objects.filter(finca=finca).first()
+        self.assertIsNotNone(cosecha)
+        self.assertEqual(cosecha.cantidad_total, Decimal("450.00"))
+        self.assertEqual(cosecha.cantidad_disponible, Decimal("450.00"))
+
+    def test_no_permite_registrar_cosecha_sobre_finca_ajena(self):
+        """
+        Aislamiento entre productores: aunque el atacante conozca el id de
+        una finca de otro productor y lo mande manualmente en el POST,
+        `clean_finca()` la rechaza porque el queryset ya la excluye.
+        """
+        productor_id = _iniciar_sesion_productor(self.client)
+        Finca.objects.create(nombre="Finca Propia", productor_id=productor_id, municipio=self.municipio)
+        finca_ajena = Finca.objects.create(nombre="Finca Ajena", productor_id=uuid.uuid4(), municipio=self.municipio)
+
+        response = self.client.post(self.url, {
+            "finca": finca_ajena.pk,
+            "fecha_cosecha": "2026-06-01",
+            "cantidad_total": "100.00",
+        })
+        self.assertEqual(response.status_code, 200)  # Vuelve a mostrar el formulario con el error
+        self.assertFalse(Cosecha.objects.filter(finca=finca_ajena).exists())
+
+    def test_rechaza_cantidad_total_cero_o_negativa(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        finca = Finca.objects.create(nombre="Finca X", productor_id=productor_id, municipio=self.municipio)
+
+        response = self.client.post(self.url, {
+            "finca": finca.pk,
+            "fecha_cosecha": "2026-06-01",
+            "cantidad_total": "0",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Cosecha.objects.filter(finca=finca).exists())
+
+
+class RegistrarLoteViewTests(TestCase):
+    """
+    Pruebas de la vista web `registrar_lote_view` (SCRUM-144).
+
+    También satisface, a nivel de formulario web, SCRUM-147 / HU013-ST6:
+    código único, restricción de cantidad y flujo exitoso de registro,
+    cada uno con su propio test en esta clase.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse("lote_registro")
+        self.municipio = Municipio.objects.create(codigo="TEST_LOTE_VIEW_MUN", nombre="Herrán (prueba)")
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO", nombre="Lavado", orden=1
+        )
+        self.estado = EstadoLote.objects.create(
+            codigo="RECIBIDO", nombre="Recibido", orden=1
+        )
+
+    def _crear_finca_y_cosecha(self, productor_id, cantidad_total="300.00"):
+        finca = Finca.objects.create(nombre="Finca con Cosecha", productor_id=productor_id, municipio=self.municipio)
+        cosecha = Cosecha.objects.create(
+            finca=finca, fecha_cosecha="2026-06-10", cantidad_total=Decimal(cantidad_total)
+        )
+        return finca, cosecha
+
+    def test_redirige_a_login_si_no_hay_sesion(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+
+    def test_redirige_a_registro_de_cosecha_si_no_hay_cosechas_con_saldo(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        Finca.objects.create(nombre="Finca Sin Cosechas", productor_id=productor_id, municipio=self.municipio)
+        response = self.client.get(self.url)
+        self.assertRedirects(response, reverse("cosecha_registro"))
+
+    def test_formulario_solo_ofrece_cosechas_propias_con_saldo_disponible(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        _, cosecha_propia = self._crear_finca_y_cosecha(productor_id)
+        _, cosecha_ajena = self._crear_finca_y_cosecha(uuid.uuid4())
+
+        # Cosecha propia pero sin saldo disponible: tampoco debe aparecer.
+        finca_sin_saldo = Finca.objects.create(nombre="Finca Sin Saldo", productor_id=productor_id, municipio=self.municipio)
+        cosecha_sin_saldo = Cosecha.objects.create(
+            finca=finca_sin_saldo, fecha_cosecha="2026-06-10", cantidad_total=Decimal("50.00")
+        )
+        cosecha_sin_saldo.cantidad_disponible = Decimal("0.00")
+        cosecha_sin_saldo.save(update_fields=["cantidad_disponible"])
+
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        cosechas_en_form = list(response.context["form"].fields["cosecha"].queryset)
+        self.assertEqual(cosechas_en_form, [cosecha_propia])
+        self.assertNotIn(cosecha_ajena, cosechas_en_form)
+        self.assertNotIn(cosecha_sin_saldo, cosechas_en_form)
+
+    def test_formulario_solo_ofrece_catalogos_activos(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        self._crear_finca_y_cosecha(productor_id)
+        proceso_inactivo = ProcesoBeneficio.objects.create(
+            codigo="SECADO", nombre="Secado", activo=False, orden=2
+        )
+        estado_inactivo = EstadoLote.objects.create(
+            codigo="VENDIDO", nombre="Vendido", activo=False, orden=2
+        )
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self.proceso, response.context["form"].fields["proceso_beneficio"].queryset)
+        self.assertNotIn(
+            proceso_inactivo,
+            response.context["form"].fields["proceso_beneficio"].queryset,
+        )
+        self.assertIn(self.estado, response.context["form"].fields["estado_lote"].queryset)
+        self.assertNotIn(
+            estado_inactivo,
+            response.context["form"].fields["estado_lote"].queryset,
+        )
+
+    def test_post_rechaza_catalogo_inactivo_manipulado(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        _, cosecha = self._crear_finca_y_cosecha(productor_id)
+        proceso_inactivo = ProcesoBeneficio.objects.create(
+            codigo="SECADO", nombre="Secado", activo=False
+        )
+
+        response = self.client.post(self.url, {
+            "cosecha": cosecha.pk,
+            "proceso_beneficio": proceso_inactivo.pk,
+            "estado_lote": self.estado.pk,
+            "cantidad": "50.00",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Lote.objects.filter(cosecha=cosecha).exists())
+        self.assertIn("proceso_beneficio", response.context["form"].errors)
+
+    def test_post_crea_lote_exitosamente_y_descuenta_saldo(self):
+        """SCRUM-146 / HU013-ST5, a nivel de formulario web: flujo exitoso de registro con saldo actualizado."""
+        productor_id = _iniciar_sesion_productor(self.client)
+        _, cosecha = self._crear_finca_y_cosecha(productor_id)
+
+        response = self.client.post(self.url, {
+            "cosecha": cosecha.pk,
+            "proceso_beneficio": self.proceso.pk,
+            "estado_lote": self.estado.pk,
+            "codigo": "WEBLOTE01",
+            "cantidad": "100.00",
+        })
+        self.assertEqual(response.status_code, 302)
+
+        lote = Lote.objects.filter(codigo="WEBLOTE01").first()
+        self.assertIsNotNone(lote)
+        self.assertEqual(lote.cosecha, cosecha)
+        self.assertEqual(lote.cantidad, Decimal("100.00"))
+
+        cosecha.refresh_from_db()
+        self.assertEqual(cosecha.cantidad_disponible, Decimal("200.00"))
+
+    def test_post_sin_codigo_genera_uno_automaticamente(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        _, cosecha = self._crear_finca_y_cosecha(productor_id)
+
+        response = self.client.post(self.url, {
+            "cosecha": cosecha.pk,
+            "proceso_beneficio": self.proceso.pk,
+            "estado_lote": self.estado.pk,
+            "cantidad": "50.00",
+        })
+        self.assertEqual(response.status_code, 302)
+
+        lote = Lote.objects.filter(cosecha=cosecha).first()
+        self.assertIsNotNone(lote)
+        self.assertTrue(lote.codigo.isalnum())
+
+    def test_cantidad_que_supera_el_saldo_se_muestra_como_error_de_formulario(self):
+        """
+        SCRUM-145 / HU013-ST4, a nivel de formulario web: el formulario
+        reutiliza `crear_lote()`, así que un error de negocio (cantidad >
+        saldo) se traduce a un error de campo visible para el usuario, no
+        a una excepción sin manejar ni a un error 500.
+        """
+        productor_id = _iniciar_sesion_productor(self.client)
+        _, cosecha = self._crear_finca_y_cosecha(productor_id, cantidad_total="50.00")
+
+        response = self.client.post(self.url, {"cosecha": cosecha.pk, "cantidad": "999.00"})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Lote.objects.filter(cosecha=cosecha).exists())
+        self.assertTrue(response.context["form"].errors)
+
+    def test_codigo_no_alfanumerico_se_rechaza_en_el_formulario(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        _, cosecha = self._crear_finca_y_cosecha(productor_id)
+
+        response = self.client.post(self.url, {
+            "cosecha": cosecha.pk,
+            "codigo": "no valido!!",
+            "cantidad": "10.00",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Lote.objects.filter(cosecha=cosecha).exists())
+        self.assertIn("codigo", response.context["form"].errors)
+
+
+class MisLotesViewTests(TestCase):
+    """
+    Pruebas de la vista web `mis_lotes_view`.
+
+    Nota: esta vista no corresponde a ninguna subtarea de Jira existente --
+    fue pedida directamente por el productor al revisar HU-13 en local
+    ("si yo lo registré... me gustaría poder ver los lotes que tengo por
+    cada finca"), distinta de HU-14 (etapas de beneficio / historial de
+    beneficio), que queda para otro sprint. Aun así se prueba con el mismo
+    rigor que el resto de las vistas: redirección sin sesión, aislamiento
+    estricto entre productores (incluso al intentar filtrar por una finca
+    ajena) y manejo correcto de un filtro inválido.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse("mis_lotes")
+        self.municipio = Municipio.objects.create(codigo="TEST_MISLOTES_MUN", nombre="Chinácota (prueba)")
+
+    def _crear_finca_cosecha_lote(self, productor_id, finca_nombre="Finca Propia", cantidad_total="100.00", cantidad_lote="40.00", codigo=None):
+        finca = Finca.objects.create(nombre=finca_nombre, productor_id=productor_id, municipio=self.municipio)
+        cosecha = Cosecha.objects.create(
+            finca=finca, fecha_cosecha="2026-05-01", cantidad_total=Decimal(cantidad_total)
+        )
+        # crear_lote() ya genera un código automáticamente cuando no se
+        # proporciona uno explícito, así que no hace falta llamar aquí a
+        # generar_codigo_lote() por separado (esa función exige la instancia
+        # de Cosecha como argumento -- ver fincas/services.py).
+        lote = crear_lote(cosecha_id=cosecha.pk, cantidad=Decimal(cantidad_lote), codigo=codigo)
+        return finca, cosecha, lote
+
+    def test_redirige_a_login_si_no_hay_sesion(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+
+    def test_sin_lotes_muestra_pagina_vacia_sin_error(self):
+        _iniciar_sesion_productor(self.client)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(list(response.context["lotes"]), [])
+
+    def test_solo_muestra_los_lotes_del_productor_autenticado(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        _, _, lote_propio = self._crear_finca_cosecha_lote(productor_id, finca_nombre="Finca Propia")
+        _, _, lote_ajeno = self._crear_finca_cosecha_lote(uuid.uuid4(), finca_nombre="Finca Ajena")
+
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        lotes_mostrados = list(response.context["lotes"])
+        self.assertIn(lote_propio, lotes_mostrados)
+        self.assertNotIn(lote_ajeno, lotes_mostrados)
+
+    def test_filtro_por_finca_propia_muestra_solo_sus_lotes(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        finca_a, _, lote_a = self._crear_finca_cosecha_lote(productor_id, finca_nombre="Finca A")
+        finca_b, _, lote_b = self._crear_finca_cosecha_lote(productor_id, finca_nombre="Finca B")
+
+        response = self.client.get(self.url, {"finca": finca_a.pk})
+        self.assertEqual(response.status_code, 200)
+        lotes_mostrados = list(response.context["lotes"])
+        self.assertIn(lote_a, lotes_mostrados)
+        self.assertNotIn(lote_b, lotes_mostrados)
+        self.assertEqual(response.context["finca_seleccionada"], finca_a)
+
+    def test_filtro_por_finca_de_otro_productor_no_devuelve_lotes_ajenos(self):
+        """
+        Aislamiento entre productores incluso ante manipulación del parámetro
+        `?finca=<id>`: filtrar por el id de la finca de OTRO productor nunca
+        debe devolver los lotes de ese productor, ni lanzar un error -- el
+        queryset base ya está restringido a `productor_id`, así que el AND
+        de ambos filtros simplemente no devuelve nada.
+        """
+        productor_id = _iniciar_sesion_productor(self.client)
+        self._crear_finca_cosecha_lote(productor_id, finca_nombre="Finca Propia")
+        finca_ajena, _, lote_ajeno = self._crear_finca_cosecha_lote(uuid.uuid4(), finca_nombre="Finca Ajena")
+
+        response = self.client.get(self.url, {"finca": finca_ajena.pk})
+        self.assertEqual(response.status_code, 200)
+        lotes_mostrados = list(response.context["lotes"])
+        self.assertNotIn(lote_ajeno, lotes_mostrados)
+        self.assertEqual(lotes_mostrados, [])
+
+    def test_filtro_no_numerico_se_ignora_sin_error_y_muestra_advertencia(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        _, _, lote_propio = self._crear_finca_cosecha_lote(productor_id)
+
+        response = self.client.get(self.url, {"finca": "no-es-un-id"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(lote_propio, list(response.context["lotes"]))
+        mensajes = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("filtro de finca" in m.lower() for m in mensajes))

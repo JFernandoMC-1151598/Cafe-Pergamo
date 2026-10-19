@@ -1,0 +1,107 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Mis Lotes — Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <!-- Encabezado -->
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
+        <div>
+            <h1 class="h3 fw-bold text-dark mb-1">Mis Lotes</h1>
+            <p class="text-muted mb-0">Lotes de café registrados a partir de tus cosechas.</p>
+        </div>
+        <a href="{% url 'lote_registro' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
+            <i class="bi bi-plus-circle me-1"></i> Registrar Lote
+        </a>
+    </div>
+
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+    {% endif %}
+
+    <!-- Filtro por finca -->
+    {% if fincas %}
+    <div class="card border-0 shadow-sm rounded-4 mb-4">
+        <div class="card-body p-3">
+            <form method="GET" action="" class="d-flex flex-wrap align-items-center gap-2">
+                <label for="id_finca_filtro" class="form-label fw-semibold text-dark mb-0 me-1">
+                    <i class="bi bi-funnel me-1"></i>Filtrar por finca
+                </label>
+                <select name="finca" id="id_finca_filtro" class="form-select form-select-sm" style="max-width: 280px;">
+                    <option value="">Todas mis fincas</option>
+                    {% for finca in fincas %}
+                    <option value="{{ finca.pk }}" {% if finca_id_filtro == finca.pk|stringformat:"s" %}selected{% endif %}>
+                        {{ finca.nombre }}
+                    </option>
+                    {% endfor %}
+                </select>
+                <button type="submit" class="btn btn-outline-pergamo btn-sm">Filtrar</button>
+                {% if finca_id_filtro %}
+                <a href="{% url 'mis_lotes' %}" class="btn btn-outline-secondary btn-sm">
+                    <i class="bi bi-x-circle me-1"></i>Quitar filtro
+                </a>
+                {% endif %}
+            </form>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if lotes %}
+    <div class="table-responsive">
+        <table class="table table-hover align-middle border rounded-4 overflow-hidden bg-white shadow-sm">
+            <thead class="table-light">
+                <tr class="small text-muted">
+                    <th>Código</th>
+                    <th>Finca</th>
+                    <th>Cosecha</th>
+                    <th>Cantidad del lote</th>
+                    <th>Saldo restante de la cosecha</th>
+                    <th>Registrado el</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for lote in lotes %}
+                <tr>
+                    <td class="fw-semibold text-dark">{{ lote.codigo }}</td>
+                    <td class="text-secondary small">{{ lote.cosecha.finca.nombre }}</td>
+                    <td class="text-secondary small">{{ lote.cosecha.fecha_cosecha|date:"d/m/Y" }}</td>
+                    <td class="small">
+                        <span class="badge bg-success-subtle text-success border border-success-subtle">
+                            {{ lote.cantidad }} kg
+                        </span>
+                    </td>
+                    <td class="small text-secondary">
+                        {{ lote.cosecha.cantidad_disponible }} / {{ lote.cosecha.cantidad_total }} kg
+                    </td>
+                    <td class="text-secondary small">{{ lote.creado_en|date:"d/m/Y" }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <!-- Estado vacío -->
+    <div class="card border-0 shadow-sm rounded-4">
+        <div class="card-body p-5 text-center">
+            <i class="bi bi-box-seam fs-1 text-muted mb-3 d-block"></i>
+            {% if finca_seleccionada %}
+            <h5 class="fw-bold text-dark">"{{ finca_seleccionada.nombre }}" todavía no tiene lotes registrados</h5>
+            <p class="text-muted mb-4">Prueba quitando el filtro, o registra un lote a partir de una cosecha de esta finca.</p>
+            {% else %}
+            <h5 class="fw-bold text-dark">Todavía no tienes lotes registrados</h5>
+            <p class="text-muted mb-4">Registra una cosecha y luego un lote a partir de ella para verlo aquí.</p>
+            {% endif %}
+            <a href="{% url 'lote_registro' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
+                <i class="bi bi-plus-circle me-1"></i> Registrar Lote
+            </a>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

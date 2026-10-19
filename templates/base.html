@@ -55,9 +55,6 @@
                     <li class="nav-item">
                         <a class="nav-link" href="{% url 'catalogo' %}">Catálogo Comercial</a>
                     </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="{% url 'home' %}#pilares">Proceso de Trazabilidad</a>
-                    </li>
                     {% if rol_actual|tiene_permiso:"usuarios.administrar" %}
                     <li class="nav-item">
                         <a class="nav-link" href="{% url 'admin_usuarios' %}">Administrar Usuarios</a>
@@ -69,14 +66,17 @@
                     </li>
                     {% endif %}
                     {% with puede_consultar_catalogos=rol_actual|tiene_permiso:"catalogos_maestros.consultar" %}
-                    {% if puede_consultar_catalogos %}
-                    <li class="nav-item">
-                        <a class="nav-link" href="{% url 'admin_municipios' %}">Municipios</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="{% url 'lista_variedades' %}">Variedades de café</a>
-                    </li>
-                    {% endif %}
+                        {% if puede_consultar_catalogos %}
+                            <li class="nav-item">
+                                <a class="nav-link" href="{% url 'admin_municipios' %}">Municipios</a>
+                            </li>
+                            <li class="nav-item">
+                                <a class="nav-link" href="{% url 'lista_variedades' %}">Variedades de café</a>
+                            </li>
+                            <li class="nav-item">
+                                <a class="nav-link" href="{% url 'administrar_trazabilidad' %}">Trazabilidad</a>
+                            </li>
+                        {% endif %}
                     {% endwith %}
                 </ul>
 
