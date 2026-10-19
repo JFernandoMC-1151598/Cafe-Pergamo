@@ -3377,3 +3377,97 @@ class RegistrarLoteViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(Lote.objects.filter(cosecha=cosecha).exists())
         self.assertIn("codigo", response.context["form"].errors)
+
+
+class MisLotesViewTests(TestCase):
+    """
+    Pruebas de la vista web `mis_lotes_view`.
+
+    Nota: esta vista no corresponde a ninguna subtarea de Jira existente --
+    fue pedida directamente por el productor al revisar HU-13 en local
+    ("si yo lo registré... me gustaría poder ver los lotes que tengo por
+    cada finca"), distinta de HU-14 (etapas de beneficio / historial de
+    beneficio), que queda para otro sprint. Aun así se prueba con el mismo
+    rigor que el resto de las vistas: redirección sin sesión, aislamiento
+    estricto entre productores (incluso al intentar filtrar por una finca
+    ajena) y manejo correcto de un filtro inválido.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse("mis_lotes")
+        self.municipio = Municipio.objects.create(codigo="TEST_MISLOTES_MUN", nombre="Chinácota (prueba)")
+
+    def _crear_finca_cosecha_lote(self, productor_id, finca_nombre="Finca Propia", cantidad_total="100.00", cantidad_lote="40.00", codigo=None):
+        finca = Finca.objects.create(nombre=finca_nombre, productor_id=productor_id, municipio=self.municipio)
+        cosecha = Cosecha.objects.create(
+            finca=finca, fecha_cosecha="2026-05-01", cantidad_total=Decimal(cantidad_total)
+        )
+        # crear_lote() ya genera un código automáticamente cuando no se
+        # proporciona uno explícito, así que no hace falta llamar aquí a
+        # generar_codigo_lote() por separado (esa función exige la instancia
+        # de Cosecha como argumento -- ver fincas/services.py).
+        lote = crear_lote(cosecha_id=cosecha.pk, cantidad=Decimal(cantidad_lote), codigo=codigo)
+        return finca, cosecha, lote
+
+    def test_redirige_a_login_si_no_hay_sesion(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+
+    def test_sin_lotes_muestra_pagina_vacia_sin_error(self):
+        _iniciar_sesion_productor(self.client)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(list(response.context["lotes"]), [])
+
+    def test_solo_muestra_los_lotes_del_productor_autenticado(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        _, _, lote_propio = self._crear_finca_cosecha_lote(productor_id, finca_nombre="Finca Propia")
+        _, _, lote_ajeno = self._crear_finca_cosecha_lote(uuid.uuid4(), finca_nombre="Finca Ajena")
+
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        lotes_mostrados = list(response.context["lotes"])
+        self.assertIn(lote_propio, lotes_mostrados)
+        self.assertNotIn(lote_ajeno, lotes_mostrados)
+
+    def test_filtro_por_finca_propia_muestra_solo_sus_lotes(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        finca_a, _, lote_a = self._crear_finca_cosecha_lote(productor_id, finca_nombre="Finca A")
+        finca_b, _, lote_b = self._crear_finca_cosecha_lote(productor_id, finca_nombre="Finca B")
+
+        response = self.client.get(self.url, {"finca": finca_a.pk})
+        self.assertEqual(response.status_code, 200)
+        lotes_mostrados = list(response.context["lotes"])
+        self.assertIn(lote_a, lotes_mostrados)
+        self.assertNotIn(lote_b, lotes_mostrados)
+        self.assertEqual(response.context["finca_seleccionada"], finca_a)
+
+    def test_filtro_por_finca_de_otro_productor_no_devuelve_lotes_ajenos(self):
+        """
+        Aislamiento entre productores incluso ante manipulación del parámetro
+        `?finca=<id>`: filtrar por el id de la finca de OTRO productor nunca
+        debe devolver los lotes de ese productor, ni lanzar un error -- el
+        queryset base ya está restringido a `productor_id`, así que el AND
+        de ambos filtros simplemente no devuelve nada.
+        """
+        productor_id = _iniciar_sesion_productor(self.client)
+        self._crear_finca_cosecha_lote(productor_id, finca_nombre="Finca Propia")
+        finca_ajena, _, lote_ajeno = self._crear_finca_cosecha_lote(uuid.uuid4(), finca_nombre="Finca Ajena")
+
+        response = self.client.get(self.url, {"finca": finca_ajena.pk})
+        self.assertEqual(response.status_code, 200)
+        lotes_mostrados = list(response.context["lotes"])
+        self.assertNotIn(lote_ajeno, lotes_mostrados)
+        self.assertEqual(lotes_mostrados, [])
+
+    def test_filtro_no_numerico_se_ignora_sin_error_y_muestra_advertencia(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        _, _, lote_propio = self._crear_finca_cosecha_lote(productor_id)
+
+        response = self.client.get(self.url, {"finca": "no-es-un-id"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(lote_propio, list(response.context["lotes"]))
+        mensajes = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("filtro de finca" in m.lower() for m in mensajes))

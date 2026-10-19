@@ -19,6 +19,7 @@ urlpatterns = [
     # Interfaz Web de Cosechas y Lotes (HU-13)
     path('cosechas/registro/', views.registrar_cosecha_view, name='cosecha_registro'),
     path('lotes/registro/', views.registrar_lote_view, name='lote_registro'),
+    path('mis-lotes/', views.mis_lotes_view, name='mis_lotes'),
 
     # Interfaz Web de Catálogo de Municipios (HU-09 / SCRUM-111)
     path('municipios/', views.admin_municipios_view, name='admin_municipios'),

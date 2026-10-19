@@ -14,6 +14,10 @@ Subtarea: SCRUM-146 / HU013-ST5: Actualizar trazabilidad de la cosecha al crear 
 (idem, el descuento del saldo vive en services.crear_lote()).
 Nota: incluye también una vista de registro de cosechas, complemento necesario para
 poder usar el formulario de lotes de principio a fin (ver nota en fincas/forms.py).
+Nota: incluye además una vista de listado "Mis Lotes" con filtro por finca -- pedida
+directamente por el productor al revisar HU-13 en local: HU-14 (etapas de beneficio)
+mostrará el historial de beneficio más adelante, pero un lote ya registrado debía
+poder consultarse ahora, no solo en el siguiente sprint.
 """
 
 from django.contrib import messages
@@ -841,4 +845,59 @@ def registrar_lote_view(request):
         request,
         "fincas/registro_lote.html",
         {"form": form, "ultimos_lotes": ultimos_lotes},
+    )
+
+
+def mis_lotes_view(request):
+    """
+    Vista web de listado de lotes del productor autenticado, con filtro
+    opcional por finca vía `?finca=<id>` (petición directa del usuario al
+    revisar HU-13 en local: no hay todavía ninguna pantalla para consultar
+    los lotes que ya se registraron, aunque las "etapas de beneficio" -- el
+    historial de qué pasa después del lote -- quedaron para otro sprint).
+
+    Aislamiento entre productores: el queryset base ya está filtrado por
+    `cosecha__finca__productor_id=productor_id`, así que un `?finca=<id>`
+    que apunte a la finca de OTRO productor nunca puede filtrar lotes
+    ajenos -- el AND de ambos filtros simplemente no devuelve nada, sin
+    necesidad de un chequeo de error aparte.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(
+            request,
+            "Debe iniciar sesión con su cuenta de productor para ver sus lotes."
+        )
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    lotes = (
+        Lote.objects.filter(cosecha__finca__productor_id=productor_id)
+        .select_related("cosecha", "cosecha__finca")
+        .order_by("-creado_en")
+    )
+
+    fincas_productor = Finca.objects.filter(
+        productor_id=productor_id, activo=True
+    ).order_by("nombre")
+
+    finca_id_raw = request.GET.get("finca", "").strip()
+    finca_seleccionada = None
+    if finca_id_raw:
+        try:
+            finca_id = int(finca_id_raw)
+        except (TypeError, ValueError):
+            messages.warning(request, "El filtro de finca no es válido; se muestran todos los lotes.")
+        else:
+            lotes = lotes.filter(cosecha__finca_id=finca_id)
+            finca_seleccionada = fincas_productor.filter(pk=finca_id).first()
+
+    return render(
+        request,
+        "fincas/mis_lotes.html",
+        {
+            "lotes": lotes,
+            "fincas": fincas_productor,
+            "finca_seleccionada": finca_seleccionada,
+            "finca_id_filtro": finca_id_raw,
+        },
     )

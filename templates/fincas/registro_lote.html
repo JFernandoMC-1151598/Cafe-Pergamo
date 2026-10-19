@@ -26,6 +26,11 @@
                         <div>
                             <h1 class="h4 mb-0 fw-bold text-dark">Registrar Lote</h1>
                             <p class="text-muted small mb-0">Cree un lote de café a partir de una de sus cosechas con saldo disponible</p>
+                            <!-- Enlace directo a la vista de consulta de lotes ya registrados
+                                 (pedido por el productor; ver fincas/views.py::mis_lotes_view). -->
+                            <a href="{% url 'mis_lotes' %}" class="small text-decoration-none">
+                                <i class="bi bi-list-check me-1"></i>Ver Mis Lotes
+                            </a>
                         </div>
                     </div>
                 </div>
