@@ -293,8 +293,10 @@ class CatalogosTrazabilidadMaintenanceViewTests(TestCase):
         )
         estado.refresh_from_db()
         self.assertFalse(estado.activo)
-        auditoria = BitacoraCatalogoTrazabilidad.objects.order_by(
-            "-creado_en"
+        auditoria = BitacoraCatalogoTrazabilidad.objects.filter(
+            registro_codigo="SECADO"
+        ).order_by(
+            "-creado_en", "-id"
         ).first()
         self.assertEqual(auditoria.accion, "INACTIVAR")
         self.assertEqual(auditoria.registro_codigo, "SECADO")
