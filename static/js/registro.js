@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const tipoDocumento = document.getElementById('tipo_documento');
     const numeroDocumento = document.getElementById('numero_documento');
     const role = document.getElementById('role');
+    const productorInfo = document.getElementById('productor-info');
     const password = document.getElementById('password');
     const confirmPassword = document.getElementById('confirm_password');
     const generalAlert = document.getElementById('general-alert');
@@ -96,17 +97,34 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     });
 
-    [role, tipoDocumento].forEach(select => {
-        if (select) {
-            select.addEventListener('change', function () {
-                if (this.value !== '') {
-                    setValid(this);
+    if (tipoDocumento) {
+        tipoDocumento.addEventListener('change', function () {
+            if (this.value !== '') {
+                setValid(this);
+            } else {
+                clearValidation(this);
+            }
+        });
+    }
+
+    if (role) {
+        role.addEventListener('change', function () {
+            if (this.value !== '') {
+                setValid(this);
+            } else {
+                clearValidation(this);
+            }
+
+            // Si selecciona Productor, mostrar tarjeta explicativa
+            if (productorInfo) {
+                if (this.value === 'PRODUCTOR') {
+                    productorInfo.classList.remove('d-none');
                 } else {
-                    clearValidation(this);
+                    productorInfo.classList.add('d-none');
                 }
-            });
-        }
-    });
+            }
+        });
+    }
 
     if (email) {
         email.addEventListener('input', function () {
@@ -172,7 +190,11 @@ document.addEventListener('DOMContentLoaded', function () {
             }
 
             if (response.ok) {
-                mostrarAlertaGeneral('¡Registro exitoso! Redirigiendo al inicio de sesión...', 'success');
+                const esProductor = (payload.role || '').toUpperCase() === 'PRODUCTOR';
+                const exitoMsg = esProductor
+                    ? '¡Registro exitoso como Productor Cafetero! Redirigiendo al inicio de sesión para vincular sus fincas...'
+                    : '¡Registro exitoso! Redirigiendo al inicio de sesión...';
+                mostrarAlertaGeneral(exitoMsg, 'success');
                 setTimeout(function () {
                     window.location.href = loginUrl;
                 }, 1800);

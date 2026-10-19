@@ -27,18 +27,19 @@
 
                 <!-- Notificaciones y Mensajes Flash de Django -->
                 {% if messages %}
-                    {% for message in messages %}
-                        <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
-                            {{ message }}
-                            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Cerrar"></button>
-                        </div>
-                    {% endfor %}
+                {% for message in messages %}
+                <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+                    {{ message }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Cerrar"></button>
+                </div>
+                {% endfor %}
                 {% endif %}
 
                 <!-- Alerta general de error (JavaScript) -->
                 <div id="general-alert" class="alert alert-danger d-none" role="alert">
                     <i class="bi bi-exclamation-triangle-fill me-2"></i>
-                    <span id="general-alert-message">Por favor, completa correctamente todos los campos obligatorios.</span>
+                    <span id="general-alert-message">Por favor, completa correctamente todos los campos
+                        obligatorios.</span>
                 </div>
 
                 <!-- Formulario de Inicio de Sesión -->
@@ -47,17 +48,14 @@
 
                     <!-- Campo Correo Electrónico -->
                     <div class="mb-3">
-                        <label for="email" class="form-label">Correo Electrónico <span class="text-danger">*</span></label>
+                        <label for="email" class="form-label">Correo Electrónico <span
+                                class="text-danger">*</span></label>
                         <div class="input-group">
                             <span class="input-group-text"><i class="bi bi-envelope"></i></span>
-                            <input type="email" 
-                                   class="form-control" 
-                                   id="email" 
-                                   name="email" 
-                                   placeholder="correo@ejemplo.com" 
-                                   autocomplete="email"
-                                   required>
-                            <div class="invalid-feedback" id="email-feedback">Por favor, ingresa un correo electrónico válido.</div>
+                            <input type="email" class="form-control" id="email" name="email"
+                                placeholder="correo@ejemplo.com" autocomplete="email" required>
+                            <div class="invalid-feedback" id="email-feedback">Por favor, ingresa un correo electrónico
+                                válido.</div>
                         </div>
                     </div>
 
@@ -66,14 +64,10 @@
                         <label for="password" class="form-label">Contraseña <span class="text-danger">*</span></label>
                         <div class="input-group">
                             <span class="input-group-text"><i class="bi bi-lock"></i></span>
-                            <input type="password" 
-                                   class="form-control" 
-                                   id="password" 
-                                   name="password" 
-                                   placeholder="••••••••" 
-                                   autocomplete="current-password"
-                                   required>
-                            <button type="button" class="btn btn-password-toggle" id="togglePasswordBtn" aria-label="Mostrar u ocultar contraseña">
+                            <input type="password" class="form-control" id="password" name="password"
+                                placeholder="••••••••" autocomplete="current-password" required>
+                            <button type="button" class="btn btn-password-toggle" id="togglePasswordBtn"
+                                aria-label="Mostrar u ocultar contraseña">
                                 <i class="bi bi-eye" id="togglePasswordIcon"></i>
                             </button>
                             <div class="invalid-feedback" id="password-feedback">Por favor, ingresa tu contraseña.</div>
@@ -89,7 +83,8 @@
                             </label>
                         </div>
                         <div>
-                            <a href="{% url 'recuperar_contrasena' %}" class="auth-link small">¿Olvidaste tu contraseña?</a>
+                            <a href="{% url 'recuperar_contrasena' %}" class="auth-link small">¿Olvidaste tu
+                                contraseña?</a>
                         </div>
                     </div>
 
@@ -104,7 +99,7 @@
                 <!-- Pie de la Tarjeta con Enlace a Registro -->
                 <div class="auth-footer text-center">
                     <p class="text-muted small mb-0">
-                        ¿No tienes una cuenta aún? 
+                        ¿No tienes una cuenta aún?
                         <a href="{% url 'registro' %}" class="auth-link ms-1">Regístrate aquí</a>
                     </p>
                 </div>

@@ -64,6 +64,7 @@ from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST, require_http_methods
 
@@ -88,6 +89,7 @@ logger = logging.getLogger(__name__)
 # camino (usuario ya creado en Auth, pero rechazado al insertar el
 # perfil de negocio).
 _TELEFONO_REGEX = re.compile(r"^\+?[0-9 ]{7,15}$")
+_NOMBRE_REGEX = re.compile(r"^[A-Za-zÁÉÍÓÚáéíóúÑñÜü ]{2,100}$")
 
 # Roles que un usuario puede elegir al autoregistrarse. ADMINISTRADOR
 # queda deliberadamente excluido: un endpoint público de registro nunca
@@ -193,6 +195,12 @@ def registro_api(request):
     tipo_documento_codigo = valores["tipo_documento"].upper()
     numero_documento = valores["numero_documento"]
     rol_codigo = _ALIAS_ROL.get(valores["rol"].upper(), valores["rol"].upper())
+
+    # 1.1 Validación de formato de nombres y apellidos (SCRUM-86)
+    if len(nombres) < 2 or not _NOMBRE_REGEX.match(nombres):
+        return _bad_request({"nombres": "Los nombres solo deben contener letras y al menos 2 caracteres."})
+    if len(apellidos) < 2 or not _NOMBRE_REGEX.match(apellidos):
+        return _bad_request({"apellidos": "Los apellidos solo deben contener letras y al menos 2 caracteres."})
 
     # 2. Formato de correo.
     try:
@@ -636,7 +644,7 @@ def catalogo_view(request: HttpRequest) -> HttpResponse:
 
 
 def registro_view(request: HttpRequest) -> HttpResponse:
-    """Renderiza la pantalla de registro de usuarios (HU01-ST2)."""
+    """Renderiza la pantalla de registro general de usuarios (HU01-ST2)."""
     return render(request, "usuarios/registro.html")
 
 
