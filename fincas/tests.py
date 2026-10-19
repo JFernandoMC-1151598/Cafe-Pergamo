@@ -39,8 +39,8 @@ from fincas.forms import (
     MunicipioForm,
 )
 from fincas.models import Cosecha, Finca, Lote, Municipio
-from fincas.services import crear_lote, generar_codigo_lote
-from catalogos.models import EstadoLote, ProcesoBeneficio
+from fincas.services import crear_cosecha, crear_lote, generar_codigo_lote
+from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from fincas.validators import (
     validar_latitud,
     validar_longitud,
@@ -3527,3 +3527,434 @@ class MisLotesViewTests(TestCase):
         self.assertIn(lote_propio, list(response.context["lotes"]))
         mensajes = [str(m) for m in response.context["messages"]]
         self.assertTrue(any("filtro de finca" in m.lower() for m in mensajes))
+
+
+# ==============================================================================
+# HU-12 (SCRUM-16): Registro de Cosechas para controlar la producción de café
+# Subtareas:
+# - SCRUM-136: Crear el modelo y la persistencia de cosechas
+# - SCRUM-137: Desarrollar el servicio o endpoint para registrar cosechas
+# - SCRUM-138: Diseñar el formulario de registro de cosechas
+# - SCRUM-139: Agregar pruebas del registro de cosechas
+# - SCRUM-140: Implementar la validación de finca y variedad contra el catálogo
+# Criterios de Aceptación:
+# 1. La finca y la variedad deben ser válidas.
+# 2. Las cantidades deben ser mayores a cero.
+# 3. Se debe inicializar cantidad_disponible = cantidad_total.
+# ==============================================================================
+
+
+class CosechaModelTests(TestCase):
+    """
+    SCRUM-136 & SCRUM-140: Pruebas unitarias del modelo y persistencia de Cosecha.
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(
+            codigo="MUN-COSECHA-TEST",
+            nombre="Municipio Cosecha Test",
+            departamento="Norte de Santander",
+        )
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca La Esperanza",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo Test",
+            activo=True,
+        )
+
+    def test_crear_cosecha_inicializa_cantidad_disponible_igual_a_total(self):
+        """Criterio: Se debe inicializar cantidad_disponible = cantidad_total."""
+        cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-05-10",
+            cantidad_total=Decimal("250.50"),
+        )
+        self.assertEqual(cosecha.cantidad_disponible, Decimal("250.50"))
+        self.assertTrue(cosecha.activo)
+
+    def test_cantidad_total_menor_o_igual_a_cero_lanza_validation_error(self):
+        """Criterio: Las cantidades deben ser mayores a cero."""
+        cosecha_cero = Cosecha(
+            finca=self.finca,
+            fecha_cosecha="2026-05-10",
+            cantidad_total=Decimal("0.00"),
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            cosecha_cero.clean()
+        self.assertIn("cantidad_total", ctx.exception.message_dict)
+
+        cosecha_negativa = Cosecha(
+            finca=self.finca,
+            fecha_cosecha="2026-05-10",
+            cantidad_total=Decimal("-10.00"),
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            cosecha_negativa.clean()
+        self.assertIn("cantidad_total", ctx.exception.message_dict)
+
+    def test_cantidad_disponible_no_supera_total(self):
+        """Restricción: cantidad_disponible <= cantidad_total."""
+        cosecha = Cosecha(
+            finca=self.finca,
+            fecha_cosecha="2026-05-10",
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("150.00"),
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            cosecha.clean()
+        self.assertIn("cantidad_disponible", ctx.exception.message_dict)
+
+    def test_rechaza_cosecha_con_finca_inactiva(self):
+        """Criterio SCRUM-140: La finca debe ser válida y estar activa."""
+        finca_inactiva = Finca.objects.create(
+            nombre="Finca Inactiva Test",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=False,
+        )
+        cosecha = Cosecha(
+            finca=finca_inactiva,
+            fecha_cosecha="2026-05-10",
+            cantidad_total=Decimal("100.00"),
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            cosecha.clean()
+        self.assertIn("finca", ctx.exception.message_dict)
+
+    def test_rechaza_cosecha_con_variedad_inactiva(self):
+        """Criterio SCRUM-140: La variedad debe ser válida contra el catálogo y estar activa."""
+        variedad_inactiva = VariedadCafe.objects.create(
+            nombre="Variedad Inactiva Test",
+            activo=False,
+        )
+        cosecha = Cosecha(
+            finca=self.finca,
+            variedad=variedad_inactiva,
+            fecha_cosecha="2026-05-10",
+            cantidad_total=Decimal("100.00"),
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            cosecha.clean()
+        self.assertIn("variedad", ctx.exception.message_dict)
+
+
+class CrearCosechaServiceTests(TestCase):
+    """
+    SCRUM-137 & SCRUM-140: Pruebas unitarias del servicio de dominio `crear_cosecha`.
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(
+            codigo="MUN-SERV-TEST",
+            nombre="Municipio Servicio Test",
+            departamento="Norte de Santander",
+        )
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca Buena Vista",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Caturra Test",
+            activo=True,
+        )
+
+    def test_crear_cosecha_servicio_exitoso(self):
+        cosecha = crear_cosecha(
+            finca_id=self.finca.pk,
+            fecha_cosecha="2026-06-15",
+            cantidad_total=Decimal("300.00"),
+            variedad_id=self.variedad.pk,
+            productor_id=self.productor_id,
+        )
+        self.assertIsNotNone(cosecha.pk)
+        self.assertEqual(cosecha.cantidad_total, Decimal("300.00"))
+        self.assertEqual(cosecha.cantidad_disponible, Decimal("300.00"))
+        self.assertEqual(cosecha.finca, self.finca)
+        self.assertEqual(cosecha.variedad, self.variedad)
+
+    def test_crear_cosecha_servicio_sin_variedad_es_valido(self):
+        cosecha = crear_cosecha(
+            finca_id=self.finca.pk,
+            fecha_cosecha="2026-06-15",
+            cantidad_total="150.00",
+            variedad_id=None,
+            productor_id=self.productor_id,
+        )
+        self.assertIsNone(cosecha.variedad)
+        self.assertEqual(cosecha.cantidad_disponible, Decimal("150.00"))
+
+    def test_crear_cosecha_servicio_con_cantidad_cero_o_negativa_falla(self):
+        with self.assertRaises(ValidationError) as ctx:
+            crear_cosecha(
+                finca_id=self.finca.pk,
+                fecha_cosecha="2026-06-15",
+                cantidad_total=Decimal("0.00"),
+            )
+        self.assertIn("cantidad_total", ctx.exception.message_dict)
+
+        with self.assertRaises(ValidationError) as ctx:
+            crear_cosecha(
+                finca_id=self.finca.pk,
+                fecha_cosecha="2026-06-15",
+                cantidad_total=Decimal("-50.00"),
+            )
+        self.assertIn("cantidad_total", ctx.exception.message_dict)
+
+    def test_crear_cosecha_servicio_con_finca_inexistente_o_inactiva_falla(self):
+        with self.assertRaises(ValidationError) as ctx:
+            crear_cosecha(
+                finca_id=999999,
+                fecha_cosecha="2026-06-15",
+                cantidad_total=Decimal("100.00"),
+            )
+        self.assertIn("finca", ctx.exception.message_dict)
+
+        self.finca.activo = False
+        self.finca.save()
+        with self.assertRaises(ValidationError) as ctx:
+            crear_cosecha(
+                finca_id=self.finca.pk,
+                fecha_cosecha="2026-06-15",
+                cantidad_total=Decimal("100.00"),
+            )
+        self.assertIn("finca", ctx.exception.message_dict)
+
+    def test_crear_cosecha_servicio_con_finca_ajena_a_productor_falla(self):
+        otro_productor = uuid.uuid4()
+        with self.assertRaises(ValidationError) as ctx:
+            crear_cosecha(
+                finca_id=self.finca.pk,
+                fecha_cosecha="2026-06-15",
+                cantidad_total=Decimal("100.00"),
+                productor_id=otro_productor,
+            )
+        self.assertIn("finca", ctx.exception.message_dict)
+
+    def test_crear_cosecha_servicio_con_variedad_inactiva_falla(self):
+        variedad_inactiva = VariedadCafe.objects.create(
+            nombre="Geisha Inactiva",
+            activo=False,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            crear_cosecha(
+                finca_id=self.finca.pk,
+                fecha_cosecha="2026-06-15",
+                cantidad_total=Decimal("100.00"),
+                variedad_id=variedad_inactiva.pk,
+            )
+        self.assertIn("variedad", ctx.exception.message_dict)
+
+
+class CosechaApiTests(TestCase):
+    """
+    SCRUM-137: Pruebas del endpoint REST POST /fincas/api/cosechas/.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse("api_cosecha_crear")
+        self.municipio = Municipio.objects.create(
+            codigo="MUN-API-TEST",
+            nombre="Municipio API Test",
+            departamento="Norte de Santander",
+        )
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca API Cafe",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Bourbon Test",
+            activo=True,
+        )
+
+    def test_api_crear_cosecha_requiere_autenticacion(self):
+        response = self.client.post(
+            self.url,
+            {
+                "finca": self.finca.pk,
+                "fecha_cosecha": "2026-07-01",
+                "cantidad_total": "120.00",
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+
+    @patch("fincas.views.Usuario")
+    def test_api_crear_cosecha_exitoso(self, mock_usuario_model):
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.productor_id)
+        response = self.client.post(
+            self.url,
+            {
+                "finca": self.finca.pk,
+                "variedad": self.variedad.pk,
+                "fecha_cosecha": "2026-07-01",
+                "cantidad_total": "120.50",
+            },
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["finca_id"], self.finca.pk)
+        self.assertEqual(data["variedad_id"], self.variedad.pk)
+        self.assertEqual(Decimal(str(data["cantidad_total"])), Decimal("120.50"))
+        self.assertEqual(Decimal(str(data["cantidad_disponible"])), Decimal("120.50"))
+
+    @patch("fincas.views.Usuario")
+    def test_api_crear_cosecha_datos_invalidos_retorna_400(self, mock_usuario_model):
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.productor_id)
+        response = self.client.post(
+            self.url,
+            {
+                "finca": self.finca.pk,
+                "fecha_cosecha": "2026-07-01",
+                "cantidad_total": "0.00",
+            },
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+
+    @patch("fincas.views.Usuario")
+    def test_api_crear_cosecha_finca_inexistente_retorna_404(self, mock_usuario_model):
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.productor_id)
+        response = self.client.post(
+            self.url,
+            {
+                "finca": 999999,
+                "fecha_cosecha": "2026-07-01",
+                "cantidad_total": "50.00",
+            },
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 404)
+
+    @patch("fincas.views.Usuario")
+    def test_api_crear_cosecha_finca_ajena_retorna_403(self, mock_usuario_model):
+        otro_productor = uuid.uuid4()
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=otro_productor)
+        response = self.client.post(
+            self.url,
+            {
+                "finca": self.finca.pk,
+                "fecha_cosecha": "2026-07-01",
+                "cantidad_total": "50.00",
+            },
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 403)
+
+
+class CosechaWebFormViewTests(TestCase):
+    """
+    SCRUM-138: Pruebas del formulario y vista web de registro de cosechas.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse("cosecha_registro")
+        self.municipio = Municipio.objects.create(
+            codigo="MUN-WEB-TEST",
+            nombre="Municipio Web Test",
+            departamento="Norte de Santander",
+        )
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca La Pradera",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Colombia Test",
+            activo=True,
+        )
+
+    def test_vista_registro_cosecha_requiere_login(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+
+    def test_vista_registro_cosecha_sin_fincas_redirige_a_mis_fincas(self):
+        productor_sin_fincas = uuid.uuid4()
+        _iniciar_sesion_productor(self.client, usuario_id=productor_sin_fincas)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("mis_fincas"))
+
+    def test_vista_registro_cosecha_get_renderiza_formulario(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("form", response.context)
+        self.assertTemplateUsed(response, "fincas/registro_cosecha.html")
+
+    def test_vista_registro_cosecha_post_exitoso(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.post(
+            self.url,
+            {
+                "finca": self.finca.pk,
+                "variedad": self.variedad.pk,
+                "fecha_cosecha": "2026-08-01",
+                "cantidad_total": "400.00",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("cosecha_registro"))
+        cosecha = Cosecha.objects.filter(finca=self.finca).first()
+        self.assertIsNotNone(cosecha)
+        self.assertEqual(cosecha.cantidad_total, Decimal("400.00"))
+        self.assertEqual(cosecha.cantidad_disponible, Decimal("400.00"))
+
+    def test_vista_registro_cosecha_post_cantidad_invalida_muestra_error(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.post(
+            self.url,
+            {
+                "finca": self.finca.pk,
+                "fecha_cosecha": "2026-08-01",
+                "cantidad_total": "0.00",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Cosecha.objects.filter(finca=self.finca).exists())
+        self.assertTrue(response.context["form"].errors)
+
+    def test_formulario_rechaza_finca_ajena_y_variedad_inactiva(self):
+        finca_ajena = Finca.objects.create(
+            nombre="Finca Ajena",
+            productor_id=uuid.uuid4(),
+            municipio=self.municipio,
+            activo=True,
+        )
+        variedad_inactiva = VariedadCafe.objects.create(
+            nombre="Variedad Inactiva",
+            activo=False,
+        )
+        form = CosechaRegistroForm(
+            data={
+                "finca": finca_ajena.pk,
+                "variedad": variedad_inactiva.pk,
+                "fecha_cosecha": "2026-08-01",
+                "cantidad_total": "100.00",
+            },
+            productor_id=self.productor_id,
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("finca", form.errors)
+        self.assertIn("variedad", form.errors)

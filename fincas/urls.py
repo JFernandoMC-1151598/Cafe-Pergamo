@@ -37,6 +37,9 @@ urlpatterns = [
     path('api/municipios/<int:pk>/inactivar/', views.api_municipio_toggle_activo_view, name='api_municipio_inactivar'),
     path('api/municipios/<int:pk>/toggle-activo/', views.api_municipio_toggle_activo_view, name='api_municipio_toggle_activo'),
 
+    # API REST de Cosechas (HU-12 / SCRUM-137)
+    path('api/cosechas/', views.api_crear_cosecha_view, name='api_cosecha_crear'),
+
     # API REST de Lotes (HU-13 / SCRUM-142)
     path('api/lotes/', views.api_crear_lote_view, name='api_lote_crear'),
 ]

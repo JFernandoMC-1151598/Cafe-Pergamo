@@ -12,6 +12,7 @@ Jira lo pedía todavía, pero sin él el formulario de lotes no se puede usar de
 a fin -- decisión acordada explícitamente con el equipo).
 """
 
+from decimal import Decimal
 from django import forms
 from django.db import models
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
@@ -457,9 +458,38 @@ class CosechaRegistroForm(forms.ModelForm):
         POST para mandar el id de una finca ajena, igual se rechaza acá.
         """
         finca = self.cleaned_data.get("finca")
-        if finca and str(finca.productor_id) != str(self._productor_id):
+        if finca and self._productor_id and str(finca.productor_id) != str(self._productor_id):
             raise forms.ValidationError("La finca seleccionada no pertenece a su cuenta de productor.")
+        if finca and not finca.activo:
+            raise forms.ValidationError("No se pueden registrar cosechas para una finca inactiva.")
         return finca
+
+    def clean_variedad(self):
+        """Validación de variedad contra el catálogo (SCRUM-140)."""
+        variedad = self.cleaned_data.get("variedad")
+        if variedad and not variedad.activo:
+            raise forms.ValidationError("La variedad de café seleccionada se encuentra inactiva en el catálogo.")
+        return variedad
+
+    def clean_cantidad_total(self):
+        """Validación de que la cantidad total sea mayor a cero (SCRUM-136, SCRUM-138)."""
+        cantidad = self.cleaned_data.get("cantidad_total")
+        if cantidad is not None and cantidad <= Decimal("0.00"):
+            raise forms.ValidationError("La cantidad total debe ser mayor a cero.")
+        return cantidad
+
+    def save(self, commit=True):
+        if not commit:
+            return super().save(commit=False)
+        from .services import crear_cosecha
+        cleaned = self.cleaned_data
+        return crear_cosecha(
+            finca_id=cleaned["finca"].pk,
+            fecha_cosecha=cleaned["fecha_cosecha"],
+            cantidad_total=cleaned["cantidad_total"],
+            variedad_id=cleaned["variedad"].pk if cleaned.get("variedad") else None,
+            productor_id=self._productor_id,
+        )
 
 
 class LoteRegistroForm(forms.Form):
