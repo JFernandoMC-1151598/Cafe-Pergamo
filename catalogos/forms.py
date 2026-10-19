@@ -2,7 +2,7 @@
 
 from django import forms
 
-from .models import VariedadCafe
+from .models import EstadoLote, ProcesoBeneficio, VariedadCafe
 
 
 class VariedadCafeForm(forms.ModelForm):
@@ -47,3 +47,43 @@ class VariedadCafeForm(forms.ModelForm):
 
     def clean_descripcion(self):
         return self.cleaned_data.get("descripcion", "").strip()
+
+
+class CatalogoTrazabilidadForm(forms.ModelForm):
+    """Formulario común para administrar los catálogos de trazabilidad."""
+
+    class Meta:
+        fields = ("codigo", "nombre", "descripcion", "orden")
+        widgets = {
+            "codigo": forms.TextInput(
+                attrs={"class": "form-control", "maxlength": 30}
+            ),
+            "nombre": forms.TextInput(
+                attrs={"class": "form-control", "maxlength": 100}
+            ),
+            "descripcion": forms.Textarea(
+                attrs={"class": "form-control", "rows": 3}
+            ),
+            "orden": forms.NumberInput(
+                attrs={"class": "form-control", "min": 0}
+            ),
+        }
+
+    def clean_codigo(self):
+        return self.cleaned_data["codigo"].strip().upper()
+
+    def clean_nombre(self):
+        return self.cleaned_data["nombre"].strip()
+
+    def clean_descripcion(self):
+        return self.cleaned_data.get("descripcion", "").strip()
+
+
+class ProcesoBeneficioForm(CatalogoTrazabilidadForm):
+    class Meta(CatalogoTrazabilidadForm.Meta):
+        model = ProcesoBeneficio
+
+
+class EstadoLoteForm(CatalogoTrazabilidadForm):
+    class Meta(CatalogoTrazabilidadForm.Meta):
+        model = EstadoLote

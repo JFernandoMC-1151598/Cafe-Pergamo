@@ -30,7 +30,7 @@ from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
-from catalogos.models import VariedadCafe
+from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from usuarios.models import Usuario
 from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
 
@@ -341,6 +341,24 @@ class Lote(models.Model):
         related_name="lotes",
         verbose_name="Cosecha de origen",
         help_text="Cosecha existente a partir de la cual se crea el lote.",
+    )
+
+    proceso_beneficio = models.ForeignKey(
+        ProcesoBeneficio,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="lotes",
+        verbose_name="Proceso de beneficio",
+    )
+
+    estado_lote = models.ForeignKey(
+        EstadoLote,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="lotes",
+        verbose_name="Estado del lote",
     )
 
     cantidad = models.DecimalField(

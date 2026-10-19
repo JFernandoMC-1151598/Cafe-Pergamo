@@ -40,6 +40,7 @@ from fincas.forms import (
 )
 from fincas.models import Cosecha, Finca, Lote, Municipio
 from fincas.services import crear_lote, generar_codigo_lote
+from catalogos.models import EstadoLote, ProcesoBeneficio
 from fincas.validators import (
     validar_latitud,
     validar_longitud,
@@ -3280,6 +3281,12 @@ class RegistrarLoteViewTests(TestCase):
         self.client = Client()
         self.url = reverse("lote_registro")
         self.municipio = Municipio.objects.create(codigo="TEST_LOTE_VIEW_MUN", nombre="Herrán (prueba)")
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO", nombre="Lavado", orden=1
+        )
+        self.estado = EstadoLote.objects.create(
+            codigo="RECIBIDO", nombre="Recibido", orden=1
+        )
 
     def _crear_finca_y_cosecha(self, productor_id, cantidad_total="300.00"):
         finca = Finca.objects.create(nombre="Finca con Cosecha", productor_id=productor_id, municipio=self.municipio)
@@ -3319,6 +3326,48 @@ class RegistrarLoteViewTests(TestCase):
         self.assertNotIn(cosecha_ajena, cosechas_en_form)
         self.assertNotIn(cosecha_sin_saldo, cosechas_en_form)
 
+    def test_formulario_solo_ofrece_catalogos_activos(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        self._crear_finca_y_cosecha(productor_id)
+        proceso_inactivo = ProcesoBeneficio.objects.create(
+            codigo="SECADO", nombre="Secado", activo=False, orden=2
+        )
+        estado_inactivo = EstadoLote.objects.create(
+            codigo="VENDIDO", nombre="Vendido", activo=False, orden=2
+        )
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self.proceso, response.context["form"].fields["proceso_beneficio"].queryset)
+        self.assertNotIn(
+            proceso_inactivo,
+            response.context["form"].fields["proceso_beneficio"].queryset,
+        )
+        self.assertIn(self.estado, response.context["form"].fields["estado_lote"].queryset)
+        self.assertNotIn(
+            estado_inactivo,
+            response.context["form"].fields["estado_lote"].queryset,
+        )
+
+    def test_post_rechaza_catalogo_inactivo_manipulado(self):
+        productor_id = _iniciar_sesion_productor(self.client)
+        _, cosecha = self._crear_finca_y_cosecha(productor_id)
+        proceso_inactivo = ProcesoBeneficio.objects.create(
+            codigo="SECADO", nombre="Secado", activo=False
+        )
+
+        response = self.client.post(self.url, {
+            "cosecha": cosecha.pk,
+            "proceso_beneficio": proceso_inactivo.pk,
+            "estado_lote": self.estado.pk,
+            "cantidad": "50.00",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Lote.objects.filter(cosecha=cosecha).exists())
+        self.assertIn("proceso_beneficio", response.context["form"].errors)
+
     def test_post_crea_lote_exitosamente_y_descuenta_saldo(self):
         """SCRUM-146 / HU013-ST5, a nivel de formulario web: flujo exitoso de registro con saldo actualizado."""
         productor_id = _iniciar_sesion_productor(self.client)
@@ -3326,6 +3375,8 @@ class RegistrarLoteViewTests(TestCase):
 
         response = self.client.post(self.url, {
             "cosecha": cosecha.pk,
+            "proceso_beneficio": self.proceso.pk,
+            "estado_lote": self.estado.pk,
             "codigo": "WEBLOTE01",
             "cantidad": "100.00",
         })
@@ -3343,7 +3394,12 @@ class RegistrarLoteViewTests(TestCase):
         productor_id = _iniciar_sesion_productor(self.client)
         _, cosecha = self._crear_finca_y_cosecha(productor_id)
 
-        response = self.client.post(self.url, {"cosecha": cosecha.pk, "cantidad": "50.00"})
+        response = self.client.post(self.url, {
+            "cosecha": cosecha.pk,
+            "proceso_beneficio": self.proceso.pk,
+            "estado_lote": self.estado.pk,
+            "cantidad": "50.00",
+        })
         self.assertEqual(response.status_code, 302)
 
         lote = Lote.objects.filter(cosecha=cosecha).first()

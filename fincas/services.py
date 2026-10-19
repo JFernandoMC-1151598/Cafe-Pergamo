@@ -13,6 +13,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from .models import Cosecha, Lote, Municipio
+from catalogos.models import EstadoLote, ProcesoBeneficio
 
 
 def generar_codigo_municipio_sugerido(nombre: str, departamento: str) -> str:
@@ -206,7 +207,14 @@ def generar_codigo_lote(cosecha: Cosecha) -> str:
     return codigo
 
 
-def crear_lote(*, cosecha_id, cantidad, codigo: Optional[str] = None) -> Lote:
+def crear_lote(
+    *,
+    cosecha_id,
+    cantidad,
+    codigo: Optional[str] = None,
+    proceso_beneficio_id=None,
+    estado_lote_id=None,
+) -> Lote:
     """
     Crea un lote de café a partir de una cosecha existente, descontando
     la cantidad del saldo disponible de la cosecha de forma
@@ -232,6 +240,26 @@ def crear_lote(*, cosecha_id, cantidad, codigo: Optional[str] = None) -> Lote:
         raise ValidationError({"cantidad": "La cantidad del lote debe ser un valor numérico."})
     if cantidad <= 0:
         raise ValidationError({"cantidad": "La cantidad del lote debe ser mayor a cero."})
+
+    proceso = None
+    if proceso_beneficio_id is not None:
+        proceso = ProcesoBeneficio.objects.filter(
+            pk=proceso_beneficio_id, activo=True
+        ).first()
+        if proceso is None:
+            raise ValidationError(
+                {"proceso_beneficio": "El proceso seleccionado no está activo o no existe."}
+            )
+
+    estado = None
+    if estado_lote_id is not None:
+        estado = EstadoLote.objects.filter(
+            pk=estado_lote_id, activo=True
+        ).first()
+        if estado is None:
+            raise ValidationError(
+                {"estado_lote": "El estado seleccionado no está activo o no existe."}
+            )
 
     with transaction.atomic():
         try:
@@ -273,6 +301,8 @@ def crear_lote(*, cosecha_id, cantidad, codigo: Optional[str] = None) -> Lote:
             codigo=codigo_final,
             cosecha=cosecha,
             cantidad=cantidad,
+            proceso_beneficio=proceso,
+            estado_lote=estado,
         )
 
         # SCRUM-146 / HU013-ST5: "Descontar o reflejar la cantidad utilizada

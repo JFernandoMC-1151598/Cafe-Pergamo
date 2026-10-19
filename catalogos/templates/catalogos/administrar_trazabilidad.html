@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% load rbac_tags %}
+
+{% block title %}Catálogos de trazabilidad - Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+    <div class="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3 mb-4">
+        <div>
+            <div class="d-flex align-items-center gap-2 mb-1">
+                <span class="badge bg-success-subtle text-success border border-success-subtle">
+                    <i class="bi bi-diagram-3 me-1"></i> Catálogos maestros
+                </span>
+            </div>
+            <h1 class="h3 fw-bold text-dark mb-1">Catálogos de trazabilidad</h1>
+            <p class="text-muted mb-0">
+                Configure los procesos de beneficio y los estados del ciclo de vida de los lotes.
+            </p>
+        </div>
+    </div>
+
+    <div class="row g-3 mb-4">
+        <div class="col-6 col-lg-3">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small">Procesos registrados</div>
+                    <div class="fs-3 fw-bold text-dark">{{ metricas.procesos_total }}</div>
+                    <div class="small text-success">{{ metricas.procesos_activos }} activos</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-6 col-lg-3">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small">Estados registrados</div>
+                    <div class="fs-3 fw-bold text-dark">{{ metricas.estados_total }}</div>
+                    <div class="small text-success">{{ metricas.estados_activos }} activos</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card border-0 shadow-sm bg-white">
+        <div class="card-header bg-white border-bottom-0 pt-3 px-3">
+            <ul class="nav nav-tabs card-header-tabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <a
+                        class="nav-link {% if pestana_activa == 'procesos' %}active{% endif %}"
+                        href="{% url 'administrar_trazabilidad' %}?pestana=procesos{% if estado_filtro %}&estado={{ estado_filtro }}{% endif %}"
+                    >
+                        <i class="bi bi-droplet-half me-1"></i> Procesos de beneficio
+                    </a>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <a
+                        class="nav-link {% if pestana_activa == 'estados' %}active{% endif %}"
+                        href="{% url 'administrar_trazabilidad' %}?pestana=estados{% if estado_filtro %}&estado={{ estado_filtro }}{% endif %}"
+                    >
+                        <i class="bi bi-box-seam me-1"></i> Estados del lote
+                    </a>
+                </li>
+            </ul>
+        </div>
+
+        <div class="card-body">
+            <div class="d-flex flex-column flex-md-row justify-content-between gap-3 mb-3">
+                <div>
+                    <h2 class="h5 mb-1">
+                        {% if pestana_activa == "procesos" %}Procesos de beneficio{% else %}Estados del lote{% endif %}
+                    </h2>
+                    <p class="text-muted small mb-0">Consulte los registros activos e inactivos del catálogo.</p>
+                </div>
+                {% with puede_administrar=rol_actual|tiene_permiso:"catalogos_maestros.administrar" %}
+                    {% if puede_administrar %}
+                        <div class="d-flex gap-2">
+                            <a href="{% if pestana_activa == 'procesos' %}{% url 'crear_proceso_beneficio' %}{% else %}{% url 'crear_estado_lote' %}{% endif %}" class="btn btn-pergamo btn-sm">
+                                <i class="bi bi-plus-circle me-1"></i> Nuevo
+                            </a>
+                        </div>
+                    {% endif %}
+                {% endwith %}
+            </div>
+
+            <form method="get" class="row g-2 align-items-end mb-3">
+                <input type="hidden" name="pestana" value="{{ pestana_activa }}">
+                <div class="col-auto">
+                    <label for="estadoCatalogo" class="form-label small text-muted mb-1">Estado</label>
+                    <select class="form-select form-select-sm" id="estadoCatalogo" name="estado" onchange="this.form.submit()">
+                        <option value="">Todos</option>
+                        <option value="activos" {% if estado_filtro == "activos" %}selected{% endif %}>Activos</option>
+                        <option value="inactivos" {% if estado_filtro == "inactivos" %}selected{% endif %}>Inactivos</option>
+                    </select>
+                </div>
+            </form>
+
+            {% with puede_administrar=rol_actual|tiene_permiso:"catalogos_maestros.administrar" %}
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Orden</th>
+                                <th>Código</th>
+                                <th>Nombre</th>
+                                <th>Descripción</th>
+                                <th>Estado</th>
+                                {% if puede_administrar %}<th>Acciones</th>{% endif %}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% if pestana_activa == "procesos" %}
+                                {% for item in procesos %}
+                                    <tr>
+                                        <td>{{ item.orden }}</td>
+                                        <td class="fw-semibold">{{ item.codigo }}</td>
+                                        <td>{{ item.nombre }}</td>
+                                        <td>{{ item.descripcion|default:"—" }}</td>
+                                        <td>
+                                            {% if item.activo %}
+                                                <span class="badge bg-success-subtle text-success border border-success-subtle">Activo</span>
+                                            {% else %}
+                                                <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">Inactivo</span>
+                                            {% endif %}
+                                        </td>
+                                        {% if puede_administrar %}
+                                            <td>
+                                                <a href="{% url 'editar_proceso_beneficio' item.id %}" class="btn btn-outline-pergamo btn-sm">
+                                                    <i class="bi bi-pencil-square me-1"></i> Editar
+                                                </a>
+                                                <form method="post" action="{% url 'alternar_proceso_beneficio' item.id %}" class="d-inline">
+                                                    {% csrf_token %}
+                                                    <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                                    {% if item.activo %}Inactivar{% else %}Activar{% endif %}
+                                                    </button>
+                                                </form>
+                                            </td>
+                                        {% endif %}
+                                    </tr>
+                                {% empty %}
+                                    <tr><td colspan="{% if puede_administrar %}6{% else %}5{% endif %}" class="text-center text-muted py-4">No hay procesos para el filtro seleccionado.</td></tr>
+                                {% endfor %}
+                            {% else %}
+                                {% for item in estados_lote %}
+                                    <tr>
+                                        <td>{{ item.orden }}</td>
+                                        <td class="fw-semibold">{{ item.codigo }}</td>
+                                        <td>{{ item.nombre }}</td>
+                                        <td>{{ item.descripcion|default:"—" }}</td>
+                                        <td>
+                                            {% if item.activo %}
+                                                <span class="badge bg-success-subtle text-success border border-success-subtle">Activo</span>
+                                            {% else %}
+                                                <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle">Inactivo</span>
+                                            {% endif %}
+                                        </td>
+                                        {% if puede_administrar %}
+                                            <td>
+                                                <a href="{% url 'editar_estado_lote' item.id %}" class="btn btn-outline-pergamo btn-sm">
+                                                    <i class="bi bi-pencil-square me-1"></i> Editar
+                                                </a>
+                                                <form method="post" action="{% url 'alternar_estado_lote' item.id %}" class="d-inline">
+                                                    {% csrf_token %}
+                                                    <button type="submit" class="btn btn-outline-secondary btn-sm">
+                                                    {% if item.activo %}Inactivar{% else %}Activar{% endif %}
+                                                    </button>
+                                                </form>
+                                            </td>
+                                        {% endif %}
+                                    </tr>
+                                {% empty %}
+                                    <tr><td colspan="{% if puede_administrar %}6{% else %}5{% endif %}" class="text-center text-muted py-4">No hay estados para el filtro seleccionado.</td></tr>
+                                {% endfor %}
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            {% endwith %}
+        </div>
+    </div>
+</div>
+{% endblock %}

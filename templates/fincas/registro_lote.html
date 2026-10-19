@@ -64,6 +64,27 @@
 
                         <div class="row g-3 mb-4">
                             <div class="col-md-6">
+                                <label for="id_proceso_beneficio" class="form-label fw-semibold text-dark">
+                                    Proceso de beneficio <span class="text-danger">*</span>
+                                </label>
+                                {{ form.proceso_beneficio }}
+                                {% if form.proceso_beneficio.errors %}
+                                <div class="small text-danger mt-1">{{ form.proceso_beneficio.errors|join:" " }}</div>
+                                {% endif %}
+                            </div>
+                            <div class="col-md-6">
+                                <label for="id_estado_lote" class="form-label fw-semibold text-dark">
+                                    Estado del lote <span class="text-danger">*</span>
+                                </label>
+                                {{ form.estado_lote }}
+                                {% if form.estado_lote.errors %}
+                                <div class="small text-danger mt-1">{{ form.estado_lote.errors|join:" " }}</div>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="row g-3 mb-4">
+                            <div class="col-md-6">
                                 <label for="id_codigo" class="form-label fw-semibold text-dark">
                                     Código del lote <span class="badge bg-secondary-subtle text-secondary small fw-normal">Opcional</span>
                                 </label>

@@ -1,13 +1,340 @@
 """Vistas del catálogo maestro de variedades de café (HU10)."""
 
 from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from rest_framework import status
+from rest_framework.decorators import (
+    api_view,
+    authentication_classes,
+    permission_classes,
+)
+from rest_framework.authentication import SessionAuthentication
+from rest_framework.response import Response
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from usuarios.permissions import permiso_requerido_sesion
 
-from .forms import VariedadCafeForm
-from .models import VariedadCafe
+from .forms import (
+    EstadoLoteForm,
+    ProcesoBeneficioForm,
+    VariedadCafeForm,
+)
+from .models import EstadoLote, ProcesoBeneficio, VariedadCafe
+from .api_permissions import CatalogosTrazabilidadPermission
+from .audit import registrar_cambio_catalogo, snapshot_catalogo
+from .serializers import EstadoLoteSerializer, ProcesoBeneficioSerializer
+
+
+@api_view(["GET", "POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_procesos_beneficio_view(request: HttpRequest) -> Response:
+    """Lista o crea procesos de beneficio."""
+    if request.method == "GET":
+        queryset = ProcesoBeneficio.objects.all()
+        activo = request.query_params.get("activo")
+        if activo in {"true", "1"}:
+            queryset = queryset.filter(activo=True)
+        elif activo in {"false", "0"}:
+            queryset = queryset.filter(activo=False)
+        return Response(ProcesoBeneficioSerializer(queryset, many=True).data)
+
+    serializer = ProcesoBeneficioSerializer(data=request.data)
+    if serializer.is_valid():
+        proceso = serializer.save()
+        registrar_cambio_catalogo(request, proceso, "CREAR")
+        return Response(
+            ProcesoBeneficioSerializer(proceso).data,
+            status=status.HTTP_201_CREATED,
+        )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["GET", "PUT", "PATCH"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_proceso_beneficio_detalle_view(
+    request: HttpRequest,
+    pk: int,
+) -> Response:
+    """Consulta o actualiza un proceso de beneficio."""
+    proceso = get_object_or_404(ProcesoBeneficio, pk=pk)
+    if request.method == "GET":
+        return Response(ProcesoBeneficioSerializer(proceso).data)
+
+    serializer = ProcesoBeneficioSerializer(
+        proceso,
+        data=request.data,
+        partial=request.method == "PATCH",
+    )
+    if serializer.is_valid():
+        valores_anteriores = snapshot_catalogo(proceso)
+        proceso = serializer.save()
+        registrar_cambio_catalogo(
+            request,
+            proceso,
+            "EDITAR",
+            valores_anteriores,
+        )
+        return Response(ProcesoBeneficioSerializer(proceso).data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_proceso_beneficio_toggle_view(request: HttpRequest, pk: int) -> Response:
+    """Activa o inactiva un proceso sin eliminarlo."""
+    proceso = get_object_or_404(ProcesoBeneficio, pk=pk)
+    valores_anteriores = snapshot_catalogo(proceso)
+    proceso.activo = not proceso.activo
+    try:
+        proceso.save(update_fields=["activo", "actualizado_en"])
+    except ValidationError as exc:
+        return Response(
+            exc.message_dict,
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    registrar_cambio_catalogo(
+        request,
+        proceso,
+        "ACTIVAR" if proceso.activo else "INACTIVAR",
+        valores_anteriores,
+    )
+    return Response(ProcesoBeneficioSerializer(proceso).data)
+
+
+@api_view(["GET", "POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_estados_lote_view(request: HttpRequest) -> Response:
+    """Lista o crea estados del lote."""
+    if request.method == "GET":
+        queryset = EstadoLote.objects.all()
+        activo = request.query_params.get("activo")
+        if activo in {"true", "1"}:
+            queryset = queryset.filter(activo=True)
+        elif activo in {"false", "0"}:
+            queryset = queryset.filter(activo=False)
+        return Response(EstadoLoteSerializer(queryset, many=True).data)
+
+    serializer = EstadoLoteSerializer(data=request.data)
+    if serializer.is_valid():
+        estado = serializer.save()
+        registrar_cambio_catalogo(request, estado, "CREAR")
+        return Response(
+            EstadoLoteSerializer(estado).data,
+            status=status.HTTP_201_CREATED,
+        )
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["GET", "PUT", "PATCH"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_estado_lote_detalle_view(request: HttpRequest, pk: int) -> Response:
+    """Consulta o actualiza un estado del lote."""
+    estado = get_object_or_404(EstadoLote, pk=pk)
+    if request.method == "GET":
+        return Response(EstadoLoteSerializer(estado).data)
+
+    serializer = EstadoLoteSerializer(
+        estado,
+        data=request.data,
+        partial=request.method == "PATCH",
+    )
+    if serializer.is_valid():
+        valores_anteriores = snapshot_catalogo(estado)
+        estado = serializer.save()
+        registrar_cambio_catalogo(
+            request,
+            estado,
+            "EDITAR",
+            valores_anteriores,
+        )
+        return Response(EstadoLoteSerializer(estado).data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([CatalogosTrazabilidadPermission])
+def api_estado_lote_toggle_view(request: HttpRequest, pk: int) -> Response:
+    """Activa o inactiva un estado sin eliminarlo."""
+    estado = get_object_or_404(EstadoLote, pk=pk)
+    valores_anteriores = snapshot_catalogo(estado)
+    estado.activo = not estado.activo
+    try:
+        estado.save(update_fields=["activo", "actualizado_en"])
+    except ValidationError as exc:
+        return Response(
+            exc.message_dict,
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    registrar_cambio_catalogo(
+        request,
+        estado,
+        "ACTIVAR" if estado.activo else "INACTIVAR",
+        valores_anteriores,
+    )
+    return Response(EstadoLoteSerializer(estado).data)
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.consultar",
+    forbidden_on_denied=True,
+)
+def administrar_trazabilidad_view(request: HttpRequest) -> HttpResponse:
+    """Muestra los catálogos de procesos y estados en pestañas independientes."""
+    pestaña = request.GET.get("pestana", "procesos").strip().lower()
+    if pestaña not in {"procesos", "estados"}:
+        pestaña = "procesos"
+
+    estado = request.GET.get("estado", "").strip().lower()
+    filtros_estado = {
+        "activos": True,
+        "inactivos": False,
+    }
+
+    procesos = ProcesoBeneficio.objects.all()
+    estados = EstadoLote.objects.all()
+    if estado in filtros_estado:
+        if pestaña == "procesos":
+            procesos = procesos.filter(activo=filtros_estado[estado])
+        else:
+            estados = estados.filter(activo=filtros_estado[estado])
+    else:
+        estado = ""
+
+    return render(
+        request,
+        "catalogos/administrar_trazabilidad.html",
+        {
+            "procesos": procesos,
+            "estados_lote": estados,
+            "pestana_activa": pestaña,
+            "estado_filtro": estado,
+            "metricas": {
+                "procesos_total": ProcesoBeneficio.objects.count(),
+                "procesos_activos": ProcesoBeneficio.objects.filter(
+                    activo=True
+                ).count(),
+                "estados_total": EstadoLote.objects.count(),
+                "estados_activos": EstadoLote.objects.filter(
+                    activo=True
+                ).count(),
+            },
+        },
+    )
+
+
+def _guardar_catalogo_view(request, form_class, instance=None):
+    if request.method == "POST":
+        form = form_class(request.POST, instance=instance)
+        if form.is_valid():
+            valores_anteriores = (
+                snapshot_catalogo(instance) if instance else None
+            )
+            proceso = form.save()
+            registrar_cambio_catalogo(
+                request,
+                proceso,
+                "EDITAR" if instance else "CREAR",
+                valores_anteriores,
+            )
+            messages.success(request, "El registro se guardó correctamente.")
+            return redirect("administrar_trazabilidad")
+        messages.error(request, "Revise los errores del formulario.")
+    else:
+        form = form_class(instance=instance)
+
+    return render(
+        request,
+        "catalogos/formulario_trazabilidad.html",
+        {"form": form, "modo_edicion": instance is not None},
+    )
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def crear_proceso_beneficio_view(request: HttpRequest) -> HttpResponse:
+    return _guardar_catalogo_view(request, ProcesoBeneficioForm)
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def editar_proceso_beneficio_view(
+    request: HttpRequest,
+    pk: int,
+) -> HttpResponse:
+    proceso = get_object_or_404(ProcesoBeneficio, pk=pk)
+    return _guardar_catalogo_view(request, ProcesoBeneficioForm, proceso)
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def crear_estado_lote_view(request: HttpRequest) -> HttpResponse:
+    return _guardar_catalogo_view(request, EstadoLoteForm)
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def editar_estado_lote_view(request: HttpRequest, pk: int) -> HttpResponse:
+    estado = get_object_or_404(EstadoLote, pk=pk)
+    return _guardar_catalogo_view(request, EstadoLoteForm, estado)
+
+
+def _alternar_catalogo_view(request, instance):
+    if request.method != "POST":
+        return redirect("administrar_trazabilidad")
+
+    instance.activo = not instance.activo
+    valores_anteriores = snapshot_catalogo(instance)
+    try:
+        instance.save(update_fields=["activo", "actualizado_en"])
+    except ValidationError as exc:
+        messages.error(request, exc.messages[0])
+    else:
+        registrar_cambio_catalogo(
+            request,
+            instance,
+            "ACTIVAR" if instance.activo else "INACTIVAR",
+            valores_anteriores,
+        )
+        messages.success(request, "El estado del registro se actualizó.")
+    return redirect("administrar_trazabilidad")
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def alternar_proceso_beneficio_view(request: HttpRequest, pk: int) -> HttpResponse:
+    return _alternar_catalogo_view(
+        request,
+        get_object_or_404(ProcesoBeneficio, pk=pk),
+    )
+
+
+@permiso_requerido_sesion(
+    "catalogos_maestros.administrar",
+    forbidden_on_denied=True,
+)
+def alternar_estado_lote_view(request: HttpRequest, pk: int) -> HttpResponse:
+    return _alternar_catalogo_view(
+        request,
+        get_object_or_404(EstadoLote, pk=pk),
+    )
 
 
 @permiso_requerido_sesion(

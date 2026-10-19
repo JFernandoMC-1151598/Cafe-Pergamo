@@ -238,6 +238,8 @@ class LoteSerializer(serializers.ModelSerializer):
             "cantidad",
             "cantidad_disponible_cosecha",
             "activo",
+            "proceso_beneficio",
+            "estado_lote",
             "creado_en",
         ]
         read_only_fields = fields
