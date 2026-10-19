@@ -20,7 +20,7 @@
 
             <!-- Contenedor del Formulario -->
             <div class="auth-body">
-                <div class="text-center mb-4">
+                <div class="text-center mb-3">
                     <h2 class="h4 fw-bold text-dark mb-1">Registro de Usuario</h2>
                     <p class="text-muted small">Diligencie los campos requeridos para crear su cuenta</p>
                 </div>
@@ -38,23 +38,27 @@
                 <!-- Alerta general de error (JavaScript) -->
                 <div id="general-alert" class="alert alert-danger d-none" role="alert">
                     <i class="bi bi-exclamation-triangle-fill me-2"></i>
-                    <span id="general-alert-message">Por favor, revise los errores en el formulario antes de continuar.</span>
+                    <span id="general-alert-message">Por favor, revise los errores en el formulario antes de
+                        continuar.</span>
                 </div>
 
                 <!-- Formulario de Registro -->
-                <form id="registroForm" action="" method="POST" data-api-url="{% url 'api_registro' %}" data-login-url="{% url 'login' %}" novalidate>
+                <form id="registroForm" action="" method="POST" data-api-url="{% url 'api_registro' %}"
+                    data-login-url="{% url 'login' %}" novalidate>
                     {% csrf_token %}
 
                     <!-- Nombres y Apellidos -->
                     <div class="row g-3 mb-3">
                         <div class="col-md-6">
-                            <label for="first_name" class="form-label">Nombres <span class="text-danger">*</span></label>
+                            <label for="first_name" class="form-label">Nombres <span
+                                    class="text-danger">*</span></label>
                             <input type="text" class="form-control" id="first_name" name="first_name"
                                 placeholder="Ej. Carlos Alberto" required>
                             <div class="invalid-feedback">El nombre es obligatorio.</div>
                         </div>
                         <div class="col-md-6">
-                            <label for="last_name" class="form-label">Apellidos <span class="text-danger">*</span></label>
+                            <label for="last_name" class="form-label">Apellidos <span
+                                    class="text-danger">*</span></label>
                             <input type="text" class="form-control" id="last_name" name="last_name"
                                 placeholder="Ej. Gómez Pérez" required>
                             <div class="invalid-feedback">El apellido es obligatorio.</div>
@@ -68,7 +72,8 @@
                                     class="text-danger">*</span></label>
                             <input type="email" class="form-control" id="email" name="email"
                                 placeholder="nombre@ejemplo.com" required>
-                            <div class="invalid-feedback" id="email-feedback">Ingrese un correo electrónico válido.</div>
+                            <div class="invalid-feedback" id="email-feedback">Ingrese un correo electrónico válido.
+                            </div>
                         </div>
                         <div class="col-md-6">
                             <label for="phone" class="form-label">Teléfono / Celular <span
@@ -82,7 +87,8 @@
                     <!-- Tipo y Numero de Documento -->
                     <div class="row g-3 mb-3">
                         <div class="col-md-5">
-                            <label for="tipo_documento" class="form-label">Tipo de Documento <span class="text-danger">*</span></label>
+                            <label for="tipo_documento" class="form-label">Tipo de Documento <span
+                                    class="text-danger">*</span></label>
                             <select class="form-select" id="tipo_documento" name="tipo_documento" required>
                                 <option value="" selected disabled>Seleccione...</option>
                                 <option value="CC">Cédula de Ciudadanía</option>
@@ -94,30 +100,41 @@
                             <div class="invalid-feedback">Seleccione un tipo de documento.</div>
                         </div>
                         <div class="col-md-7">
-                            <label for="numero_documento" class="form-label">Número de Documento <span class="text-danger">*</span></label>
+                            <label for="numero_documento" class="form-label">Número de Documento <span
+                                    class="text-danger">*</span></label>
                             <input type="text" class="form-control" id="numero_documento" name="numero_documento"
                                 placeholder="Ej. 1091234567" required>
-                            <div class="invalid-feedback" id="numero-documento-feedback">El número de documento es obligatorio.</div>
+                            <div class="invalid-feedback" id="numero-documento-feedback">El número de documento es
+                                obligatorio.</div>
                         </div>
                     </div>
 
                     <!-- Rol -->
                     <div class="mb-3">
-                        <label for="role" class="form-label">Rol en Café Pérgamo <span class="text-danger">*</span></label>
+                        <label for="role" class="form-label">Rol en Café Pérgamo <span
+                                class="text-danger">*</span></label>
                         <select class="form-select" id="role" name="role" required>
                             <option value="" selected disabled>Seleccione un tipo de actor...</option>
                             <option value="PRODUCTOR">Productor / Comercializador</option>
                             <option value="COMPRADOR">Comprador</option>
                         </select>
                         <div class="invalid-feedback">Por favor, seleccione un rol de la lista.</div>
+                        <!-- Información contextual al seleccionar Productor -->
+                        <div id="productor-info"
+                            class="alert alert-info py-2 px-3 mt-2 border-0 bg-info-subtle text-info-emphasis rounded-3 small d-none">
+                            <i class="bi bi-info-circle-fill me-1"></i>
+                            <strong>Cuenta de Productor Cafetero:</strong> Podrá registrar sus fincas, georreferenciar
+                            predios y gestionar sus lotes y cosechas de café.
+                        </div>
                     </div>
 
                     <!-- Contraseña y Confirmar Contraseña -->
                     <div class="row g-3 mb-4">
                         <div class="col-md-6">
-                            <label for="password" class="form-label">Contraseña <span class="text-danger">*</span></label>
-                            <input type="password" class="form-control" id="password" name="password" placeholder="••••••••"
-                                required>
+                            <label for="password" class="form-label">Contraseña <span
+                                    class="text-danger">*</span></label>
+                            <input type="password" class="form-control" id="password" name="password"
+                                placeholder="••••••••" required>
                             <div class="invalid-feedback">La contraseña es obligatoria.</div>
                         </div>
                         <div class="col-md-6">
@@ -125,7 +142,8 @@
                                     class="text-danger">*</span></label>
                             <input type="password" class="form-control" id="confirm_password" name="confirm_password"
                                 placeholder="••••••••" required>
-                            <div class="invalid-feedback" id="confirm-password-feedback">Las contraseñas no coinciden.</div>
+                            <div class="invalid-feedback" id="confirm-password-feedback">Las contraseñas no coinciden.
+                            </div>
                         </div>
                     </div>
 
