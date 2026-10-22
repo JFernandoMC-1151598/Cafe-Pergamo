@@ -4,6 +4,8 @@ Subtarea: SCRUM-87 / HU06-ST1: Definir modelo de datos para fincas y relación c
 Subtarea: SCRUM-98 / HU07-ST5: Actualizar el modelo o esquema de datos para georreferenciación.
 Subtarea: SCRUM-97: Validar formato de coordenadas.
 Subtarea: SCRUM-141 / HU13-ST1: Definir modelo de datos y relación Cosecha-Lote.
+Subtarea: SCRUM-157 / HU15-ST5: Diseñar el modelo de datos para características
+físicas y de calidad del lote.
 
 Cubre:
 - RF06: registrar fincas asociadas a cada productor (perfil usuarios.Usuario).
@@ -400,3 +402,85 @@ class Lote(models.Model):
 
     def __str__(self):
         return f"Lote {self.codigo} ({self.cantidad} kg) de {self.cosecha}"
+
+
+class CaracteristicasCalidad(models.Model):
+    """
+    Características físicas y sensoriales asociadas a un lote (HU15-ST5).
+
+    Un lote puede tener como máximo un registro de calidad. Los campos
+    numéricos son opcionales para permitir que la captura se complete por
+    etapas; sus rangos básicos se aplican desde el modelo.
+    """
+
+    lote = models.OneToOneField(
+        Lote,
+        on_delete=models.CASCADE,
+        related_name="caracteristicas_calidad",
+        verbose_name="Lote",
+        help_text="Lote al que pertenece esta evaluación de calidad.",
+    )
+
+    humedad = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+        verbose_name="Humedad (%)",
+        help_text="Porcentaje de humedad del café.",
+    )
+
+    merma = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+        verbose_name="Merma (%)",
+        help_text="Porcentaje de merma identificado en el lote.",
+    )
+
+    puntaje_taza = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+        verbose_name="Puntaje en taza",
+        help_text="Puntaje sensorial de taza en una escala de 0 a 100.",
+    )
+
+    perfil_sensorial = models.TextField(
+        blank=True,
+        verbose_name="Perfil sensorial",
+        help_text="Descripción de las notas y atributos sensoriales del lote.",
+    )
+
+    observaciones = models.TextField(
+        blank=True,
+        verbose_name="Observaciones",
+        help_text="Observaciones adicionales de la evaluación de calidad.",
+    )
+
+    creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de registro")
+    actualizado_en = models.DateTimeField(auto_now=True, verbose_name="Última actualización")
+
+    class Meta:
+        managed = True
+        db_table = "caracteristicas_calidad"
+        verbose_name = "Característica de calidad"
+        verbose_name_plural = "Características de calidad"
+        ordering = ["-actualizado_en"]
+
+    def __str__(self):
+        return f"Calidad del lote {self.lote.codigo}"

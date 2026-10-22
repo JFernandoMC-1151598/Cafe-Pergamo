@@ -5,7 +5,7 @@ Subtarea: SCRUM-98 / HU07-ST5 (Georreferenciación).
 """
 
 from django.contrib import admin
-from .models import Cosecha, Finca, Lote, Municipio
+from .models import CaracteristicasCalidad, Cosecha, Finca, Lote, Municipio
 
 
 @admin.register(Municipio)
@@ -62,3 +62,11 @@ class LoteAdmin(admin.ModelAdmin):
     search_fields = ("codigo", "cosecha__finca__nombre")
     ordering = ("-creado_en",)
     readonly_fields = ("creado_en",)
+
+
+@admin.register(CaracteristicasCalidad)
+class CaracteristicasCalidadAdmin(admin.ModelAdmin):
+    list_display = ("lote", "humedad", "merma", "puntaje_taza", "actualizado_en")
+    search_fields = ("lote__codigo",)
+    ordering = ("-actualizado_en",)
+    readonly_fields = ("creado_en", "actualizado_en")
