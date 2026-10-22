@@ -39,7 +39,13 @@ from fincas.forms import (
     MunicipioForm,
 )
 from fincas.models import Cosecha, Finca, Lote, Municipio
-from fincas.services import crear_cosecha, crear_lote, generar_codigo_lote
+from fincas.services import (
+    crear_cosecha,
+    crear_lote,
+    generar_codigo_lote,
+    obtener_ficha_consolidada_lote,
+)
+from fincas.serializers import FichaDigitalSerializer
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from fincas.validators import (
     validar_latitud,
@@ -3958,3 +3964,201 @@ class CosechaWebFormViewTests(TestCase):
         self.assertFalse(form.is_valid())
         self.assertIn("finca", form.errors)
         self.assertIn("variedad", form.errors)
+
+
+# =============================================================================
+# SUITE HU-17 (SCRUM-169 / SCRUM-170): ESTRUCTURA Y CONSOLIDACIÓN DE FICHA DIGITAL
+# =============================================================================
+
+
+class FichaDigitalStructureTests(TestCase):
+    """
+    Pruebas unitarias para HU17-ST4 (SCRUM-169): Definir la estructura y campos de la ficha digital.
+    Verifica el contrato de datos formal, la lógica de consolidación y el criterio de aceptación
+    de actualización automática en tiempo real.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-ARB-TEST",
+                nombre="Arboledas",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca La Esperanza",
+            vereda="El Helechal",
+            municipio=self.municipio,
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.865432"),
+            longitud=Decimal("-72.765432"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Castillo Típico",
+            defaults={
+                "especie": "Arábica",
+                "descripcion": "Variedad de alta resistencia y perfil cítrico.",
+                "activo": True,
+            },
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-15",
+            cantidad_total=Decimal("800.00"),
+            cantidad_disponible=Decimal("600.00"),
+            activo=True,
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={
+                "nombre": "Lavado Tradicional",
+                "descripcion": "Fermentación en tanque y lavado con agua de manantial.",
+                "activo": True,
+            },
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={
+                "nombre": "Disponible para Venta",
+                "descripcion": "Lote apto para comercialización.",
+                "activo": True,
+            },
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-ESP-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("200.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_estructura_campos_ficha_digital_completa(self):
+        """
+        SCRUM-169: Verifica que la ficha digital generada contenga todas las secciones,
+        campos y estructuras esperadas por el contrato de datos FichaDigitalSerializer.
+        """
+        ficha = obtener_ficha_consolidada_lote(self.lote)
+
+        # 1. Campos del Lote
+        self.assertEqual(ficha["id"], self.lote.id)
+        self.assertEqual(ficha["codigo"], "LOTE-ESP-001")
+        self.assertEqual(ficha["cantidad_kg"], Decimal("200.00"))
+        self.assertTrue(ficha["activo"])
+        self.assertIsNotNone(ficha["creado_en"])
+
+        # 2. Sección Productor
+        self.assertIn("productor", ficha)
+        self.assertEqual(ficha["productor"]["id"], str(self.productor_uuid))
+        self.assertIn("nombre_completo", ficha["productor"])
+
+        # 3. Sección Finca y Georreferenciación
+        self.assertIn("finca", ficha)
+        self.assertEqual(ficha["finca"]["nombre"], "Finca La Esperanza")
+        self.assertEqual(ficha["finca"]["municipio"], "Arboledas")
+        self.assertEqual(ficha["finca"]["departamento"], "Norte de Santander")
+        self.assertEqual(ficha["finca"]["latitud"], Decimal("7.865432"))
+        self.assertEqual(ficha["finca"]["longitud"], Decimal("-72.765432"))
+        self.assertTrue(ficha["finca"]["tiene_georreferenciacion"])
+
+        # 4. Sección Cosecha
+        self.assertIn("cosecha", ficha)
+        self.assertEqual(ficha["cosecha"]["cantidad_total_cosecha"], Decimal("800.00"))
+
+        # 5. Sección Variedad Botánica
+        self.assertIn("variedad", ficha)
+        self.assertEqual(ficha["variedad"]["nombre"], "Castillo Típico")
+        self.assertEqual(ficha["variedad"]["especie"], "Arábica")
+
+        # 6. Sección Proceso de Beneficio
+        self.assertIn("proceso_beneficio", ficha)
+        self.assertEqual(ficha["proceso_beneficio"]["codigo"], "LAVADO")
+        self.assertEqual(ficha["proceso_beneficio"]["nombre"], "Lavado Tradicional")
+
+        # 7. Sección Estado de Trazabilidad y Comercial
+        self.assertIn("estado_lote", ficha)
+        self.assertEqual(ficha["estado_lote"]["codigo"], "DISPONIBLE")
+        self.assertEqual(ficha["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha["disponible_para_venta"])
+
+        # 8. Metadatos de URL pública y porcentaje de completitud
+        self.assertEqual(ficha["url_publica"], "/trazabilidad/lote/LOTE-ESP-001/")
+        self.assertGreaterEqual(ficha["completitud_porcentaje"], 65)
+
+        # 9. Validación formal con FichaDigitalSerializer
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(
+            serializer.is_valid(),
+            f"El serializador de la ficha digital falló la validación: {serializer.errors}",
+        )
+
+    def test_obtener_ficha_por_codigo_y_por_pk(self):
+        """Verifica que el servicio resuelva el lote indistintamente por instancia, código o PK."""
+        ficha_por_instancia = obtener_ficha_consolidada_lote(self.lote)
+        ficha_por_codigo = obtener_ficha_consolidada_lote("LOTE-ESP-001")
+        ficha_por_pk = obtener_ficha_consolidada_lote(self.lote.pk)
+
+        self.assertEqual(ficha_por_instancia["codigo"], ficha_por_codigo["codigo"])
+        self.assertEqual(ficha_por_codigo["codigo"], ficha_por_pk["codigo"])
+
+    def test_actualizacion_automatica_en_tiempo_real(self):
+        """
+        Criterio de aceptación HU-17:
+        'La ficha se actualiza automáticamente al registrarse nueva información del lote'.
+        Al mutar datos del lote o cosecha en la BD, la siguiente consulta refleja los cambios al instante.
+        """
+        # Consulta inicial
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_inicial["cantidad_kg"], Decimal("200.00"))
+
+        # Mutación de información
+        self.lote.cantidad = Decimal("350.00")
+        self.lote.save(update_fields=["cantidad"])
+
+        # Consulta inmediata posterior
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_actualizada["cantidad_kg"], Decimal("350.00"))
+
+    def test_ficha_lote_con_datos_parciales(self):
+        """Verifica que un lote sin georreferenciación ni proceso asignado genere una ficha válida."""
+        finca_sin_coords = Finca.objects.create(
+            nombre="Finca Sin GPS",
+            municipio=self.municipio,
+            productor_id=uuid.uuid4(),
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        cosecha_sin_var = Cosecha.objects.create(
+            finca=finca_sin_coords,
+            fecha_cosecha="2026-10-01",
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+            activo=True,
+        )
+        lote_basico = Lote.objects.create(
+            codigo="LOTE-BASICO-99",
+            cosecha=cosecha_sin_var,
+            cantidad=Decimal("50.00"),
+            proceso_beneficio=None,
+            estado_lote=None,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote_basico)
+        self.assertFalse(ficha["finca"]["tiene_georreferenciacion"])
+        self.assertIsNone(ficha["finca"]["latitud"])
+        self.assertIsNone(ficha["proceso_beneficio"]["id"])
+
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(serializer.is_valid(), f"Errores en ficha parcial: {serializer.errors}")
+
+    def test_lote_inexistente_lanza_validation_error(self):
+        """Verifica que solicitar un lote inexistente arroje ValidationError amigable."""
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote("LOTE-NO-EXISTE-XYZ")

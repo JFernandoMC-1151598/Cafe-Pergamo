@@ -7,7 +7,7 @@ Subtarea: SCRUM-146 / HU013-ST5: Actualizar trazabilidad de la cosecha al crear 
 """
 
 from decimal import Decimal
-from typing import Optional
+from typing import Any, Dict, List, Optional, Union
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -391,3 +391,205 @@ def crear_lote(
         cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
 
     return lote
+
+
+# =============================================================================
+# SERVICIO DE CONSOLIDACIÓN DE FICHA DIGITAL POR LOTE (HU-17 / SCRUM-170 / SCRUM-169)
+# =============================================================================
+
+def obtener_ficha_consolidada_lote(lote_identificador: Union[Lote, int, str]) -> Dict[str, Any]:
+    """
+    Consolida en tiempo real toda la trazabilidad y datos de origen de un Lote de café.
+    (HU-17 / SCRUM-169 y SCRUM-170).
+
+    Criterio de aceptación:
+    La ficha se genera y actualiza automáticamente al consultar la base de datos relacional,
+    garantizando que cualquier mutación previa (en finca, cosecha, estado o beneficio)
+    se refleje al instante.
+
+    Parámetros:
+    - lote_identificador: Instancia de Lote, id numérico (PK) o código alfanumérico (ej: 'LOTE-001').
+
+    Retorna:
+    - Diccionario con la estructura requerida por `FichaDigitalSerializer`.
+    """
+    if isinstance(lote_identificador, Lote):
+        lote = lote_identificador
+        # Si no están cargadas las relaciones, aseguramos la consulta optimizada
+        if not hasattr(lote, "_cosecha_cache"):
+            lote = (
+                Lote.objects.select_related(
+                    "cosecha__finca__municipio",
+                    "cosecha__variedad",
+                    "proceso_beneficio",
+                    "estado_lote",
+                ).get(pk=lote.pk)
+            )
+    elif isinstance(lote_identificador, int) or (isinstance(lote_identificador, str) and lote_identificador.isdigit()):
+        try:
+            lote = (
+                Lote.objects.select_related(
+                    "cosecha__finca__municipio",
+                    "cosecha__variedad",
+                    "proceso_beneficio",
+                    "estado_lote",
+                ).get(pk=int(lote_identificador))
+            )
+        except Lote.DoesNotExist:
+            raise ValidationError({"lote": f"No se encontró ningún lote con el ID '{lote_identificador}'."})
+    elif isinstance(lote_identificador, str):
+        codigo_limpio = lote_identificador.strip().upper()
+        try:
+            lote = (
+                Lote.objects.select_related(
+                    "cosecha__finca__municipio",
+                    "cosecha__variedad",
+                    "proceso_beneficio",
+                    "estado_lote",
+                ).get(codigo__iexact=codigo_limpio)
+            )
+        except Lote.DoesNotExist:
+            raise ValidationError({"lote": f"No se encontró ningún lote con el código '{codigo_limpio}'."})
+    else:
+        raise ValidationError({"lote": "Identificador de lote no válido."})
+
+    cosecha = lote.cosecha
+    finca = cosecha.finca
+    municipio = finca.municipio
+    variedad = cosecha.variedad
+    proceso = lote.proceso_beneficio
+    estado = lote.estado_lote
+
+    # 1. Extracción segura del Productor
+    productor_info = {
+        "id": str(finca.productor_id) if finca.productor_id else None,
+        "nombre_completo": "Productor de Café",
+        "correo": None,
+        "telefono": None,
+        "tipo_documento": None,
+        "numero_documento": None,
+    }
+    try:
+        p = finca.productor
+        if p:
+            nombres = getattr(p, "nombres", "") or ""
+            apellidos = getattr(p, "apellidos", "") or ""
+            nombre_str = f"{nombres} {apellidos}".strip()
+            productor_info["nombre_completo"] = nombre_str or getattr(p, "correo", "Productor Registrado")
+            productor_info["correo"] = getattr(p, "correo", None)
+            productor_info["telefono"] = getattr(p, "telefono", None)
+            productor_info["numero_documento"] = getattr(p, "numero_documento", None)
+            tipo_doc = getattr(p, "tipo_documento", None)
+            productor_info["tipo_documento"] = getattr(tipo_doc, "codigo", None) if tipo_doc else None
+    except Exception:
+        # En caso de entornos de prueba donde el modelo Usuario (managed=False) no esté presente en la BD local
+        pass
+
+    # 2. Extracción de Finca y Georreferenciación
+    finca_info = {
+        "id": finca.id,
+        "nombre": finca.nombre,
+        "vereda": finca.vereda or "",
+        "municipio": municipio.nombre if municipio else "No asignado",
+        "departamento": municipio.departamento if municipio else "Norte de Santander",
+        "latitud": finca.latitud,
+        "longitud": finca.longitud,
+        "tiene_georreferenciacion": finca.tiene_georreferenciacion,
+    }
+
+    # 3. Extracción de Cosecha
+    cosecha_info = {
+        "id": cosecha.id,
+        "fecha_cosecha": cosecha.fecha_cosecha,
+        "cantidad_total_cosecha": cosecha.cantidad_total,
+        "cantidad_disponible_cosecha": cosecha.cantidad_disponible,
+    }
+
+    # 4. Extracción de Variedad Botánica
+    variedad_info = {
+        "id": variedad.id if variedad else None,
+        "nombre": variedad.nombre if variedad else "Mezcla tradicional / No especificada",
+        "especie": variedad.especie if variedad else "Arábica",
+        "descripcion": variedad.descripcion if variedad else "",
+    }
+
+    # 5. Extracción de Proceso de Beneficio
+    proceso_info = {
+        "id": proceso.id if proceso else None,
+        "codigo": proceso.codigo if proceso else None,
+        "nombre": proceso.nombre if proceso else "Sin proceso asignado",
+        "descripcion": proceso.descripcion if proceso else "",
+    }
+
+    # 6. Extracción de Estado del Lote
+    estado_info = {
+        "id": estado.id if estado else None,
+        "codigo": estado.codigo if estado else "REGISTRADO",
+        "nombre": estado.nombre if estado else "Registrado",
+        "descripcion": estado.descripcion if estado else "",
+    }
+
+    # 7. Módulo extensible para HU-14 (Etapas de Beneficio - David Torres)
+    etapas_beneficio: List[Dict[str, Any]] = []
+    if hasattr(lote, "etapas") and hasattr(lote.etapas, "all"):
+        for etapa in lote.etapas.all():
+            etapas_beneficio.append({
+                "id": getattr(etapa, "id", None),
+                "etapa": getattr(etapa, "nombre", str(etapa)),
+                "fecha_inicio": getattr(etapa, "fecha_inicio", None),
+                "fecha_fin": getattr(etapa, "fecha_fin", None),
+                "duracion_horas": getattr(etapa, "duracion_horas", None),
+                "temperatura": getattr(etapa, "temperatura", None),
+            })
+
+    # 8. Módulo extensible para HU-15 (Calidad Sensorial y Física - Alessandro Reyes)
+    calidad_info = None
+    if hasattr(lote, "calidad") and getattr(lote, "calidad", None):
+        c = lote.calidad
+        calidad_info = {
+            "humedad_pct": getattr(c, "humedad_pct", None),
+            "factor_rendimiento": getattr(c, "factor_rendimiento", None),
+            "defectos_totales": getattr(c, "defectos_totales", None),
+            "puntaje_sca": getattr(c, "puntaje_sca", None),
+            "notas_cata": getattr(c, "notas_cata", None),
+            "perfil_taza": getattr(c, "perfil_taza", None),
+        }
+
+    # 9. Cálculo de porcentaje de completitud de la trazabilidad
+    completitud = 40  # Base: Finca + Cosecha + Lote
+    if finca.tiene_georreferenciacion:
+        completitud += 10
+    if proceso is not None:
+        completitud += 15
+    if etapas_beneficio:
+        completitud += 15
+    if calidad_info is not None:
+        completitud += 20
+    completitud = min(completitud, 100)
+
+    # 10. URL canónica de consulta pública (HU-18 / QR)
+    url_publica = f"/trazabilidad/lote/{lote.codigo}/"
+
+    # 11. Estado comercial (HU-16)
+    codigo_estado = (estado.codigo.upper() if estado and estado.codigo else "DISPONIBLE")
+    disponible_venta = lote.activo and (codigo_estado in ["DISPONIBLE", "EN_VENTA", "REGISTRADO"])
+
+    return {
+        "id": lote.id,
+        "codigo": lote.codigo,
+        "cantidad_kg": lote.cantidad,
+        "activo": lote.activo,
+        "creado_en": lote.creado_en,
+        "productor": productor_info,
+        "finca": finca_info,
+        "cosecha": cosecha_info,
+        "variedad": variedad_info,
+        "proceso_beneficio": proceso_info,
+        "estado_lote": estado_info,
+        "etapas_beneficio": etapas_beneficio,
+        "calidad": calidad_info,
+        "estado_comercial": codigo_estado,
+        "disponible_para_venta": disponible_venta,
+        "url_publica": url_publica,
+        "completitud_porcentaje": completitud,
+    }
