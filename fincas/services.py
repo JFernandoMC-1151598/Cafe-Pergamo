@@ -12,8 +12,8 @@ from typing import Optional
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
-from .models import Cosecha, Lote, Municipio
-from catalogos.models import EstadoLote, ProcesoBeneficio
+from .models import Cosecha, Finca, Lote, Municipio
+from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 
 
 def generar_codigo_municipio_sugerido(nombre: str, departamento: str) -> str:
@@ -189,6 +189,81 @@ def toggle_estado_municipio(municipio_o_id):
     if municipio.activo:
         return inactivar_municipio(municipio)
     return reactivar_municipio(municipio)
+
+
+def crear_cosecha(
+    *,
+    finca_id,
+    fecha_cosecha,
+    cantidad_total,
+    variedad_id=None,
+    productor_id=None,
+) -> Cosecha:
+    """
+    Registra y persiste una nueva cosecha para una finca determinada (HU-12 / SCRUM-137).
+
+    Criterios de aceptación aplicados:
+    1. "La finca y la variedad deben ser válidas" (SCRUM-140):
+       - La finca debe existir y estar activa en el sistema.
+       - Si se suministra productor_id, se valida que la finca pertenezca a dicho productor.
+       - Si se suministra variedad_id, se valida contra el catálogo de VariedadCafe y que esté activa.
+    2. "Las cantidades deben ser mayores a cero":
+       - Se valida que cantidad_total sea numérica y estrictamente mayor que cero (> 0).
+    3. "Se debe inicializar cantidad_disponible = cantidad_total":
+       - Se inicializa el saldo disponible igual a la cantidad total cosechada.
+    """
+    if finca_id is None:
+        raise ValidationError({"finca": "Debe seleccionar la finca de donde proviene la cosecha."})
+
+    try:
+        finca = Finca.objects.get(pk=finca_id)
+    except Finca.DoesNotExist:
+        raise ValidationError({"finca": "La finca indicada no existe."})
+
+    if not finca.activo:
+        raise ValidationError({"finca": "No se pueden registrar cosechas para una finca inactiva."})
+
+    if productor_id is not None:
+        if str(finca.productor_id) != str(productor_id):
+            raise ValidationError({"finca": "No tiene permisos para registrar cosechas en una finca ajena."})
+
+    variedad = None
+    if variedad_id:
+        try:
+            variedad = VariedadCafe.objects.get(pk=variedad_id)
+        except VariedadCafe.DoesNotExist:
+            raise ValidationError({"variedad": "La variedad de café indicada no existe en el catálogo."})
+
+        if not variedad.activo:
+            raise ValidationError({"variedad": "La variedad de café seleccionada se encuentra inactiva en el catálogo."})
+
+    if not fecha_cosecha:
+        raise ValidationError({"fecha_cosecha": "La fecha de la cosecha es obligatoria."})
+
+    if cantidad_total is None:
+        raise ValidationError({"cantidad_total": "La cantidad total cosechada es obligatoria."})
+
+    try:
+        cantidad_total = Decimal(str(cantidad_total))
+    except Exception:
+        raise ValidationError({"cantidad_total": "La cantidad total cosechada debe ser un valor numérico."})
+
+    if cantidad_total <= Decimal("0.00"):
+        raise ValidationError({"cantidad_total": "La cantidad total debe ser mayor a cero."})
+
+    with transaction.atomic():
+        cosecha = Cosecha(
+            finca=finca,
+            variedad=variedad,
+            fecha_cosecha=fecha_cosecha,
+            cantidad_total=cantidad_total,
+            cantidad_disponible=cantidad_total,
+            activo=True,
+        )
+        cosecha.full_clean()
+        cosecha.save()
+
+    return cosecha
 
 
 def generar_codigo_lote(cosecha: Cosecha) -> str:

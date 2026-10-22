@@ -2465,3 +2465,188 @@ class SessionSecurityAndPersistenceTests(TestCase):
         self.assertIn("obligatorios", res_empty_password.json().get("error", ""))
 
 
+# ==============================================================================
+# PRUEBAS PARA HU-05 (SCRUM-57): Registro de Productor Cafetero
+# Subtareas cubiertas:
+# - SCRUM-85: Diseñar el formulario de registro de productor
+# - SCRUM-83: Validar que no exista un productor duplicado
+# - SCRUM-86: Implementar validaciones de datos del productor
+# - SCRUM-84: Mostrar respuesta de éxito o error en el registro
+# ==============================================================================
+
+class ProductorRegistroHU05Tests(TestCase):
+    """Suite de pruebas para el registro y vinculación de productores en el formulario general (HU-05 / SCRUM-57)."""
+
+    def setUp(self):
+        self.client = Client()
+        self.url_web = reverse('registro')
+        self.url_api = reverse('api_registro')
+        self.datos_validos = {
+            "first_name": "Carlos Alberto",
+            "last_name": "Pérez Mendoza",
+            "email": "carlos.perez@cafepergamo.co",
+            "phone": "3157891234",
+            "tipo_documento": "CC",
+            "numero_documento": "1090123456",
+            "role": "PRODUCTOR",
+            "password": "Pergamo2026*",
+        }
+
+    def test_scrum85_pantalla_registro_renderiza_opcion_productor_y_campos(self):
+        """SCRUM-85: Verifica que la pantalla de registro incluya el rol productor, campos requeridos y mensaje contextual."""
+        response = self.client.get(self.url_web)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "usuarios/registro.html")
+        self.assertContains(response, 'value="PRODUCTOR"')
+        self.assertContains(response, 'Productor / Comercializador')
+        self.assertContains(response, 'id="productor-info"')
+        self.assertContains(response, 'id="first_name"')
+        self.assertContains(response, 'id="last_name"')
+        self.assertContains(response, 'id="email"')
+        self.assertContains(response, 'id="phone"')
+        self.assertContains(response, 'id="tipo_documento"')
+        self.assertContains(response, 'id="numero_documento"')
+
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    @patch("usuarios.views.Usuario")
+    def test_scrum83_rechazo_productor_duplicado_correo(self, mock_usuario, mock_tipo_doc, mock_rol):
+        """SCRUM-83: Valida que no se permita registrar un productor con un correo ya existente (409 Conflict)."""
+        mock_tipo = MagicMock()
+        mock_tipo.codigo = "CC"
+        mock_tipo_doc.objects.filter.return_value.first.return_value = mock_tipo
+
+        mock_rol_obj = MagicMock()
+        mock_rol_obj.codigo = "PRODUCTOR"
+        mock_rol.objects.filter.return_value.first.return_value = mock_rol_obj
+
+        mock_usuario.objects.filter.return_value.exists.return_value = True
+
+        response = self.client.post(
+            self.url_api,
+            data=json.dumps(self.datos_validos),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertIn("correo ya está registrado", str(data.get("error", "")).lower())
+
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    @patch("usuarios.views.Usuario")
+    def test_scrum83_rechazo_productor_duplicado_documento(self, mock_usuario, mock_tipo_doc, mock_rol):
+        """SCRUM-83: Valida que no se permita duplicar productor con el mismo tipo y número de documento (409 Conflict)."""
+        mock_tipo = MagicMock()
+        mock_tipo.codigo = "CC"
+        mock_tipo_doc.objects.filter.return_value.first.return_value = mock_tipo
+
+        mock_rol_obj = MagicMock()
+        mock_rol_obj.codigo = "PRODUCTOR"
+        mock_rol.objects.filter.return_value.first.return_value = mock_rol_obj
+
+        # El correo es nuevo (exists=False en primera llamada), pero el documento existe (exists=True en segunda)
+        mock_usuario.objects.filter.return_value.exists.side_effect = [False, True]
+
+        response = self.client.post(
+            self.url_api,
+            data=json.dumps(self.datos_validos),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertTrue("tipo y número de documento" in str(data.get("error", "")))
+
+    def test_scrum86_validacion_formato_telefono_invalido(self):
+        """SCRUM-86: Valida que se rechace un formato de teléfono inválido (400 Bad Request)."""
+        datos = dict(self.datos_validos)
+        datos["phone"] = "telefono-invalido-abc"
+        response = self.client.post(
+            self.url_api,
+            data=json.dumps(datos),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("telefono", data.get("campos", {}))
+
+    def test_scrum86_validacion_nombres_invalidos(self):
+        """SCRUM-86: Valida que nombres con números o caracteres extraños sean rechazados."""
+        datos = dict(self.datos_validos)
+        datos["first_name"] = "Carlos123"
+        response = self.client.post(
+            self.url_api,
+            data=json.dumps(datos),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("nombres", data.get("campos", {}))
+
+    def test_scrum86_validacion_contrasena_minima(self):
+        """SCRUM-86: Valida que contraseñas menores a 6 caracteres sean rechazadas."""
+        datos = dict(self.datos_validos)
+        datos["password"] = "123"
+        response = self.client.post(
+            self.url_api,
+            data=json.dumps(datos),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("contraseña", data.get("campos", {}))
+
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.get_supabase_client")
+    def test_scrum84_registro_productor_exitoso_201(
+        self, mock_get_supabase, mock_usuario_view, mock_tipo_doc_view, mock_rol_view
+    ):
+        """SCRUM-84: Verifica que el registro de productor retorne HTTP 201 Created con rol PRODUCTOR asignado."""
+        mock_tipo = MagicMock()
+        mock_tipo.codigo = "CC"
+        mock_tipo_doc_view.objects.filter.return_value.first.return_value = mock_tipo
+
+        mock_rol = MagicMock()
+        mock_rol.codigo = "PRODUCTOR"
+        mock_rol_view.objects.filter.return_value.first.return_value = mock_rol
+
+        mock_user = MagicMock()
+        mock_user.id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        mock_auth_resp = MagicMock()
+        mock_auth_resp.user = mock_user
+        mock_auth_resp.session = None
+        mock_get_supabase.return_value.auth.sign_up.return_value = mock_auth_resp
+
+        fake_perfil = MagicMock()
+        fake_perfil.id = mock_user.id
+        fake_perfil.correo = self.datos_validos["email"]
+        fake_perfil.nombres = self.datos_validos["first_name"]
+        fake_perfil.apellidos = self.datos_validos["last_name"]
+        fake_perfil.tipo_documento.codigo = "CC"
+        fake_perfil.numero_documento = self.datos_validos["numero_documento"]
+        fake_perfil.telefono = self.datos_validos["phone"]
+        fake_perfil.rol.codigo = "PRODUCTOR"
+        fake_perfil.activo = True
+        fake_perfil.creado_en.isoformat.return_value = "2026-10-18T12:00:00"
+        mock_usuario_view.objects.select_related.return_value.get.return_value = fake_perfil
+        mock_usuario_view.objects.filter.return_value.exists.return_value = False
+
+        response = self.client.post(
+            self.url_api,
+            data=json.dumps(self.datos_validos),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertIn("usuario", data)
+        self.assertEqual(data["usuario"]["rol"], "PRODUCTOR")
+        self.assertEqual(data["usuario"]["correo"], self.datos_validos["email"])
+
+
+
+
+

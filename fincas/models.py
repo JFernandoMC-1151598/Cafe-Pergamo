@@ -314,9 +314,28 @@ class Cosecha(models.Model):
             f"- {self.cantidad_disponible}/{self.cantidad_total} kg disponibles"
         )
 
+    def clean(self):
+        super().clean()
+        if self.cantidad_total is not None and self.cantidad_total <= Decimal("0.00"):
+            raise ValidationError({"cantidad_total": "La cantidad total cosechada debe ser mayor a cero."})
+        if self.cantidad_disponible is not None and self.cantidad_total is not None:
+            if self.cantidad_disponible > self.cantidad_total:
+                raise ValidationError({"cantidad_disponible": "La cantidad disponible no puede superar la cantidad total cosechada."})
+            if self.cantidad_disponible < Decimal("0.00"):
+                raise ValidationError({"cantidad_disponible": "La cantidad disponible no puede ser negativa."})
+        if hasattr(self, "finca") and self.finca_id:
+            if not self.finca.activo:
+                raise ValidationError({"finca": "No se pueden registrar cosechas para una finca inactiva."})
+        if hasattr(self, "variedad") and self.variedad_id:
+            if not self.variedad.activo:
+                raise ValidationError({"variedad": "La variedad de café seleccionada se encuentra inactiva en el catálogo."})
+
     def save(self, *args, **kwargs):
-        """Al crear la cosecha, si no se indicó `cantidad_disponible`, arranca igual a `cantidad_total`."""
-        if self._state.adding and self.cantidad_disponible is None:
+        """
+        Al crear la cosecha, si no se indicó `cantidad_disponible`,
+        se inicializa igual a `cantidad_total` (criterio de aceptación HU-12).
+        """
+        if self.cantidad_disponible is None and self.cantidad_total is not None:
             self.cantidad_disponible = self.cantidad_total
         super().save(*args, **kwargs)
 
