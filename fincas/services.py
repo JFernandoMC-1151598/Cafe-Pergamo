@@ -4,6 +4,8 @@ Subtarea: SCRUM-112 / HU09-ST3: Implementar servicios y API para crear municipio
 Subtarea: SCRUM-142 / HU13-ST2: Implementar lógica de negocio para registrar lotes.
 Subtarea: SCRUM-145 / HU013-ST4: Validar cantidad disponible antes de crear el lote.
 Subtarea: SCRUM-146 / HU013-ST5: Actualizar trazabilidad de la cosecha al crear lotes.
+Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
+físicas y de calidad del lote.
 """
 
 from decimal import Decimal
@@ -12,7 +14,7 @@ from typing import Optional
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
-from .models import Cosecha, Finca, Lote, Municipio
+from .models import CaracteristicasCalidad, Cosecha, Finca, Lote, Municipio
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 
 
@@ -189,6 +191,68 @@ def toggle_estado_municipio(municipio_o_id):
     if municipio.activo:
         return inactivar_municipio(municipio)
     return reactivar_municipio(municipio)
+
+
+def _resolver_lote(lote_o_id):
+    if isinstance(lote_o_id, Lote):
+        return lote_o_id
+    try:
+        return Lote.objects.get(pk=lote_o_id)
+    except (Lote.DoesNotExist, ValueError, TypeError):
+        raise ValidationError({"lote": "El lote indicado no existe."})
+
+
+def crear_caracteristicas_calidad(*, lote_o_id, **datos) -> CaracteristicasCalidad:
+    """
+    Crea el registro único de calidad asociado a un lote (HU15-ST1).
+    """
+    lote = _resolver_lote(lote_o_id)
+    if CaracteristicasCalidad.objects.filter(lote=lote).exists():
+        raise ValidationError({"lote": "El lote ya tiene características de calidad registradas."})
+
+    caracteristicas = CaracteristicasCalidad(lote=lote, **datos)
+    caracteristicas.full_clean()
+    caracteristicas.save()
+    return caracteristicas
+
+
+_NO_ACTUALIZAR = object()
+
+
+def editar_caracteristicas_calidad(
+    caracteristicas_o_id,
+    *,
+    humedad=_NO_ACTUALIZAR,
+    merma=_NO_ACTUALIZAR,
+    puntaje_taza=_NO_ACTUALIZAR,
+    perfil_sensorial=_NO_ACTUALIZAR,
+    observaciones=_NO_ACTUALIZAR,
+) -> CaracteristicasCalidad:
+    """
+    Actualiza un registro existente y conserva los valores omitidos.
+    """
+    if isinstance(caracteristicas_o_id, CaracteristicasCalidad):
+        caracteristicas = caracteristicas_o_id
+    else:
+        try:
+            caracteristicas = CaracteristicasCalidad.objects.get(pk=caracteristicas_o_id)
+        except (CaracteristicasCalidad.DoesNotExist, ValueError, TypeError):
+            raise ValidationError({"id": "Las características de calidad no existen."})
+
+    valores = {
+        "humedad": humedad,
+        "merma": merma,
+        "puntaje_taza": puntaje_taza,
+        "perfil_sensorial": perfil_sensorial,
+        "observaciones": observaciones,
+    }
+    for campo, valor in valores.items():
+        if valor is not _NO_ACTUALIZAR:
+            setattr(caracteristicas, campo, valor)
+
+    caracteristicas.full_clean()
+    caracteristicas.save()
+    return caracteristicas
 
 
 def crear_cosecha(

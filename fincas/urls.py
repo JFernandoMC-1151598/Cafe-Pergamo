@@ -6,6 +6,8 @@ Subtarea: SCRUM-92 / HU06-ST6: Listar fincas registradas por productor.
 Subtarea: SCRUM-142 / HU13-ST2: Implementar servicio/API para registrar lotes.
 Subtarea: SCRUM-144 / HU13: Crear formulario o pantalla de registro de lotes
 (incluye también la ruta de registro de cosechas, complemento necesario).
+Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
+físicas y de calidad del lote.
 """
 
 from django.urls import path
@@ -42,4 +44,9 @@ urlpatterns = [
 
     # API REST de Lotes (HU-13 / SCRUM-142)
     path('api/lotes/', views.api_crear_lote_view, name='api_lote_crear'),
+    path(
+        'api/lotes/<int:lote_id>/calidad/',
+        views.api_caracteristicas_calidad_view,
+        name='api_lote_calidad',
+    ),
 ]

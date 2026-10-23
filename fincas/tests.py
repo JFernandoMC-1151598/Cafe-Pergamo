@@ -12,6 +12,7 @@ Integración de:
   al crear el lote para mantener su trazabilidad (ST5 / SCRUM-146); formularios web de registro de
   cosechas (complemento) y de lotes (SCRUM-144); y cobertura de pruebas de código único, restricción de
   cantidad y flujo exitoso de registro (ST6 / SCRUM-147).
+- HU-15-ST1 (SCRUM-155): Persistencia API de características físicas y de calidad del lote.
 """
 
 import uuid
@@ -38,8 +39,14 @@ from fincas.forms import (
     LoteRegistroForm,
     MunicipioForm,
 )
-from fincas.models import Cosecha, Finca, Lote, Municipio
-from fincas.services import crear_cosecha, crear_lote, generar_codigo_lote
+from fincas.models import CaracteristicasCalidad, Cosecha, Finca, Lote, Municipio
+from fincas.services import (
+    crear_caracteristicas_calidad,
+    crear_cosecha,
+    crear_lote,
+    editar_caracteristicas_calidad,
+    generar_codigo_lote,
+)
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from fincas.validators import (
     validar_latitud,
@@ -3183,6 +3190,94 @@ class ApiCrearLoteViewTests(TestCase):
 
         cosecha.refresh_from_db()
         self.assertEqual(cosecha.cantidad_disponible, Decimal("180.00"))
+
+
+class CaracteristicasCalidadApiTests(TestCase):
+    """Pruebas CRUD de HU15-ST1 / SCRUM-155."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(codigo="TEST_CALIDAD_MUN", nombre="Mutiscua (prueba)")
+        finca = Finca.objects.create(
+            nombre="Finca Calidad",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-05-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="CALIDAD01",
+            cosecha=cosecha,
+            cantidad=Decimal("50.00"),
+        )
+        self.url = reverse("api_lote_calidad", kwargs={"lote_id": self.lote.pk})
+        self.client = Client()
+
+    def test_crea_consulta_y_actualiza_caracteristicas(self):
+        datos = {
+            "humedad": "11.50",
+            "merma": "2.00",
+            "puntaje_taza": "84.50",
+            "perfil_sensorial": "Chocolate y caramelo",
+            "observaciones": "Muestra de laboratorio",
+        }
+        respuesta = self.client.post(
+            self.url,
+            datos,
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(respuesta.status_code, 201, respuesta.content)
+        self.assertIn("lote_id", respuesta.json(), respuesta.content)
+        self.assertEqual(respuesta.json()["lote_id"], self.lote.pk)
+        self.assertEqual(respuesta.json()["puntaje_taza"], "84.50")
+
+        consulta = self.client.get(self.url, **_jwt_bearer_headers())
+        self.assertEqual(consulta.status_code, 200)
+        self.assertEqual(consulta.json()["lote_codigo"], "CALIDAD01")
+
+        actualizacion = self.client.patch(
+            self.url,
+            {"puntaje_taza": "86.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(actualizacion.status_code, 200)
+        self.assertEqual(actualizacion.json()["puntaje_taza"], "86.00")
+        self.assertEqual(CaracteristicasCalidad.objects.get(lote=self.lote).humedad, Decimal("11.50"))
+
+    def test_no_permite_dos_registros_para_el_mismo_lote(self):
+        crear_caracteristicas_calidad(lote_o_id=self.lote, humedad=Decimal("10.00"))
+        respuesta = self.client.post(
+            self.url,
+            {"humedad": "12.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn("lote", respuesta.json())
+
+    def test_rechaza_puntaje_fuera_de_rango(self):
+        respuesta = self.client.post(
+            self.url,
+            {"puntaje_taza": "101.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn("puntaje_taza", respuesta.json())
+
+    def test_servicio_actualiza_y_puede_limpiar_un_campo_de_texto(self):
+        registro = crear_caracteristicas_calidad(
+            lote_o_id=self.lote,
+            humedad=Decimal("10.00"),
+            observaciones="Inicial",
+        )
+        editar_caracteristicas_calidad(registro, observaciones="")
+        registro.refresh_from_db()
+        self.assertEqual(registro.observaciones, "")
 
 
 # =============================================================================

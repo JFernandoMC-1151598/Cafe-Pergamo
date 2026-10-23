@@ -2,11 +2,13 @@
 Serializadores DRF para Fincas y Georreferenciación - CAFÉ PÉRGAMO
 Subtarea: SCRUM-96: Guardar georreferenciación en backend.
 Subtarea: SCRUM-142 / HU13-ST2: Implementar servicio/API para registrar lotes.
+Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
+físicas y de calidad del lote.
 """
 
 from decimal import Decimal
 from rest_framework import serializers
-from .models import Cosecha, Finca, Lote, Municipio
+from .models import CaracteristicasCalidad, Cosecha, Finca, Lote, Municipio
 from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
 
 
@@ -244,6 +246,62 @@ class LoteSerializer(serializers.ModelSerializer):
             "creado_en",
         ]
         read_only_fields = fields
+
+
+class CaracteristicasCalidadSerializer(serializers.ModelSerializer):
+    """
+    Serializador para crear, actualizar y consultar la calidad de un lote.
+    """
+
+    lote_id = serializers.IntegerField(source="lote.id", read_only=True)
+    lote_codigo = serializers.CharField(source="lote.codigo", read_only=True)
+
+    class Meta:
+        model = CaracteristicasCalidad
+        fields = [
+            "id",
+            "lote_id",
+            "lote_codigo",
+            "humedad",
+            "merma",
+            "puntaje_taza",
+            "perfil_sensorial",
+            "observaciones",
+            "creado_en",
+            "actualizado_en",
+        ]
+        read_only_fields = [
+            "id",
+            "lote_id",
+            "lote_codigo",
+            "creado_en",
+            "actualizado_en",
+        ]
+
+    def create(self, validated_data):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .services import crear_caracteristicas_calidad
+
+        try:
+            return crear_caracteristicas_calidad(
+                lote_o_id=self.context["lote"],
+                **validated_data,
+            )
+        except DjangoValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                raise serializers.ValidationError(exc.message_dict)
+            raise serializers.ValidationError(exc.messages)
+
+    def update(self, instance, validated_data):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .services import editar_caracteristicas_calidad
+
+        try:
+            return editar_caracteristicas_calidad(instance, **validated_data)
+        except DjangoValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                raise serializers.ValidationError(exc.message_dict)
+            raise serializers.ValidationError(exc.messages)
 
 
 class CosechaSerializer(serializers.ModelSerializer):

@@ -12,6 +12,8 @@ Subtarea: SCRUM-145 / HU013-ST4: Validar cantidad disponible antes de crear el l
 (aplicada en services.crear_lote(), usada tanto por la vista web como por la API).
 Subtarea: SCRUM-146 / HU013-ST5: Actualizar trazabilidad de la cosecha al crear lotes
 (idem, el descuento del saldo vive en services.crear_lote()).
+Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
+físicas y de calidad del lote.
 Nota: incluye también una vista de registro de cosechas, complemento necesario para
 poder usar el formulario de lotes de principio a fin (ver nota en fincas/forms.py).
 Nota: incluye además una vista de listado "Mis Lotes" con filtro por finca -- pedida
@@ -36,17 +38,19 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
 from .forms import CosechaRegistroForm, FincaRegistroForm, FincaModelForm, LoteRegistroForm, MunicipioForm
-from .models import Cosecha, Finca, Lote, Municipio
+from .models import CaracteristicasCalidad, Cosecha, Finca, Lote, Municipio
 from .permissions import rol_puede_administrar_catalogos
 from .serializers import (
     CosechaCreateSerializer,
     CosechaSerializer,
+    CaracteristicasCalidadSerializer,
     FincaGeorreferenciacionSerializer,
     LoteSerializer,
     MunicipioSerializer,
 )
 from .services import (
     crear_cosecha,
+    crear_caracteristicas_calidad,
     crear_lote,
     crear_municipio,
     editar_municipio,
@@ -784,6 +788,64 @@ def api_crear_lote_view(request):
         return Response(detalle, status=status.HTTP_400_BAD_REQUEST)
 
     return Response(LoteSerializer(lote).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "POST", "PUT", "PATCH"])
+def api_caracteristicas_calidad_view(request, lote_id):
+    """
+    CRUD REST de las características de calidad de un lote (HU15-ST1).
+
+    La URL anidada garantiza que la relación se resuelva desde un lote
+    existente y evita aceptar un lote arbitrario en el cuerpo de la petición.
+    """
+    try:
+        lote = Lote.objects.get(pk=lote_id)
+    except (Lote.DoesNotExist, ValueError, TypeError):
+        return Response(
+            {"lote": ["El lote indicado no existe."]},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    caracteristicas = CaracteristicasCalidad.objects.filter(lote=lote).first()
+
+    if request.method == "GET":
+        if caracteristicas is None:
+            return Response(
+                {"detail": "El lote no tiene características de calidad registradas."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(CaracteristicasCalidadSerializer(caracteristicas).data)
+
+    if request.method == "POST":
+        if caracteristicas is not None:
+            return Response(
+                {"lote": ["El lote ya tiene características de calidad registradas."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = CaracteristicasCalidadSerializer(
+            data=request.data,
+            context={"lote": lote},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    if caracteristicas is None:
+        return Response(
+            {"detail": "El lote no tiene características de calidad registradas."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    serializer = CaracteristicasCalidadSerializer(
+        caracteristicas,
+        data=request.data,
+        partial=request.method == "PATCH",
+    )
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 def registrar_cosecha_view(request):
