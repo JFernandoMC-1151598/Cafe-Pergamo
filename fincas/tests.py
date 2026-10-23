@@ -3193,7 +3193,7 @@ class ApiCrearLoteViewTests(TestCase):
 
 
 class CaracteristicasCalidadApiTests(TestCase):
-    """Pruebas CRUD de HU15-ST1 / SCRUM-155."""
+    """Pruebas CRUD de HU15-ST1 y validaciones de HU15-ST4."""
 
     def setUp(self):
         municipio = Municipio.objects.create(codigo="TEST_CALIDAD_MUN", nombre="Mutiscua (prueba)")
@@ -3268,6 +3268,44 @@ class CaracteristicasCalidadApiTests(TestCase):
         )
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn("puntaje_taza", respuesta.json())
+
+    def test_rechaza_porcentajes_fisicos_fuera_de_rango(self):
+        for campo, valor in (("humedad", "100.01"), ("merma", "-0.01")):
+            respuesta = self.client.post(
+                self.url,
+                {campo: valor},
+                content_type="application/json",
+                **_jwt_bearer_headers(),
+            )
+            self.assertEqual(respuesta.status_code, 400)
+            self.assertIn(campo, respuesta.json())
+
+    def test_rechaza_formato_decimal_invalido(self):
+        respuesta = self.client.post(
+            self.url,
+            {"humedad": "once coma cinco"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn("humedad", respuesta.json())
+
+    def test_acepta_limites_validos_y_normaliza_textos(self):
+        respuesta = self.client.post(
+            self.url,
+            {
+                "humedad": "0.00",
+                "merma": "100.00",
+                "puntaje_taza": "100.00",
+                "perfil_sensorial": "  Chocolate  ",
+                "observaciones": "  Muestra válida  ",
+            },
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(respuesta.status_code, 201, respuesta.content)
+        self.assertEqual(respuesta.json()["perfil_sensorial"], "Chocolate")
+        self.assertEqual(respuesta.json()["observaciones"], "Muestra válida")
 
     def test_servicio_actualiza_y_puede_limpiar_un_campo_de_texto(self):
         registro = crear_caracteristicas_calidad(

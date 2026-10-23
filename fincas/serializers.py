@@ -7,6 +7,7 @@ físicas y de calidad del lote.
 """
 
 from decimal import Decimal
+from django.core.validators import MaxValueValidator, MinValueValidator
 from rest_framework import serializers
 from .models import CaracteristicasCalidad, Cosecha, Finca, Lote, Municipio
 from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
@@ -255,6 +256,36 @@ class CaracteristicasCalidadSerializer(serializers.ModelSerializer):
 
     lote_id = serializers.IntegerField(source="lote.id", read_only=True)
     lote_codigo = serializers.CharField(source="lote.codigo", read_only=True)
+    humedad = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+    )
+    merma = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+    )
+    puntaje_taza = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+    )
 
     class Meta:
         model = CaracteristicasCalidad
@@ -277,6 +308,12 @@ class CaracteristicasCalidadSerializer(serializers.ModelSerializer):
             "creado_en",
             "actualizado_en",
         ]
+
+    def validate(self, attrs):
+        for campo in ("perfil_sensorial", "observaciones"):
+            if campo in attrs and attrs[campo] is not None:
+                attrs[campo] = attrs[campo].strip()
+        return attrs
 
     def create(self, validated_data):
         from django.core.exceptions import ValidationError as DjangoValidationError
