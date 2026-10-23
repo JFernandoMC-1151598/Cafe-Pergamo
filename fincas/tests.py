@@ -4162,3 +4162,124 @@ class FichaDigitalStructureTests(TestCase):
         """Verifica que solicitar un lote inexistente arroje ValidationError amigable."""
         with self.assertRaises(ValidationError):
             obtener_ficha_consolidada_lote("LOTE-NO-EXISTE-XYZ")
+
+
+# =============================================================================
+# SUITE HU-17 (SCRUM-167): ENDPOINT API REST DE FICHA DIGITAL CONSOLIDADA
+# =============================================================================
+
+
+class FichaDigitalAPITests(TestCase):
+    """
+    Pruebas de integración para el endpoint REST GET /fincas/api/lotes/<codigo>/ficha/ (HU-17 / SCRUM-167).
+    Verifica el acceso público (AllowAny), la estructura del JSON devuelto y el manejo de errores 404/400.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-ARB-API",
+                nombre="Arboledas",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca API Test",
+            vereda="La Cima",
+            municipio=self.municipio,
+            productor_id=uuid.uuid4(),
+            latitud=Decimal("7.123456"),
+            longitud=Decimal("-72.654321"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Caturra",
+            defaults={
+                "especie": "Arábica",
+                "descripcion": "Variedad tradicional.",
+                "activo": True,
+            },
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-20",
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("500.00"),
+            activo=True,
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="HONEY",
+            defaults={
+                "nombre": "Honey / Enmielado",
+                "descripcion": "Secado con mucílago.",
+                "activo": True,
+            },
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={
+                "nombre": "Disponible",
+                "descripcion": "Lote listo.",
+                "activo": True,
+            },
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-API-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("150.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_consulta_exitosa_ficha_digital_api_200_ok(self):
+        """GET /fincas/api/lotes/<codigo>/ficha/ responde 200 OK sin autenticación obligatoria."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["codigo"], "LOTE-API-001")
+        self.assertEqual(data["cantidad_kg"], "150.00")
+        self.assertTrue(data["activo"])
+
+        # Verificación de secciones anidadas
+        self.assertEqual(data["finca"]["nombre"], "Finca API Test")
+        self.assertEqual(data["finca"]["municipio"], "Arboledas")
+        self.assertEqual(data["proceso_beneficio"]["codigo"], "HONEY")
+        self.assertEqual(data["estado_lote"]["codigo"], "DISPONIBLE")
+        self.assertIn("url_publica", data)
+        self.assertIn("completitud_porcentaje", data)
+
+    def test_consulta_exitosa_por_ruta_v1_alternativa(self):
+        """GET /fincas/api/v1/lotes/<codigo>/ficha/ responde igualmente 200 OK."""
+        url = reverse("api_v1_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["codigo"], "LOTE-API-001")
+
+    def test_consulta_lote_inexistente_retorna_404(self):
+        """GET /fincas/api/lotes/<codigo_no_existe>/ficha/ responde 404 NOT FOUND con mensaje JSON."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": "LOTE-FANTASMA-999"})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("error", response.json())
+
+    def test_actualizacion_automatica_reflejada_en_la_api(self):
+        """Verifica que mutaciones previas en la BD se reflejen inmediatamente en la respuesta de la API."""
+        # 1. Primera consulta
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        resp1 = self.client.get(url)
+        self.assertEqual(resp1.json()["cantidad_kg"], "150.00")
+
+        # 2. Modificación de datos en base de datos
+        self.lote.cantidad = Decimal("275.50")
+        self.lote.save(update_fields=["cantidad"])
+
+        # 3. Segunda consulta inmediata
+        resp2 = self.client.get(url)
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.json()["cantidad_kg"], "275.50")

@@ -41,6 +41,7 @@ from .permissions import rol_puede_administrar_catalogos
 from .serializers import (
     CosechaCreateSerializer,
     CosechaSerializer,
+    FichaDigitalSerializer,
     FincaGeorreferenciacionSerializer,
     LoteSerializer,
     MunicipioSerializer,
@@ -51,6 +52,7 @@ from .services import (
     crear_municipio,
     editar_municipio,
     inactivar_municipio,
+    obtener_ficha_consolidada_lote,
     reactivar_municipio,
     toggle_estado_municipio,
 )
@@ -979,3 +981,53 @@ def mis_lotes_view(request):
             "finca_id_filtro": finca_id_raw,
         },
     )
+
+
+# =============================================================================
+# API REST FICHA DIGITAL CONSOLIDADA POR LOTE (HU-17 / SCRUM-167)
+# =============================================================================
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_consultar_ficha_digital_view(request, codigo=None):
+    """
+    Endpoint REST para consultar la ficha digital consolidada de un lote (HU-17 / SCRUM-167).
+    GET /fincas/api/lotes/<str:codigo>/ficha/
+    GET /fincas/api/v1/lotes/<str:codigo>/ficha/
+
+    Permite consulta pública/semipública sin requerir token obligatorio,
+    habilitando el escaneo directo vía Código QR (HU-18) o catálogo público (HU-19).
+    """
+    if not codigo or not str(codigo).strip():
+        return Response(
+            {"error": "Debe especificar un código o identificador de lote válido."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    codigo_limpio = str(codigo).strip()
+    try:
+        ficha_data = obtener_ficha_consolidada_lote(codigo_limpio)
+    except ValidationError as exc:
+        msg = (
+            exc.message_dict.get("lote", ["Lote no encontrado"])[0]
+            if hasattr(exc, "message_dict") and "lote" in exc.message_dict
+            else str(exc)
+        )
+        return Response({"error": msg}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as exc:
+        return Response(
+            {"error": f"Error al procesar la ficha digital: {str(exc)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    serializer = FichaDigitalSerializer(data=ficha_data)
+    if not serializer.is_valid():
+        return Response(
+            {
+                "error": "Inconsistencia interna en los datos de la ficha consolidada.",
+                "detalles": serializer.errors,
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    return Response(serializer.data, status=status.HTTP_200_OK)

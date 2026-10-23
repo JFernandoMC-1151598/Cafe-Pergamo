@@ -42,4 +42,8 @@ urlpatterns = [
 
     # API REST de Lotes (HU-13 / SCRUM-142)
     path('api/lotes/', views.api_crear_lote_view, name='api_lote_crear'),
+
+    # API REST de Ficha Digital Consolidada por Lote (HU-17 / SCRUM-167)
+    path('api/lotes/<str:codigo>/ficha/', views.api_consultar_ficha_digital_view, name='api_lote_ficha_digital'),
+    path('api/v1/lotes/<str:codigo>/ficha/', views.api_consultar_ficha_digital_view, name='api_v1_lote_ficha_digital'),
 ]
