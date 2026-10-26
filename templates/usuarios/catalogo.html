@@ -12,7 +12,7 @@
         </span>
         <h1 class="display-5 fw-bold mb-3">Catálogo Comercial de Cafés Especiales</h1>
         <p class="lead text-light opacity-90 mx-auto" style="max-width: 720px;">
-            Lotes con trazabilidad completa de origen, verificación de cosecha y evaluaciones sensoriales y físicas certificadas.
+            Vitrina pública de lotes con trazabilidad completa de origen, verificación de cosecha y evaluaciones sensoriales y físicas certificadas.
         </p>
     </div>
 </section>
@@ -28,11 +28,172 @@
         {% endfor %}
     {% endif %}
 
+    <!-- Barra de Filtros Multicriterio (HU-20 / SCRUM-246, SCRUM-247, SCRUM-251) -->
+    <div class="card border-0 shadow-sm rounded-4 mb-4 bg-white">
+        <div class="card-body p-4">
+            <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-3">
+                <div class="d-flex align-items-center gap-2">
+                    <span class="badge bg-primary-subtle text-primary p-2 rounded-3">
+                        <i class="bi bi-funnel-fill fs-6"></i>
+                    </span>
+                    <h5 class="fw-bold text-dark mb-0">Filtrar Lotes Disponibles</h5>
+                </div>
+                {% if hay_filtros_activos %}
+                <a href="{% url 'catalogo' %}" class="btn btn-outline-secondary btn-sm" id="btn-limpiar-filtros-top">
+                    <i class="bi bi-arrow-counterclockwise me-1"></i>Limpiar todos los filtros
+                </a>
+                {% endif %}
+            </div>
+
+            <form method="GET" action="{% url 'catalogo' %}" class="row g-3" id="form-filtros-catalogo">
+                <!-- Filtro Municipio (SCRUM-247 / HU20-ST2) -->
+                <div class="col-12 col-sm-6 col-lg-3">
+                    <label for="id_filtro_municipio" class="form-label small fw-semibold text-dark mb-1">
+                        <i class="bi bi-geo-alt text-danger me-1"></i>Municipio
+                    </label>
+                    <select name="municipio" id="id_filtro_municipio" class="form-select form-select-sm">
+                        <option value="">Todos los municipios</option>
+                        {% for mun in opciones.municipios %}
+                        <option value="{{ mun.pk }}" {% if filtros_activos.municipio == mun.pk|stringformat:"s" %}selected{% endif %}>
+                            {{ mun.nombre }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Filtro Variedad -->
+                <div class="col-12 col-sm-6 col-lg-3">
+                    <label for="id_filtro_variedad" class="form-label small fw-semibold text-dark mb-1">
+                        <i class="bi bi-flower1 text-success me-1"></i>Variedad
+                    </label>
+                    <select name="variedad" id="id_filtro_variedad" class="form-select form-select-sm">
+                        <option value="">Todas las variedades</option>
+                        {% for var in opciones.variedades %}
+                        <option value="{{ var.pk }}" {% if filtros_activos.variedad == var.pk|stringformat:"s" %}selected{% endif %}>
+                            {{ var.nombre }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Filtro Proceso de Beneficio -->
+                <div class="col-12 col-sm-6 col-lg-3">
+                    <label for="id_filtro_proceso" class="form-label small fw-semibold text-dark mb-1">
+                        <i class="bi bi-gear-wide-connected text-info me-1"></i>Proceso
+                    </label>
+                    <select name="proceso" id="id_filtro_proceso" class="form-select form-select-sm">
+                        <option value="">Todos los procesos</option>
+                        {% for proc in opciones.procesos %}
+                        <option value="{{ proc.pk }}" {% if filtros_activos.proceso == proc.pk|stringformat:"s" %}selected{% endif %}>
+                            {{ proc.nombre }}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Filtro Calidad Mínima SCA (SCRUM-251 / HU20-ST6) -->
+                <div class="col-12 col-sm-6 col-lg-3">
+                    <label for="id_filtro_puntaje_min" class="form-label small fw-semibold text-dark mb-1">
+                        <i class="bi bi-star-fill text-warning me-1"></i>Calidad Mínima SCA
+                    </label>
+                    <select name="puntaje_min" id="id_filtro_puntaje_min" class="form-select form-select-sm">
+                        <option value="">Cualquier puntaje</option>
+                        {% for pts in opciones.puntajes_minimos %}
+                        <option value="{{ pts }}" {% if filtros_activos.puntaje_min == pts|stringformat:"s" %}selected{% endif %}>
+                            {{ pts }}+ pts SCA {% if pts >= 88 %}(Excepcional){% elif pts >= 86 %}(Excelente){% elif pts >= 84 %}(Muy Bueno){% else %}(Especialidad){% endif %}
+                        </option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <!-- Búsqueda libre por texto (q) -->
+                <div class="col-12 col-md-8 col-lg-9">
+                    <label for="id_filtro_q" class="form-label small fw-semibold text-dark mb-1">
+                        <i class="bi bi-search me-1"></i>Búsqueda libre
+                    </label>
+                    <div class="input-group input-group-sm">
+                        <span class="input-group-text bg-light border-end-0">
+                            <i class="bi bi-search text-muted"></i>
+                        </span>
+                        <input type="text" name="q" id="id_filtro_q" class="form-control form-control-sm border-start-0" placeholder="Buscar por código de lote, nombre de finca, vereda, municipio o notas de cata..." value="{{ filtros_activos.q }}">
+                    </div>
+                </div>
+
+                <!-- Botones de Acción -->
+                <div class="col-12 col-md-4 col-lg-3 d-flex align-items-end gap-2">
+                    <button type="submit" class="btn btn-primary bg-primary btn-sm fw-semibold flex-grow-1" id="btn-aplicar-filtros">
+                        <i class="bi bi-funnel me-1"></i>Filtrar
+                    </button>
+                    {% if hay_filtros_activos %}
+                    <a href="{% url 'catalogo' %}" class="btn btn-outline-secondary btn-sm" title="Restablecer filtros">
+                        <i class="bi bi-x-lg"></i>
+                    </a>
+                    {% endif %}
+                </div>
+            </form>
+
+            <!-- Badges de filtros activos -->
+            {% if hay_filtros_activos %}
+            <div class="pt-3 mt-3 border-top d-flex align-items-center flex-wrap gap-2">
+                <span class="small text-muted fw-semibold">Filtros activos:</span>
+                {% if filtros_activos.municipio %}
+                    {% for mun in opciones.municipios %}
+                        {% if filtros_activos.municipio == mun.pk|stringformat:"s" %}
+                            <span class="badge bg-light text-dark border">
+                                <i class="bi bi-geo-alt text-danger me-1"></i>{{ mun.nombre }}
+                            </span>
+                        {% endif %}
+                    {% endfor %}
+                {% endif %}
+                {% if filtros_activos.variedad %}
+                    {% for var in opciones.variedades %}
+                        {% if filtros_activos.variedad == var.pk|stringformat:"s" %}
+                            <span class="badge bg-light text-dark border">
+                                <i class="bi bi-flower1 text-success me-1"></i>{{ var.nombre }}
+                            </span>
+                        {% endif %}
+                    {% endfor %}
+                {% endif %}
+                {% if filtros_activos.proceso %}
+                    {% for proc in opciones.procesos %}
+                        {% if filtros_activos.proceso == proc.pk|stringformat:"s" %}
+                            <span class="badge bg-light text-dark border">
+                                <i class="bi bi-gear-wide-connected text-info me-1"></i>{{ proc.nombre }}
+                            </span>
+                        {% endif %}
+                    {% endfor %}
+                {% endif %}
+                {% if filtros_activos.puntaje_min %}
+                    <span class="badge bg-warning-subtle text-dark border border-warning-subtle">
+                        <i class="bi bi-star-fill text-warning me-1"></i>≥ {{ filtros_activos.puntaje_min }} pts SCA
+                    </span>
+                {% endif %}
+                {% if filtros_activos.q %}
+                    <span class="badge bg-light text-dark border">
+                        <i class="bi bi-search me-1"></i>"{{ filtros_activos.q }}"
+                    </span>
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Encabezado de Resultados -->
     <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
         <div>
-            <h2 class="h4 fw-bold text-dark mb-1">Lotes Disponibles</h2>
+            <h2 class="h4 fw-bold text-dark mb-1">
+                {% if hay_filtros_activos %}
+                    Resultados de Búsqueda
+                {% else %}
+                    Lotes Disponibles
+                {% endif %}
+            </h2>
             <p class="text-muted small mb-0">
-                Mostrando <strong>{{ total_lotes }}</strong> lote{{ total_lotes|pluralize:"s" }} publicado{{ total_lotes|pluralize:"s" }} para comercialización directa.
+                {% if hay_filtros_activos %}
+                    Mostrando <strong>{{ total_lotes }}</strong> lote{{ total_lotes|pluralize:"s" }} de <strong>{{ total_catalogo }}</strong> disponible{{ total_catalogo|pluralize:"s" }} en el catálogo comercial.
+                {% else %}
+                    Mostrando <strong>{{ total_lotes }}</strong> lote{{ total_lotes|pluralize:"s" }} publicado{{ total_lotes|pluralize:"s" }} para comercialización directa.
+                {% endif %}
             </p>
         </div>
         {% if user.is_authenticated %}
@@ -42,6 +203,7 @@
         {% endif %}
     </div>
 
+    <!-- Grilla de Lotes -->
     {% if lotes %}
     <div class="row g-4">
         {% for lote in lotes %}
@@ -142,27 +304,47 @@
         {% endfor %}
     </div>
     {% else %}
-    <!-- Estado Vacío -->
-    <div class="card border-0 shadow-sm rounded-4 p-5 text-center">
-        <div class="py-4">
-            <div class="d-inline-flex align-items-center justify-content-center bg-warning-subtle text-warning rounded-circle p-4 mb-3" style="width: 80px; height: 80px;">
-                <i class="bi bi-shop fs-1"></i>
+        {% if hay_filtros_activos %}
+        <!-- Estado Vacío por Filtros (SCRUM-252 / HU20-ST7) -->
+        <div class="card border-0 shadow-sm rounded-4 p-5 text-center bg-white">
+            <div class="py-4">
+                <div class="d-inline-flex align-items-center justify-content-center bg-warning-subtle text-warning rounded-circle p-4 mb-3" style="width: 80px; height: 80px;">
+                    <i class="bi bi-funnel fs-1"></i>
+                </div>
+                <h4 class="fw-bold text-dark mb-2">No hay lotes que coincidan con los filtros</h4>
+                <p class="text-muted mx-auto mb-4" style="max-width: 560px;">
+                    {{ mensaje_sin_resultados }}
+                </p>
+                <div class="d-flex justify-content-center gap-2 flex-wrap">
+                    <a href="{% url 'catalogo' %}" class="btn btn-primary bg-primary px-4 fw-semibold" id="btn-ver-todos-lotes">
+                        <i class="bi bi-arrow-counterclockwise me-1"></i>Ver todos los lotes disponibles
+                    </a>
+                </div>
             </div>
-            <h4 class="fw-bold text-dark mb-2">No hay lotes publicados en este momento</h4>
-            <p class="text-muted mx-auto mb-4" style="max-width: 540px;">
-                Los caficultores de Norte de Santander están cosechando y procesando sus muestras de calidad para publicar sus lotes. Si eres productor, ingresa a tu panel y publica tus lotes validados.
-            </p>
-            {% if user.is_authenticated %}
-            <a href="{% url 'mis_lotes' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
-                <i class="bi bi-boxes me-1"></i>Ir a Mis Lotes para Publicar
-            </a>
-            {% else %}
-            <a href="{% url 'login' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
-                <i class="bi bi-box-arrow-in-right me-1"></i>Iniciar Sesión como Productor
-            </a>
-            {% endif %}
         </div>
-    </div>
+        {% else %}
+        <!-- Estado Vacío General del Catálogo -->
+        <div class="card border-0 shadow-sm rounded-4 p-5 text-center bg-white">
+            <div class="py-4">
+                <div class="d-inline-flex align-items-center justify-content-center bg-light text-secondary rounded-circle p-4 mb-3" style="width: 80px; height: 80px;">
+                    <i class="bi bi-shop fs-1"></i>
+                </div>
+                <h4 class="fw-bold text-dark mb-2">No hay lotes publicados en este momento</h4>
+                <p class="text-muted mx-auto mb-4" style="max-width: 540px;">
+                    {{ mensaje_catalogo_vacio }}
+                </p>
+                {% if user.is_authenticated %}
+                <a href="{% url 'mis_lotes' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
+                    <i class="bi bi-boxes me-1"></i>Ir a Mis Lotes para Publicar
+                </a>
+                {% else %}
+                <a href="{% url 'login' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
+                    <i class="bi bi-box-arrow-in-right me-1"></i>Iniciar Sesión como Productor
+                </a>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
     {% endif %}
 </div>
 {% endblock %}

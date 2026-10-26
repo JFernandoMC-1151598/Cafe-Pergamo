@@ -66,5 +66,8 @@ urlpatterns = [
         views.api_validar_publicacion_lote_view,
         name='api_lote_validar_publicacion',
     ),
+
+    # API REST pública del catálogo con filtros combinados (HU-20 / SCRUM-250)
+    path('api/catalogo/', views.api_catalogo_view, name='api_catalogo'),
 ]
 

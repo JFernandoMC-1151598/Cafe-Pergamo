@@ -52,6 +52,7 @@ from .models import (
 from .permissions import rol_puede_administrar_catalogos
 from .serializers import (
     BitacoraPublicacionLoteSerializer,
+    CatalogoLoteSerializer,
     CosechaCreateSerializer,
     CosechaSerializer,
     CaracteristicasCalidadSerializer,
@@ -68,8 +69,10 @@ from .services import (
     crear_municipio,
     despublicar_lote_de_catalogo,
     editar_municipio,
+    filtrar_catalogo_lotes,
     generar_snapshot_trazabilidad,
     inactivar_municipio,
+    normalizar_filtros_catalogo,
     publicar_lote_en_catalogo,
     reactivar_municipio,
     toggle_estado_municipio,
@@ -1341,3 +1344,57 @@ def despublicar_lote_web_view(request, pk):
         messages.error(request, f"No se pudo retirar el lote del catálogo: {exc}")
 
     return redirect("mis_lotes")
+
+
+# ==============================================================================
+# API REST DEL CATÁLOGO FILTRABLE (HU-20 / SCRUM-229)
+# ==============================================================================
+
+MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO = (
+    "No hay lotes disponibles que cumplan todos los filtros seleccionados. "
+    "Pruebe quitando alguno de los filtros."
+)
+MENSAJE_CATALOGO_VACIO = "Aún no hay lotes publicados en el catálogo comercial."
+
+
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def api_catalogo_view(request):
+    """
+    Endpoint REST público del catálogo comercial con filtros combinados
+    (SCRUM-250 / HU20-ST3, SCRUM-249 / HU20-ST5, SCRUM-253 / HU20-ST8).
+
+    GET /fincas/api/catalogo/?municipio=<id>&variedad=<id>&proceso=<id>&puntaje_min=<0-100>&q=<texto>
+
+    - Todos los parámetros son opcionales y se combinan con AND.
+    - Solo devuelve lotes disponibles (publicados, activos, con cantidad > 0).
+    - 400 si algún parámetro es inválido (ej. municipio=abc, puntaje_min=150):
+      un cliente de API debe enterarse de que su filtro no se aplicó, en vez
+      de recibir silenciosamente el catálogo completo.
+    - Sin autenticación: es la vitrina pública para compradores, y un token
+      vencido en la cabecera no debe impedir consultarla.
+    """
+    filtros, errores = normalizar_filtros_catalogo(request.query_params)
+    if errores:
+        return Response(
+            {"error": "Parámetros de filtro inválidos.", "detalles": errores},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    lotes = filtrar_catalogo_lotes(**filtros)
+    datos = CatalogoLoteSerializer(lotes, many=True).data
+
+    respuesta = {
+        "total": len(datos),
+        "filtros_aplicados": {
+            campo: str(valor) if isinstance(valor, Decimal) else valor
+            for campo, valor in filtros.items()
+        },
+        "resultados": datos,
+    }
+    if not datos:
+        respuesta["mensaje"] = (
+            MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO if filtros else MENSAJE_CATALOGO_VACIO
+        )
+    return Response(respuesta, status=status.HTTP_200_OK)

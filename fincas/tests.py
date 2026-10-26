@@ -53,10 +53,18 @@ from fincas.services import (
     crear_lote,
     despublicar_lote_de_catalogo,
     editar_caracteristicas_calidad,
+    filtrar_catalogo_lotes,
     generar_codigo_lote,
     generar_snapshot_trazabilidad,
+    lotes_disponibles_en_catalogo,
+    normalizar_filtros_catalogo,
+    obtener_opciones_filtro_catalogo,
     publicar_lote_en_catalogo,
     validar_lote_para_publicacion,
+)
+from fincas.views import (
+    MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO,
+    MENSAJE_CATALOGO_VACIO,
 )
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from fincas.validators import (
@@ -4746,4 +4754,448 @@ class TestScrum242VistasWebPublicacionYCatalogo(TestCase):
 
         # El lote no publicado NO debe aparecer en el catálogo público
         self.assertNotIn("LOT-OCULTO-02", content)
+
+
+# ==============================================================================
+# PRUEBAS HU-20 / SCRUM-229: FILTRADO DEL CATÁLOGO COMERCIAL
+# Subtareas: SCRUM-246 a SCRUM-253
+# ==============================================================================
+
+class FiltradoCatalogoComercialHU20Tests(TestCase):
+    """
+    Suite integral de pruebas para el filtrado del catálogo comercial (HU-20).
+    Cubre:
+    - SCRUM-246 / HU20-ST1: Interfaz y controles de la barra de filtros.
+    - SCRUM-247 / HU20-ST2: Desplegable de municipios con lotes disponibles.
+    - SCRUM-248 / HU20-ST4: Reglas, normalización y validación de filtros.
+    - SCRUM-249 / HU20-ST5: Consultas de filtrado individual y combinadas con AND.
+    - SCRUM-250 / HU20-ST3: Endpoint REST /fincas/api/catalogo/ y respuestas 200/400.
+    - SCRUM-251 / HU20-ST6: Filtrado por calidad mínima en taza (SCA).
+    - SCRUM-252 / HU20-ST7: Manejo de estado sin resultados con mensajes y botón limpiar.
+    - SCRUM-253 / HU20-ST8: Cobertura integral de pruebas unitarias y de integración.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_catalogo_web = reverse("catalogo")
+        self.url_catalogo_api = reverse("api_catalogo")
+
+        self.productor_id = uuid.uuid4()
+
+        # Municipios (utilizar existentes de la fixture o crear si no existen)
+        self.mun_toledo = Municipio.objects.filter(nombre="Toledo", departamento="Norte de Santander").first()
+        if not self.mun_toledo:
+            self.mun_toledo = Municipio.objects.create(codigo="MUN_TOL_20", nombre="Toledo", departamento="Norte de Santander", activo=True)
+
+        self.mun_chinacota = Municipio.objects.filter(nombre="Chinácota", departamento="Norte de Santander").first()
+        if not self.mun_chinacota:
+            self.mun_chinacota = Municipio.objects.create(codigo="MUN_CHI_20", nombre="Chinácota", departamento="Norte de Santander", activo=True)
+
+        self.mun_salazar = Municipio.objects.filter(nombre="Salazar", departamento="Norte de Santander").first()
+        if not self.mun_salazar:
+            self.mun_salazar = Municipio.objects.create(codigo="MUN_SAL_20", nombre="Salazar", departamento="Norte de Santander", activo=True)
+
+        # Fincas
+        self.finca_toledo = Finca.objects.create(
+            nombre="Finca El Roble",
+            productor_id=self.productor_id,
+            municipio=self.mun_toledo,
+            vereda="El Hato",
+            activo=True,
+        )
+        self.finca_chinacota = Finca.objects.create(
+            nombre="Finca Bella Vista",
+            productor_id=self.productor_id,
+            municipio=self.mun_chinacota,
+            vereda="Iscalá",
+            activo=True,
+        )
+        self.finca_inactiva = Finca.objects.create(
+            nombre="Finca Inactiva",
+            productor_id=self.productor_id,
+            municipio=self.mun_toledo,
+            activo=False,
+        )
+
+        # Variedades
+        self.var_castillo = VariedadCafe.objects.create(nombre="Castillo HU20", especie=VariedadCafe.Especie.ARABICA, activo=True)
+        self.var_geisha = VariedadCafe.objects.create(nombre="Geisha HU20", especie=VariedadCafe.Especie.ARABICA, activo=True)
+        self.var_bourbon = VariedadCafe.objects.create(nombre="Bourbon HU20", especie=VariedadCafe.Especie.ARABICA, activo=True)
+
+        # Procesos
+        self.proc_lavado = ProcesoBeneficio.objects.create(codigo="PROC_LAV_20", nombre="Lavado HU20", orden=1, activo=True)
+        self.proc_natural = ProcesoBeneficio.objects.create(codigo="PROC_NAT_20", nombre="Natural HU20", orden=2, activo=True)
+        self.proc_honey = ProcesoBeneficio.objects.create(codigo="PROC_HON_20", nombre="Honey HU20", orden=3, activo=True)
+
+        # Cosechas
+        self.cosecha_toledo = Cosecha.objects.create(
+            finca=self.finca_toledo,
+            variedad=self.var_castillo,
+            fecha_cosecha="2026-09-01",
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("300.00"),
+            activo=True,
+        )
+        self.cosecha_chinacota = Cosecha.objects.create(
+            finca=self.finca_chinacota,
+            variedad=self.var_geisha,
+            fecha_cosecha="2026-09-15",
+            cantidad_total=Decimal("200.00"),
+            cantidad_disponible=Decimal("120.00"),
+            activo=True,
+        )
+        self.cosecha_inactiva = Cosecha.objects.create(
+            finca=self.finca_toledo,
+            variedad=self.var_castillo,
+            fecha_cosecha="2026-08-01",
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+            activo=False,
+        )
+
+        # Lotes publicados disponibles
+        # Lote A: Toledo, Castillo, Lavado, 86.5 SCA
+        self.lote_a = Lote.objects.create(
+            codigo="LOT-TOL-01",
+            cosecha=self.cosecha_toledo,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proc_lavado,
+            publicado_en_catalogo=True,
+            precio_referencial=Decimal("26000.00"),
+            activo=True,
+        )
+        self.calidad_a = CaracteristicasCalidad.objects.create(
+            lote=self.lote_a,
+            puntaje_taza=Decimal("86.50"),
+            humedad=Decimal("11.20"),
+            perfil_sensorial="Notas a chocolate y jazmín",
+        )
+
+        # Lote B: Chinácota, Geisha, Natural, 89.0 SCA
+        self.lote_b = Lote.objects.create(
+            codigo="LOT-CHI-02",
+            cosecha=self.cosecha_chinacota,
+            cantidad=Decimal("80.00"),
+            proceso_beneficio=self.proc_natural,
+            publicado_en_catalogo=True,
+            precio_referencial=Decimal("45000.00"),
+            activo=True,
+        )
+        self.calidad_b = CaracteristicasCalidad.objects.create(
+            lote=self.lote_b,
+            puntaje_taza=Decimal("89.00"),
+            humedad=Decimal("10.50"),
+            perfil_sensorial="Notas a mandarina y bergamota",
+        )
+
+        # Lote C: Toledo, Castillo, Natural, solo humedad (sin puntaje en taza)
+        self.lote_c = Lote.objects.create(
+            codigo="LOT-TOL-03",
+            cosecha=self.cosecha_toledo,
+            cantidad=Decimal("50.00"),
+            proceso_beneficio=self.proc_natural,
+            publicado_en_catalogo=True,
+            precio_referencial=Decimal("22000.00"),
+            activo=True,
+        )
+        self.calidad_c = CaracteristicasCalidad.objects.create(
+            lote=self.lote_c,
+            humedad=Decimal("11.80"),
+            perfil_sensorial="Frutos secos y panela",
+        )
+
+        # Lotes NO disponibles que deben ser SIEMPRE excluidos
+        # Lote agotado (cantidad = 0)
+        self.lote_agotado = Lote.objects.create(
+            codigo="LOT-AGOTADO",
+            cosecha=self.cosecha_toledo,
+            cantidad=Decimal("0.00"),
+            proceso_beneficio=self.proc_lavado,
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+        # Lote no publicado
+        self.lote_no_publicado = Lote.objects.create(
+            codigo="LOT-NO-PUB",
+            cosecha=self.cosecha_toledo,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proc_lavado,
+            publicado_en_catalogo=False,
+            activo=True,
+        )
+        # Lote inactivo
+        self.lote_inactivo = Lote.objects.create(
+            codigo="LOT-INACTIVO",
+            cosecha=self.cosecha_toledo,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proc_lavado,
+            publicado_en_catalogo=True,
+            activo=False,
+        )
+        # Lote con cosecha inactiva
+        self.lote_cosecha_inactiva = Lote.objects.create(
+            codigo="LOT-COS-INACT",
+            cosecha=self.cosecha_inactiva,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proc_lavado,
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-248 / HU20-ST4 (Criterios y reglas de filtrado)
+    # --------------------------------------------------------------------------
+    def test_lotes_disponibles_filtra_solo_lotes_validos(self):
+        """El queryset base solo contiene lotes publicados, activos, con stock y cosecha/finca activa."""
+        disponibles = list(lotes_disponibles_en_catalogo())
+        self.assertIn(self.lote_a, disponibles)
+        self.assertIn(self.lote_b, disponibles)
+        self.assertIn(self.lote_c, disponibles)
+
+        self.assertNotIn(self.lote_agotado, disponibles)
+        self.assertNotIn(self.lote_no_publicado, disponibles)
+        self.assertNotIn(self.lote_inactivo, disponibles)
+        self.assertNotIn(self.lote_cosecha_inactiva, disponibles)
+        self.assertEqual(len(disponibles), 3)
+
+    def test_normalizar_filtros_catalogo_valida_correctamente(self):
+        """La función normaliza parámetros válidos y captura errores con mensajes descriptivos."""
+        # Caso válido
+        params_validos = {
+            "municipio": str(self.mun_toledo.id),
+            "variedad": str(self.var_castillo.id),
+            "proceso": str(self.proc_lavado.id),
+            "puntaje_min": "85.5",
+            "q": "   café de altura   ",
+        }
+        filtros, errores = normalizar_filtros_catalogo(params_validos)
+        self.assertEqual(errores, {})
+        self.assertEqual(filtros["municipio"], self.mun_toledo.id)
+        self.assertEqual(filtros["variedad"], self.var_castillo.id)
+        self.assertEqual(filtros["proceso"], self.proc_lavado.id)
+        self.assertEqual(filtros["puntaje_min"], Decimal("85.5"))
+        self.assertEqual(filtros["q"], "café de altura")
+
+        # Caso con errores
+        params_invalidos = {
+            "municipio": "letras_en_vez_de_id",
+            "variedad": "-5",
+            "puntaje_min": "105.0",
+        }
+        filtros_inv, errores_inv = normalizar_filtros_catalogo(params_invalidos)
+        self.assertIn("municipio", errores_inv)
+        self.assertIn("variedad", errores_inv)
+        self.assertIn("puntaje_min", errores_inv)
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-247 / HU20-ST2 (Filtro por municipio)
+    # --------------------------------------------------------------------------
+    def test_filtrar_por_municipio(self):
+        """Filtrar por municipio retorna solo lotes cuya finca pertenezca a dicho municipio."""
+        lotes_toledo = list(filtrar_catalogo_lotes(municipio=self.mun_toledo.id))
+        self.assertIn(self.lote_a, lotes_toledo)
+        self.assertIn(self.lote_c, lotes_toledo)
+        self.assertNotIn(self.lote_b, lotes_toledo)
+
+        lotes_chinacota = list(filtrar_catalogo_lotes(municipio=self.mun_chinacota.id))
+        self.assertEqual(lotes_chinacota, [self.lote_b])
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-249 / HU20-ST5 (Filtro por variedad y proceso)
+    # --------------------------------------------------------------------------
+    def test_filtrar_por_variedad(self):
+        """Filtrar por variedad retorna lotes de la variedad especificada."""
+        lotes_castillo = list(filtrar_catalogo_lotes(variedad=self.var_castillo.id))
+        self.assertIn(self.lote_a, lotes_castillo)
+        self.assertIn(self.lote_c, lotes_castillo)
+        self.assertNotIn(self.lote_b, lotes_castillo)
+
+        lotes_geisha = list(filtrar_catalogo_lotes(variedad=self.var_geisha.id))
+        self.assertEqual(lotes_geisha, [self.lote_b])
+
+    def test_filtrar_por_proceso(self):
+        """Filtrar por proceso retorna lotes procesados con ese método de beneficio."""
+        lotes_lavado = list(filtrar_catalogo_lotes(proceso=self.proc_lavado.id))
+        self.assertEqual(lotes_lavado, [self.lote_a])
+
+        lotes_natural = list(filtrar_catalogo_lotes(proceso=self.proc_natural.id))
+        self.assertIn(self.lote_b, lotes_natural)
+        self.assertIn(self.lote_c, lotes_natural)
+        self.assertNotIn(self.lote_a, lotes_natural)
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-251 / HU20-ST6 (Filtro por calidad mínima SCA)
+    # --------------------------------------------------------------------------
+    def test_filtrar_por_calidad_minima_puntaje_taza(self):
+        """Filtrar por puntaje mínimo en taza excluye lotes con puntaje menor o sin evaluación."""
+        # >= 86.0 incluye Lote A (86.5) y Lote B (89.0), excluye Lote C (sin puntaje)
+        lotes_86 = list(filtrar_catalogo_lotes(puntaje_min=Decimal("86.00")))
+        self.assertIn(self.lote_a, lotes_86)
+        self.assertIn(self.lote_b, lotes_86)
+        self.assertNotIn(self.lote_c, lotes_86)
+
+        # >= 88.0 incluye solo Lote B (89.0)
+        lotes_88 = list(filtrar_catalogo_lotes(puntaje_min=Decimal("88.00")))
+        self.assertEqual(lotes_88, [self.lote_b])
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-249 / HU20-ST5 (Búsqueda por texto y filtros combinados AND)
+    # --------------------------------------------------------------------------
+    def test_filtrar_por_busqueda_libre_q(self):
+        """La búsqueda de texto coincide por código, finca, vereda, municipio y perfil sensorial."""
+        # Por código
+        self.assertEqual(list(filtrar_catalogo_lotes(q="LOT-CHI")), [self.lote_b])
+        # Por nombre de finca
+        self.assertEqual(list(filtrar_catalogo_lotes(q="Bella Vista")), [self.lote_b])
+        # Por vereda
+        self.assertEqual(list(filtrar_catalogo_lotes(q="Iscalá")), [self.lote_b])
+        # Por perfil sensorial
+        self.assertEqual(list(filtrar_catalogo_lotes(q="bergamota")), [self.lote_b])
+        self.assertEqual(list(filtrar_catalogo_lotes(q="chocolate")), [self.lote_a])
+
+    def test_filtros_combinados_con_logica_and(self):
+        """Varios filtros aplicados a la vez se combinan con AND estricto."""
+        # Toledo + Proceso Natural -> Lote C
+        res = list(filtrar_catalogo_lotes(municipio=self.mun_toledo.id, proceso=self.proc_natural.id))
+        self.assertEqual(res, [self.lote_c])
+
+        # Toledo + Proceso Natural + puntaje_min 85 -> Vacío (Lote C no tiene puntaje >= 85)
+        res_vacio = list(
+            filtrar_catalogo_lotes(
+                municipio=self.mun_toledo.id,
+                proceso=self.proc_natural.id,
+                puntaje_min=Decimal("85.00"),
+            )
+        )
+        self.assertEqual(res_vacio, [])
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-247 / HU20-ST2 (Opciones disponibles para desplegables)
+    # --------------------------------------------------------------------------
+    def test_obtener_opciones_filtro_catalogo_solo_incluye_existentes(self):
+        """Los desplegables solo ofrecen opciones que tengan al menos un lote disponible."""
+        opciones = obtener_opciones_filtro_catalogo()
+
+        # Toledo y Chinácota tienen lotes; Salazar NO tiene
+        muns = list(opciones["municipios"])
+        self.assertIn(self.mun_toledo, muns)
+        self.assertIn(self.mun_chinacota, muns)
+        self.assertNotIn(self.mun_salazar, muns)
+
+        # Castillo y Geisha tienen lotes; Bourbon NO tiene
+        vars_list = list(opciones["variedades"])
+        self.assertIn(self.var_castillo, vars_list)
+        self.assertIn(self.var_geisha, vars_list)
+        self.assertNotIn(self.var_bourbon, vars_list)
+
+        # Lavado y Natural tienen lotes; Honey NO tiene
+        procs = list(opciones["procesos"])
+        self.assertIn(self.proc_lavado, procs)
+        self.assertIn(self.proc_natural, procs)
+        self.assertNotIn(self.proc_honey, procs)
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-250 / HU20-ST3 (API REST del catálogo)
+    # --------------------------------------------------------------------------
+    def test_api_catalogo_endpoint_publico_200(self):
+        """GET /fincas/api/catalogo/ responde 200 sin autenticación con el catálogo completo."""
+        response = self.client.get(self.url_catalogo_api)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertEqual(data["total"], 3)
+        self.assertEqual(len(data["resultados"]), 3)
+        codigos = [item["codigo"] for item in data["resultados"]]
+        self.assertIn("LOT-TOL-01", codigos)
+        self.assertIn("LOT-CHI-02", codigos)
+        self.assertIn("LOT-TOL-03", codigos)
+
+    def test_api_catalogo_con_filtros_combinados(self):
+        """GET /fincas/api/catalogo/?municipio=...&puntaje_min=88 filtra y responde solo lotes coincidentes."""
+        url = f"{self.url_catalogo_api}?municipio={self.mun_chinacota.id}&puntaje_min=88.0"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["resultados"][0]["codigo"], "LOT-CHI-02")
+        self.assertEqual(data["resultados"][0]["finca"], "Finca Bella Vista")
+        self.assertEqual(data["resultados"][0]["puntaje_taza"], "89.00")
+
+    def test_api_catalogo_sin_resultados_devuelve_mensaje_amigable(self):
+        """Cuando los filtros no arrojan resultados, la API devuelve total 0 y mensaje descriptivo."""
+        url = f"{self.url_catalogo_api}?q=palabra_que_no_existe_en_ningun_lote"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertEqual(data["total"], 0)
+        self.assertEqual(data["resultados"], [])
+        self.assertEqual(data["mensaje"], MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO)
+
+    def test_api_catalogo_parametros_invalidos_responde_400(self):
+        """Parámetros no numéricos o fuera de rango en la API responden 400 Bad Request."""
+        url = f"{self.url_catalogo_api}?municipio=abc&puntaje_min=150"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertIn("municipio", data["detalles"])
+        self.assertIn("puntaje_min", data["detalles"])
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-246, SCRUM-252 (Vista Web del Catálogo y Estados Vacíos)
+    # --------------------------------------------------------------------------
+    def test_web_catalogo_renderiza_barra_de_filtros_y_opciones(self):
+        """La vista web del catálogo renderiza la barra de filtros con los desplegables poblados."""
+        response = self.client.get(self.url_catalogo_web)
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode("utf-8")
+
+        self.assertIn("Filtrar Lotes Disponibles", content)
+        self.assertIn("id_filtro_municipio", content)
+        self.assertIn("id_filtro_variedad", content)
+        self.assertIn("id_filtro_proceso", content)
+        self.assertIn("id_filtro_puntaje_min", content)
+        self.assertIn("id_filtro_q", content)
+
+        # Municipios con lotes deben aparecer en el HTML
+        self.assertIn("Toledo", content)
+        self.assertIn("Chinácota", content)
+        # Salazar NO debe aparecer en el select
+        self.assertNotIn("<option value=\"\" >Salazar", content)
+
+    def test_web_catalogo_filtrado_exitoso_muestra_chips_activos(self):
+        """Al filtrar por GET, la vista web muestra los lotes filtrados y los badges de filtros activos."""
+        url = f"{self.url_catalogo_web}?municipio={self.mun_chinacota.id}&puntaje_min=88"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode("utf-8")
+
+        self.assertIn("LOT-CHI-02", content)
+        self.assertNotIn("LOT-TOL-01", content)
+        self.assertIn("Filtros activos:", content)
+        self.assertIn("≥ 88 pts SCA", content)
+
+    def test_web_catalogo_sin_resultados_muestra_mensaje_y_boton_limpiar(self):
+        """Si un filtro no arroja resultados, muestra el mensaje amigable y el botón para limpiar filtros."""
+        url = f"{self.url_catalogo_web}?q=inexistente9999"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode("utf-8")
+
+        self.assertIn("No hay lotes que coincidan con los filtros", content)
+        self.assertIn(MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO, content)
+        self.assertIn("Ver todos los lotes disponibles", content)
+
+    def test_web_catalogo_completamente_vacio_muestra_mensaje_general(self):
+        """Si no hay ningún lote publicado en el catálogo, muestra el estado general vacío."""
+        Lote.objects.all().delete()
+        response = self.client.get(self.url_catalogo_web)
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode("utf-8")
+
+        self.assertIn("No hay lotes publicados en este momento", content)
+        self.assertIn(MENSAJE_CATALOGO_VACIO, content)
+
 

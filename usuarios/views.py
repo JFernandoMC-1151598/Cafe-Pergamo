@@ -632,32 +632,58 @@ def home_view(request: HttpRequest) -> HttpResponse:
 
 def catalogo_view(request: HttpRequest) -> HttpResponse:
     """
-    Renderiza la vitrina comercial y catálogo público de lotes de café (HU04 / HU19 / SCRUM-243).
-    Muestra los lotes con trazabilidad y calidad verificadas que han sido publicados
-    formalmente por los caficultores de Norte de Santander.
-    """
-    from fincas.models import Lote
+    Renderiza la vitrina comercial y catálogo público de lotes de café
+    con capacidades de búsqueda y filtrado multicriterio (HU04 / HU19 / HU20 / SCRUM-229).
 
-    lotes_publicados = (
-        Lote.objects.filter(
-            publicado_en_catalogo=True,
-            activo=True,
-        )
-        .select_related(
-            "cosecha__finca__municipio",
-            "cosecha__variedad",
-            "proceso_beneficio",
-            "caracteristicas_calidad",
-        )
-        .order_by("-fecha_publicacion", "-creado_en")
+    Criterios de aceptación (HU-20):
+    - SCRUM-246 / HU20-ST1: Barra de filtros interactiva con opciones activas.
+    - SCRUM-247 / HU20-ST2: Desplegable de municipios con lotes disponibles.
+    - SCRUM-248 / HU20-ST4: Reglas y normalización de filtros combinados.
+    - SCRUM-249 / HU20-ST5: Consulta de filtrado AND sobre lotes disponibles.
+    - SCRUM-251 / HU20-ST6: Filtrado por calidad mínima en taza (SCA).
+    - SCRUM-252 / HU20-ST7: Manejo amigable cuando no hay resultados para los filtros.
+    """
+    from fincas.services import (
+        filtrar_catalogo_lotes,
+        lotes_disponibles_en_catalogo,
+        normalizar_filtros_catalogo,
+        obtener_opciones_filtro_catalogo,
     )
+    from fincas.views import (
+        MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO,
+        MENSAJE_CATALOGO_VACIO,
+    )
+
+    filtros, errores = normalizar_filtros_catalogo(request.GET)
+    if errores:
+        for campo, err in errores.items():
+            messages.warning(request, f"Filtro '{campo}': {err}")
+
+    lotes_filtrados = filtrar_catalogo_lotes(**filtros)
+    total_catalogo = lotes_disponibles_en_catalogo().count()
+    opciones = obtener_opciones_filtro_catalogo()
+
+    filtros_activos = {
+        "municipio": request.GET.get("municipio", "").strip(),
+        "variedad": request.GET.get("variedad", "").strip(),
+        "proceso": request.GET.get("proceso", "").strip(),
+        "puntaje_min": request.GET.get("puntaje_min", "").strip(),
+        "q": request.GET.get("q", "").strip(),
+    }
+    hay_filtros_activos = any(bool(v) for v in filtros_activos.values())
 
     return render(
         request,
         "usuarios/catalogo.html",
         {
-            "lotes": lotes_publicados,
-            "total_lotes": lotes_publicados.count(),
+            "lotes": lotes_filtrados,
+            "total_lotes": lotes_filtrados.count(),
+            "total_catalogo": total_catalogo,
+            "opciones": opciones,
+            "filtros_activos": filtros_activos,
+            "hay_filtros_activos": hay_filtros_activos,
+            "mensaje_sin_resultados": MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO,
+            "mensaje_catalogo_vacio": MENSAJE_CATALOGO_VACIO,
         },
     )
 
