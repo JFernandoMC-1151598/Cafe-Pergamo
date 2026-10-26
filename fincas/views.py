@@ -122,6 +122,36 @@ def _resolver_productor_id(request):
     return None
 
 
+def _puede_modificar_calidad(request, lote) -> bool:
+    """
+    Autoriza cambios de calidad al catador o al productor dueño del lote.
+
+    El código de rol proviene del JWT; la propiedad se valida contra el
+    productor de la finca y nunca contra un identificador enviado en el body.
+    """
+    token = getattr(request, "auth", None)
+    role_code = ""
+    if token is not None:
+        role_code = (token.get("role_code", "") or "").upper()
+
+    if role_code == "CATADOR":
+        return True
+
+    if role_code != "PRODUCTOR":
+        return False
+
+    productor_id = request.session.get("usuario_id")
+    if productor_id:
+        return str(productor_id) == str(lote.cosecha.finca.productor_id)
+
+    correo = token.get("email", "") if token is not None else ""
+    if not correo:
+        return False
+
+    perfil = Usuario.objects.filter(correo__iexact=correo).first()
+    return bool(perfil and str(perfil.id) == str(lote.cosecha.finca.productor_id))
+
+
 def registrar_finca_view(request):
     """
     Vista web para captura y persistencia de fincas (SCRUM-96 / HU06-ST3).
@@ -838,6 +868,12 @@ def api_caracteristicas_calidad_view(request, lote_id):
                 status=status.HTTP_404_NOT_FOUND,
             )
         return Response(CaracteristicasCalidadSerializer(caracteristicas).data)
+
+    if not _puede_modificar_calidad(request, lote):
+        return Response(
+            {"detail": "Solo el productor dueño del lote o un catador puede modificar su información de calidad."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
     if request.method == "POST":
         if caracteristicas is not None:

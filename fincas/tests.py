@@ -13,6 +13,7 @@ Integración de:
   cosechas (complemento) y de lotes (SCRUM-144); y cobertura de pruebas de código único, restricción de
   cantidad y flujo exitoso de registro (ST6 / SCRUM-147).
 - HU-15-ST1 (SCRUM-155): Persistencia API de características físicas y de calidad del lote.
+- HU-15-ST6 (SCRUM-159): Autorización de edición para productor dueño o catador.
 """
 
 import uuid
@@ -3237,6 +3238,13 @@ class CaracteristicasCalidadApiTests(TestCase):
         self.url = reverse("api_lote_calidad", kwargs={"lote_id": self.lote.pk})
         self.client = Client()
 
+    def _quality_headers(self, role_code="CATADOR"):
+        user = User.objects.create_user(username=f"calidad_{uuid.uuid4().hex[:8]}")
+        token = AccessToken.for_user(user)
+        token["role_code"] = role_code
+        token["email"] = f"{user.username}@test.local"
+        return {"HTTP_AUTHORIZATION": f"Bearer {token}"}
+
     def test_crea_consulta_y_actualiza_caracteristicas(self):
         datos = {
             "humedad": "11.50",
@@ -3249,14 +3257,14 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             datos,
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 201, respuesta.content)
         self.assertIn("lote_id", respuesta.json(), respuesta.content)
         self.assertEqual(respuesta.json()["lote_id"], self.lote.pk)
         self.assertEqual(respuesta.json()["puntaje_taza"], "84.50")
 
-        consulta = self.client.get(self.url, **_jwt_bearer_headers())
+        consulta = self.client.get(self.url, **self._quality_headers("PRODUCTOR"))
         self.assertEqual(consulta.status_code, 200)
         self.assertEqual(consulta.json()["lote_codigo"], "CALIDAD01")
 
@@ -3264,7 +3272,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"puntaje_taza": "86.00"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(actualizacion.status_code, 200)
         self.assertEqual(actualizacion.json()["puntaje_taza"], "86.00")
@@ -3276,7 +3284,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"humedad": "12.00"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn("lote", respuesta.json())
@@ -3286,7 +3294,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"puntaje_taza": "101.00"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn("puntaje_taza", respuesta.json())
@@ -3297,7 +3305,7 @@ class CaracteristicasCalidadApiTests(TestCase):
                 self.url,
                 {campo: valor},
                 content_type="application/json",
-                **_jwt_bearer_headers(),
+                **self._quality_headers(),
             )
             self.assertEqual(respuesta.status_code, 400)
             self.assertIn(campo, respuesta.json())
@@ -3307,7 +3315,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"humedad": "once coma cinco"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn("humedad", respuesta.json())
@@ -3323,11 +3331,33 @@ class CaracteristicasCalidadApiTests(TestCase):
                 "observaciones": "  Muestra válida  ",
             },
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 201, respuesta.content)
         self.assertEqual(respuesta.json()["perfil_sensorial"], "Chocolate")
         self.assertEqual(respuesta.json()["observaciones"], "Muestra válida")
+
+    def test_productor_dueno_puede_modificar_con_sesion(self):
+        productor_id = self.lote.cosecha.finca.productor_id
+        _iniciar_sesion_productor(self.client, productor_id)
+        respuesta = self.client.post(
+            self.url,
+            {"humedad": "12.00"},
+            content_type="application/json",
+            **self._quality_headers("PRODUCTOR"),
+        )
+        self.assertEqual(respuesta.status_code, 201, respuesta.content)
+
+    def test_productor_ajeno_y_otro_rol_no_pueden_modificar(self):
+        _iniciar_sesion_productor(self.client, uuid.uuid4())
+        for role_code in ("PRODUCTOR", "COMPRADOR"):
+            respuesta = self.client.post(
+                self.url,
+                {"humedad": "12.00"},
+                content_type="application/json",
+                **self._quality_headers(role_code),
+            )
+            self.assertEqual(respuesta.status_code, 403)
 
     def test_servicio_actualiza_y_puede_limpiar_un_campo_de_texto(self):
         registro = crear_caracteristicas_calidad(
