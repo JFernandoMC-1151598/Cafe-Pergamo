@@ -4739,3 +4739,229 @@ class FichaDigitalAuditoriaTests(TestCase):
         self.assertEqual(registro.detalles.get("cambio"), "Asignación de etapa de secado")
 
 
+# ==============================================================================
+# SUITE HU-17 (SCRUM-173): PRUEBAS INTEGRALES DE GENERACIÓN Y ACTUALIZACIÓN (E2E)
+# ==============================================================================
+
+class FichaDigitalGeneracionActualizacionE2ETests(TestCase):
+    """
+    Pruebas integrales de punta a punta (E2E) para HU17-ST8 (SCRUM-173):
+    Validar la generación y actualización automática de la Ficha Digital
+    consolidada ante eventos de ciclo de vida del lote.
+
+    Criterio de Aceptación HU-17 (SCRUM-21):
+    'La ficha se actualiza automáticamente al registrarse nueva información del lote.'
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+
+        self.finca = Finca.objects.create(
+            nombre="Finca Trazabilidad E2E",
+            municipio=self.municipio,
+            vereda="El Porvenir",
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Borbón Rosado",
+            defaults={"especie": "Arábica", "descripcion": "Variedad exótica"},
+        )
+        self.proceso_lavado, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={"nombre": "Lavado Tradicional", "descripcion": "Fermentación estándar"},
+        )
+        self.proceso_natural, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="NATURAL",
+            defaults={"nombre": "Natural Clásico", "descripcion": "Secado en cereza entera"},
+        )
+        self.estado_disponible, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Listo para venta"},
+        )
+        self.estado_vendido, _ = EstadoLote.objects.get_or_create(
+            codigo="VENDIDO",
+            defaults={"nombre": "Vendido", "descripcion": "Lote adjudicado"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 10),
+            cantidad_total=Decimal("1500.00"),
+            cantidad_disponible=Decimal("1500.00"),
+            activo=True,
+        )
+
+    def test_generacion_automatica_inmediata_al_crear_lote_con_servicio(self):
+        """
+        Al registrar un nuevo lote mediante el servicio de negocio, la ficha digital
+        se genera de forma inmediata y automática, estando disponible tanto en API como en Web.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("350.00"),
+            codigo="LOTEE2EAUTO01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        # 1. Consulta directa al servicio de dominio
+        ficha = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha["codigo"], "LOTEE2EAUTO01")
+        self.assertEqual(ficha["cantidad_kg"], Decimal("350.00"))
+        self.assertEqual(ficha["proceso_beneficio"]["codigo"], "LAVADO")
+        self.assertEqual(ficha["url_publica"], "/trazabilidad/lote/LOTEE2EAUTO01/")
+
+        # 2. Consulta inmediata por API REST
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        self.assertEqual(resp_api.status_code, 200)
+        data_api = resp_api.json()
+        self.assertEqual(data_api["codigo"], "LOTEE2EAUTO01")
+        self.assertEqual(data_api["cantidad_kg"], "350.00")
+
+        # 3. Consulta inmediata por interfaz Web HTML
+        url_web = reverse("trazabilidad_lote_publica_root", kwargs={"codigo": lote.codigo})
+        resp_web = self.client.get(url_web)
+        self.assertEqual(resp_web.status_code, 200)
+        self.assertIn("LOTEE2EAUTO01", resp_web.content.decode("utf-8"))
+        self.assertIn("Finca Trazabilidad E2E", resp_web.content.decode("utf-8"))
+
+    def test_actualizacion_automatica_en_tiempo_real_por_mutacion_en_finca(self):
+        """
+        Criterio de Aceptación HU-17:
+        Al mutar datos del predio (georreferenciación GPS), la siguiente consulta
+        a la ficha digital refleja las nuevas coordenadas y eleva el porcentaje de completitud.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("200.00"),
+            codigo="LOTEE2EMUT01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        # Estado inicial: finca sin GPS (completitud base 40 + proceso 15 = 55%)
+        ficha_inicial = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertFalse(ficha_inicial["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(ficha_inicial["completitud_porcentaje"], 55)
+
+        # Mutación en la BD: Se agregan coordenadas GPS WGS84
+        self.finca.latitud = Decimal("7.865432")
+        self.finca.longitud = Decimal("-72.765432")
+        self.finca.save()
+
+        # Consulta inmediata: Reflejo en tiempo real (+10% georreferenciación = 65%)
+        ficha_actualizada = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertTrue(ficha_actualizada["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(ficha_actualizada["finca"]["latitud"], Decimal("7.865432"))
+        self.assertEqual(ficha_actualizada["finca"]["longitud"], Decimal("-72.765432"))
+        self.assertEqual(ficha_actualizada["completitud_porcentaje"], 65)
+
+        # Reflejo inmediato en la API REST pública
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        data_api = resp_api.json()
+        self.assertTrue(data_api["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(data_api["completitud_porcentaje"], 65)
+
+    def test_actualizacion_automatica_en_tiempo_real_por_cambio_de_estado_comercial(self):
+        """
+        Al cambiar el estado del lote de DISPONIBLE a VENDIDO, la ficha digital
+        actualiza automáticamente su estado comercial y disponibilidad para venta.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("300.00"),
+            codigo="LOTEE2EEST01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        ficha_inicial = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha_inicial["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha_inicial["disponible_para_venta"])
+
+        # Mutación de negocio: Lote vendido
+        lote.estado_lote = self.estado_vendido
+        lote.save()
+
+        # Consulta inmediata a la vista web pública
+        url_web = reverse("trazabilidad_lote_publica_root", kwargs={"codigo": lote.codigo})
+        resp_web = self.client.get(url_web)
+        self.assertEqual(resp_web.status_code, 200)
+        self.assertIn("Vendido", resp_web.content.decode("utf-8"))
+
+        # Consulta inmediata a la API
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        data_api = resp_api.json()
+        self.assertEqual(data_api["estado_comercial"], "VENDIDO")
+        self.assertFalse(data_api["disponible_para_venta"])
+
+    def test_actualizacion_automatica_por_reasignacion_de_proceso(self):
+        """
+        Al reasignar el proceso de beneficio del lote (ej. de Lavado a Natural),
+        la ficha digital refleja el nuevo proceso al instante.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("180.00"),
+            codigo="LOTEE2EPROC01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        ficha_lavado = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha_lavado["proceso_beneficio"]["codigo"], "LAVADO")
+
+        # Mutación de proceso a Natural
+        lote.proceso_beneficio = self.proceso_natural
+        lote.save()
+
+        ficha_natural = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha_natural["proceso_beneficio"]["codigo"], "NATURAL")
+        self.assertEqual(ficha_natural["proceso_beneficio"]["nombre"], "Natural Clásico")
+
+    def test_ciclo_completo_con_auditoria_y_consistencia(self):
+        """
+        Prueba el ciclo de vida completo: Creación de lote -> Consulta inicial ->
+        Actualización de datos -> Consulta posterior -> Verificación de bitácora cronológica.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("500.00"),
+            codigo="LOTEE2EAUD01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        # 1. Primera consulta por Web
+        url_web = reverse("lote_ficha_digital_web", kwargs={"codigo": lote.codigo})
+        self.client.get(url_web)
+
+        # 2. Mutación en el lote
+        lote.cantidad = Decimal("480.00")
+        lote.save()
+
+        # 3. Segunda consulta por API
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        self.assertEqual(resp_api.json()["cantidad_kg"], "480.00")
+
+        # 4. Verificación de bitácora
+        auditorias = list(BitacoraFichaDigital.objects.filter(lote=lote).order_by("creado_en"))
+        self.assertEqual(len(auditorias), 2)
+        self.assertEqual(auditorias[0].tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_WEB)
+        self.assertEqual(auditorias[1].tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_API)
+
+
+
