@@ -6,6 +6,8 @@ Subtarea: SCRUM-97: Validar formato de coordenadas.
 Subtarea: SCRUM-141 / HU13-ST1: Definir modelo de datos y relación Cosecha-Lote.
 Subtarea: SCRUM-157 / HU15-ST5: Diseñar el modelo de datos para características
 físicas y de calidad del lote.
+Subtarea: SCRUM-148 / HU14-ST1 y SCRUM-149 / HU14-ST2: modelo de etapas de
+beneficio del lote (requerido por el formulario de captura y el historial).
 
 Cubre:
 - RF06: registrar fincas asociadas a cada productor (perfil usuarios.Usuario).
@@ -505,6 +507,66 @@ class CaracteristicasCalidad(models.Model):
 
     def __str__(self):
         return f"Calidad del lote {self.lote.codigo}"
+
+
+class EtapaBeneficio(models.Model):
+    """
+    Etapa del proceso de beneficio registrada sobre un lote (HU-14 / RF13).
+
+    La etapa se elige de una lista fija (`TipoEtapa`), nunca como texto
+    libre (criterio de aceptación de HU14-ST1). No se confunde con el
+    catálogo `ProcesoBeneficio` del lote, que describe el método general
+    (Lavado, Honey, Natural...): aquí se documenta cada paso concreto
+    que se le hizo al lote, con su fecha y observaciones, para construir
+    el historial cronológico de HU14-ST2.
+    """
+
+    class TipoEtapa(models.TextChoices):
+        DESPULPADO = "DESPULPADO", "Despulpado"
+        FERMENTACION = "FERMENTACION", "Fermentación"
+        LAVADO = "LAVADO", "Lavado"
+        SECADO = "SECADO", "Secado"
+
+    lote = models.ForeignKey(
+        Lote,
+        on_delete=models.CASCADE,
+        related_name="etapas_beneficio",
+        verbose_name="Lote",
+        help_text="Lote al que se le registra la etapa de beneficio.",
+    )
+
+    etapa = models.CharField(
+        max_length=20,
+        choices=TipoEtapa.choices,
+        verbose_name="Etapa de beneficio",
+        help_text="Etapa del proceso de beneficio (lista fija, no texto libre).",
+    )
+
+    fecha = models.DateField(
+        verbose_name="Fecha de la etapa",
+        help_text="Fecha en que se realizó la etapa sobre el lote.",
+    )
+
+    observaciones = models.TextField(
+        blank=True,
+        default="",
+        verbose_name="Observaciones",
+        help_text="Notas libres sobre las condiciones en que se realizó la etapa.",
+    )
+
+    creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de registro")
+
+    class Meta:
+        managed = True
+        db_table = "etapas_beneficio"
+        verbose_name = "Etapa de beneficio"
+        verbose_name_plural = "Etapas de beneficio"
+        # Orden cronológico del historial (HU14-ST2): primero por la fecha
+        # de la etapa y, a igual fecha, por el orden en que se registró.
+        ordering = ["fecha", "creado_en", "id"]
+
+    def __str__(self):
+        return f"{self.get_etapa_display()} - Lote {self.lote.codigo} ({self.fecha})"
 
 
 class BitacoraPublicacionLote(models.Model):

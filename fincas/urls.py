@@ -8,6 +8,8 @@ Subtarea: SCRUM-144 / HU13: Crear formulario o pantalla de registro de lotes
 (incluye también la ruta de registro de cosechas, complemento necesario).
 Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
 físicas y de calidad del lote.
+Subtarea: SCRUM-148 / HU14-ST1 y SCRUM-149 / HU14-ST2: registro e historial
+de etapas de beneficio del lote.
 """
 
 from django.urls import path
@@ -22,6 +24,8 @@ urlpatterns = [
     path('cosechas/registro/', views.registrar_cosecha_view, name='cosecha_registro'),
     path('lotes/registro/', views.registrar_lote_view, name='lote_registro'),
     path('mis-lotes/', views.mis_lotes_view, name='mis_lotes'),
+    path('lotes/<int:pk>/', views.detalle_lote_view, name='lote_detalle'),
+    path('lotes/<int:pk>/etapas/nueva/', views.registrar_etapa_beneficio_view, name='lote_etapa_registro'),
     path('lotes/<int:pk>/publicar/', views.publicar_lote_web_view, name='lote_publicar'),
     path('lotes/<int:pk>/despublicar/', views.despublicar_lote_web_view, name='lote_despublicar'),
 
