@@ -400,3 +400,85 @@ class Lote(models.Model):
 
     def __str__(self):
         return f"Lote {self.codigo} ({self.cantidad} kg) de {self.cosecha}"
+
+
+class BitacoraFichaDigital(models.Model):
+    """
+    Registro inmutable de auditoría para la Ficha Digital Consolidada
+    (HU-17 / ST7 - SCRUM-172).
+    Registra consultas públicas (Web y API/QR) y eventos de actualización
+    de trazabilidad del lote.
+    """
+
+    TIPO_CONSULTA_WEB = "CONSULTA_WEB"
+    TIPO_CONSULTA_API = "CONSULTA_API"
+    TIPO_ACTUALIZACION = "ACTUALIZACION"
+
+    TIPOS_EVENTO = [
+        (TIPO_CONSULTA_WEB, "Consulta Web de Ficha Digital"),
+        (TIPO_CONSULTA_API, "Consulta API REST / Escaneo QR"),
+        (TIPO_ACTUALIZACION, "Actualización de Datos de Trazabilidad"),
+    ]
+
+    lote = models.ForeignKey(
+        Lote,
+        on_delete=models.CASCADE,
+        related_name="auditorias_ficha",
+        verbose_name="Lote auditado",
+    )
+    tipo_evento = models.CharField(
+        max_length=30,
+        choices=TIPOS_EVENTO,
+        default=TIPO_CONSULTA_WEB,
+        verbose_name="Tipo de evento",
+    )
+    completitud_porcentaje = models.PositiveSmallIntegerField(
+        default=0,
+        verbose_name="Completitud al momento del evento (%)",
+    )
+    es_consistente = models.BooleanField(
+        default=True,
+        verbose_name="Estado de consistencia de datos",
+    )
+    ip_address = models.GenericIPAddressField(
+        null=True,
+        blank=True,
+        verbose_name="Dirección IP",
+    )
+    user_agent = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        verbose_name="Agente de usuario / Navegador",
+    )
+    usuario_identificador = models.CharField(
+        max_length=150,
+        null=True,
+        blank=True,
+        verbose_name="Usuario / Actor",
+        help_text="Identificador o correo del usuario, o 'Público / Escaneo QR' si fue acceso público.",
+    )
+    detalles = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="Detalles contextuales del evento",
+    )
+    creado_en = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Fecha y hora del registro",
+    )
+
+    class Meta:
+        managed = True
+        db_table = "fincas_bitacora_ficha_digital"
+        verbose_name = "Auditoría de Ficha Digital"
+        verbose_name_plural = "Bitácora de Fichas Digitales"
+        ordering = ["-creado_en"]
+        indexes = [
+            models.Index(fields=["lote", "-creado_en"], name="idx_bitacora_lote_fecha"),
+            models.Index(fields=["tipo_evento"], name="idx_bitacora_tipo_evento"),
+        ]
+
+    def __str__(self):
+        return f"{self.tipo_evento} - Lote {self.lote.codigo} ({self.creado_en:%Y-%m-%d %H:%M})"
+

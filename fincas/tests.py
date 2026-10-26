@@ -39,13 +39,14 @@ from fincas.forms import (
     LoteRegistroForm,
     MunicipioForm,
 )
-from fincas.models import Cosecha, Finca, Lote, Municipio
+from fincas.models import BitacoraFichaDigital, Cosecha, Finca, Lote, Municipio
 from fincas.services import (
     crear_cosecha,
     crear_lote,
     evaluar_consistencia_y_completitud_lote,
     generar_codigo_lote,
     obtener_ficha_consolidada_lote,
+    registrar_auditoria_ficha_digital,
 )
 from fincas.serializers import FichaDigitalSerializer
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
@@ -4608,4 +4609,133 @@ class FichaDigitalConsistenciaCompletitudTests(TestCase):
         self.assertIn("advertencias", data)
         self.assertIn("campos_faltantes", data)
         self.assertIn("campos_completos", data)
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-172): AUDITORÍA Y BITÁCORA DE LA FICHA DIGITAL
+# ==============================================================================
+
+class FichaDigitalAuditoriaTests(TestCase):
+    """
+    Pruebas automatizadas para HU17-ST7 (SCRUM-172): Registrar auditoría de
+    consultas y cambios en la Ficha Digital Consolidada.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+
+        self.finca = Finca.objects.create(
+            nombre="Finca Auditoria",
+            municipio=self.municipio,
+            vereda="Siravita",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.865432"),
+            longitud=Decimal("-72.765432"),
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Caturra",
+            defaults={"especie": "Arábica", "descripcion": "Variedad clásica"},
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={"nombre": "Lavado Tradicional", "descripcion": "Beneficio húmedo"},
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Lote en venta"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("800.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-AUDIT-01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("200.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_auditoria_registrada_al_consultar_vista_web(self):
+        """Al visitar la ficha digital en la web, se registra una entrada de CONSULTA_WEB en la bitácora."""
+        conteo_inicial = BitacoraFichaDigital.objects.filter(lote=self.lote).count()
+
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+
+        conteo_final = BitacoraFichaDigital.objects.filter(lote=self.lote).count()
+        self.assertEqual(conteo_final, conteo_inicial + 1)
+
+        auditoria = BitacoraFichaDigital.objects.filter(lote=self.lote).latest("creado_en")
+        self.assertEqual(auditoria.tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_WEB)
+        self.assertEqual(auditoria.usuario_identificador, "Público / Escaneo QR")
+        self.assertGreaterEqual(auditoria.completitud_porcentaje, 65)
+        self.assertTrue(auditoria.es_consistente)
+        self.assertEqual(auditoria.detalles.get("canal"), "web")
+
+    def test_auditoria_registrada_al_consultar_api_rest(self):
+        """Al consultar la ficha vía API REST (ej. app móvil / QR), se registra CONSULTA_API."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+
+        auditoria = BitacoraFichaDigital.objects.filter(
+            lote=self.lote,
+            tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API,
+        ).latest("creado_en")
+        self.assertIsNotNone(auditoria)
+        self.assertEqual(auditoria.detalles.get("canal"), "api_rest")
+
+    def test_auditoria_captura_usuario_en_sesion(self):
+        """Si un usuario autenticado consulta la ficha, se captura su identidad en la bitácora."""
+        _iniciar_sesion_productor(self.client, self.productor_uuid)
+
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+
+        auditoria = BitacoraFichaDigital.objects.filter(lote=self.lote).latest("creado_en")
+        self.assertIn(str(self.productor_uuid), auditoria.usuario_identificador)
+
+    def test_auditoria_captura_ip_y_user_agent(self):
+        """Verifica la persistencia de dirección IP y User-Agent en la auditoría."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(
+            url,
+            HTTP_X_FORWARDED_FOR="190.84.120.33",
+            HTTP_USER_AGENT="CaficultoresApp/1.0 (Mobile QR Reader)",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        auditoria = BitacoraFichaDigital.objects.filter(lote=self.lote).latest("creado_en")
+        self.assertEqual(auditoria.ip_address, "190.84.120.33")
+        self.assertEqual(auditoria.user_agent, "CaficultoresApp/1.0 (Mobile QR Reader)")
+
+    def test_servicio_registrar_auditoria_evento_actualizacion(self):
+        """Verifica el registro programático de eventos de actualización de trazabilidad."""
+        registro = registrar_auditoria_ficha_digital(
+            lote=self.lote,
+            tipo_evento=BitacoraFichaDigital.TIPO_ACTUALIZACION,
+            completitud_porcentaje=80,
+            es_consistente=True,
+            detalles={"cambio": "Asignación de etapa de secado"},
+            usuario_identificador="operario_beneficio@pergamo.com",
+        )
+
+        self.assertEqual(registro.tipo_evento, BitacoraFichaDigital.TIPO_ACTUALIZACION)
+        self.assertEqual(registro.usuario_identificador, "operario_beneficio@pergamo.com")
+        self.assertEqual(registro.completitud_porcentaje, 80)
+        self.assertEqual(registro.detalles.get("cambio"), "Asignación de etapa de secado")
+
 

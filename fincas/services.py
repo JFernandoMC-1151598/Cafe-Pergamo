@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Union
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
-from .models import Cosecha, Finca, Lote, Municipio
+from .models import BitacoraFichaDigital, Cosecha, Finca, Lote, Municipio
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 
 
@@ -865,3 +865,66 @@ def obtener_ficha_consolidada_lote(lote_identificador: Union[Lote, int, str]) ->
         "campos_completos": evaluacion["campos_completos"],
         "campos_faltantes": evaluacion["campos_faltantes"],
     }
+
+
+def registrar_auditoria_ficha_digital(
+    *,
+    lote: Lote,
+    tipo_evento: str,
+    request: Optional[Any] = None,
+    completitud_porcentaje: Optional[int] = None,
+    es_consistente: bool = True,
+    detalles: Optional[Dict[str, Any]] = None,
+    usuario_identificador: Optional[str] = None,
+) -> BitacoraFichaDigital:
+    """
+    Registra una entrada inmutable de auditoría para la ficha digital de un lote
+    (HU-17 / ST7 - SCRUM-172).
+
+    Captura de forma segura:
+      - Tipo de evento (CONSULTA_WEB, CONSULTA_API, ACTUALIZACION).
+      - Identificador del actor (usuario logueado o 'Público / Escaneo QR').
+      - Dirección IP y User-Agent.
+      - Porcentaje de completitud y estado de consistencia en el momento de la consulta.
+      - Detalles adicionales contextuales (JSON).
+    """
+    ip_address = None
+    user_agent = None
+    actor = usuario_identificador
+
+    if request:
+        # Extraer IP remota respetando proxies reversos
+        forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
+        if forwarded_for:
+            ip_address = forwarded_for.split(",")[0].strip()
+        else:
+            ip_address = request.META.get("REMOTE_ADDR") or None
+
+        # Extraer User-Agent
+        ua = request.META.get("HTTP_USER_AGENT", "")
+        user_agent = ua[:255] if ua else None
+
+        # Resolver actor si no se pasó explícito
+        if not actor:
+            user = getattr(request, "user", None)
+            if user and getattr(user, "is_authenticated", False):
+                actor = getattr(user, "email", "") or getattr(user, "username", "") or str(user.pk)
+            elif hasattr(request, "session") and request.session.get("usuario_id"):
+                actor = f"Usuario Sesión {request.session.get('usuario_id')}"
+            else:
+                actor = "Público / Escaneo QR"
+
+    if not actor:
+        actor = "Sistema / Automático"
+
+    return BitacoraFichaDigital.objects.create(
+        lote=lote,
+        tipo_evento=tipo_evento,
+        completitud_porcentaje=completitud_porcentaje or 0,
+        es_consistente=es_consistente,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        usuario_identificador=actor,
+        detalles=detalles or {},
+    )
+

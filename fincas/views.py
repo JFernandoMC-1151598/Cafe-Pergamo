@@ -36,7 +36,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
 from .forms import CosechaRegistroForm, FincaRegistroForm, FincaModelForm, LoteRegistroForm, MunicipioForm
-from .models import Cosecha, Finca, Lote, Municipio
+from .models import BitacoraFichaDigital, Cosecha, Finca, Lote, Municipio
 from .permissions import rol_puede_administrar_catalogos
 from .serializers import (
     CosechaCreateSerializer,
@@ -54,6 +54,7 @@ from .services import (
     inactivar_municipio,
     obtener_ficha_consolidada_lote,
     reactivar_municipio,
+    registrar_auditoria_ficha_digital,
     toggle_estado_municipio,
 )
 from usuarios.models import Usuario
@@ -1030,6 +1031,21 @@ def api_consultar_ficha_digital_view(request, codigo=None):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
+    # Registrar auditoría de consulta API / QR (HU-17 / ST7 - SCRUM-172)
+    try:
+        lote_obj = Lote.objects.filter(id=ficha_data["id"]).first()
+        if lote_obj:
+            registrar_auditoria_ficha_digital(
+                lote=lote_obj,
+                tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API,
+                request=request,
+                completitud_porcentaje=ficha_data.get("completitud_porcentaje", 0),
+                es_consistente=ficha_data.get("es_consistente", True),
+                detalles={"canal": "api_rest", "ruta": request.path},
+            )
+    except Exception:
+        pass
+
     return Response(serializer.data, status=status.HTTP_200_OK)
 
 
@@ -1059,5 +1075,20 @@ def ficha_digital_web_view(request, codigo=None):
             {"codigo": codigo_limpio, "error_detalle": str(exc)},
             status=500,
         )
+
+    # Registrar auditoría de consulta Web / QR (HU-17 / ST7 - SCRUM-172)
+    try:
+        lote_obj = Lote.objects.filter(id=ficha["id"]).first()
+        if lote_obj:
+            registrar_auditoria_ficha_digital(
+                lote=lote_obj,
+                tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_WEB,
+                request=request,
+                completitud_porcentaje=ficha.get("completitud_porcentaje", 0),
+                es_consistente=ficha.get("es_consistente", True),
+                detalles={"canal": "web", "ruta": request.path},
+            )
+    except Exception:
+        pass
 
     return render(request, "fincas/ficha_digital.html", {"ficha": ficha})
