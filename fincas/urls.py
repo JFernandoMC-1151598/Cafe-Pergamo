@@ -16,10 +16,12 @@ urlpatterns = [
     path('registro/', views.registrar_finca_view, name='finca_registro'),
     path('mis-fincas/', views.mis_fincas_view, name='mis_fincas'),
 
-    # Interfaz Web de Cosechas y Lotes (HU-13)
+    # Interfaz Web de Cosechas y Lotes (HU-13 / HU-17)
     path('cosechas/registro/', views.registrar_cosecha_view, name='cosecha_registro'),
     path('lotes/registro/', views.registrar_lote_view, name='lote_registro'),
     path('mis-lotes/', views.mis_lotes_view, name='mis_lotes'),
+    path('lotes/<str:codigo>/ficha/', views.ficha_digital_web_view, name='lote_ficha_digital_web'),
+    path('trazabilidad/lote/<str:codigo>/', views.ficha_digital_web_view, name='trazabilidad_lote_publica'),
 
     # Interfaz Web de Catálogo de Municipios (HU-09 / SCRUM-111)
     path('municipios/', views.admin_municipios_view, name='admin_municipios'),

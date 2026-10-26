@@ -1031,3 +1031,33 @@ def api_consultar_ficha_digital_view(request, codigo=None):
         )
 
     return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# =============================================================================
+# VISTA WEB FICHA DIGITAL CONSOLIDADA POR LOTE (HU-17 / SCRUM-168)
+# =============================================================================
+
+def ficha_digital_web_view(request, codigo=None):
+    """
+    Vista web pública / interactiva para visualizar la Ficha Digital Consolidada por Lote
+    (HU-17 / SCRUM-168).
+    Permite acceso abierto a cualquier interesado (con o sin sesión) que consulte
+    mediante enlace directo, navegación de catálogo (HU-19) o escaneo de Código QR (HU-18).
+    """
+    if not codigo or not str(codigo).strip():
+        return render(request, "fincas/ficha_digital_error.html", {"codigo": ""}, status=400)
+
+    codigo_limpio = str(codigo).strip()
+    try:
+        ficha = obtener_ficha_consolidada_lote(codigo_limpio)
+    except ValidationError:
+        return render(request, "fincas/ficha_digital_error.html", {"codigo": codigo_limpio}, status=404)
+    except Exception as exc:
+        return render(
+            request,
+            "fincas/ficha_digital_error.html",
+            {"codigo": codigo_limpio, "error_detalle": str(exc)},
+            status=500,
+        )
+
+    return render(request, "fincas/ficha_digital.html", {"ficha": ficha})

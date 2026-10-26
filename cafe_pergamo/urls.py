@@ -16,11 +16,13 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from fincas.views import ficha_digital_web_view
 
 urlpatterns = [
     path('', include('usuarios.urls')),
     path('fincas/', include('fincas.urls')),
     path('actores/', include('actores.urls')),
     path('catalogos/', include('catalogos.urls')),
+    path('trazabilidad/lote/<str:codigo>/', ficha_digital_web_view, name='trazabilidad_lote_publica_root'),
     path('admin/', admin.site.urls),
 ]

@@ -4283,3 +4283,108 @@ class FichaDigitalAPITests(TestCase):
         resp2 = self.client.get(url)
         self.assertEqual(resp2.status_code, 200)
         self.assertEqual(resp2.json()["cantidad_kg"], "275.50")
+
+
+# =============================================================================
+# SUITE HU-17 (SCRUM-168): VISTA Y PLANTILLA WEB DE FICHA DIGITAL CONSOLIDADA
+# =============================================================================
+
+
+class FichaDigitalWebTests(TestCase):
+    """
+    Pruebas de la interfaz web para la Ficha Digital Consolidada por Lote (HU-17 / SCRUM-168).
+    Verifica el renderizado de la plantilla HTML5, contenido de secciones y manejo de errores 404 amigable.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-ARB-WEB",
+                nombre="Arboledas",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca Web Test",
+            vereda="El Roble",
+            municipio=self.municipio,
+            productor_id=uuid.uuid4(),
+            latitud=Decimal("7.654321"),
+            longitud=Decimal("-72.123456"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Geisha Especial",
+            defaults={
+                "especie": "Arábica",
+                "descripcion": "Variedad de perfil floral.",
+                "activo": True,
+            },
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-25",
+            cantidad_total=Decimal("400.00"),
+            cantidad_disponible=Decimal("400.00"),
+            activo=True,
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="NATURAL",
+            defaults={
+                "nombre": "Natural / Seco",
+                "descripcion": "Secado en cereza completa.",
+                "activo": True,
+            },
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={
+                "nombre": "Disponible",
+                "descripcion": "Apto para venta.",
+                "activo": True,
+            },
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-WEB-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("120.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_vista_web_ficha_digital_200_ok_y_template(self):
+        """GET /fincas/lotes/<codigo>/ficha/ responde 200 OK y usa templates/fincas/ficha_digital.html."""
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+        self.assertIn("ficha", response.context)
+        self.assertEqual(response.context["ficha"]["codigo"], "LOTE-WEB-001")
+
+        # Contenido renderizado en HTML
+        content = response.content.decode("utf-8")
+        self.assertIn("LOTE-WEB-001", content)
+        self.assertIn("Finca Web Test", content)
+        self.assertIn("Arboledas", content)
+        self.assertIn("Geisha Especial", content)
+
+    def test_vista_web_por_ruta_raiz_trazabilidad(self):
+        """GET /trazabilidad/lote/<codigo>/ responde igualmente 200 OK."""
+        url = reverse("trazabilidad_lote_publica_root", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+
+    def test_vista_web_lote_inexistente_retorna_404_con_template_error(self):
+        """GET /fincas/lotes/<codigo_no_existe>/ficha/ responde 404 y muestra ficha_digital_error.html."""
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": "NO-EXISTE-LOTE-404"})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTemplateUsed(response, "fincas/ficha_digital_error.html")
+        self.assertIn("NO-EXISTE-LOTE-404", response.content.decode("utf-8"))
