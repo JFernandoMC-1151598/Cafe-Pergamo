@@ -12,6 +12,8 @@ Subtarea: SCRUM-145 / HU013-ST4: Validar cantidad disponible antes de crear el l
 (aplicada en services.crear_lote(), usada tanto por la vista web como por la API).
 Subtarea: SCRUM-146 / HU013-ST5: Actualizar trazabilidad de la cosecha al crear lotes
 (idem, el descuento del saldo vive en services.crear_lote()).
+Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
+físicas y de calidad del lote.
 Nota: incluye también una vista de registro de cosechas, complemento necesario para
 poder usar el formulario de lotes de principio a fin (ver nota en fincas/forms.py).
 Nota: incluye además una vista de listado "Mis Lotes" con filtro por finca -- pedida
@@ -19,6 +21,9 @@ directamente por el productor al revisar HU-13 en local: HU-14 (etapas de benefi
 mostrará el historial de beneficio más adelante, pero un lote ya registrado debía
 poder consultarse ahora, no solo en el siguiente sprint.
 """
+
+from decimal import Decimal
+from typing import Optional
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
@@ -36,23 +41,39 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
 from .forms import CosechaRegistroForm, FincaRegistroForm, FincaModelForm, LoteRegistroForm, MunicipioForm
-from .models import Cosecha, Finca, Lote, Municipio
+from .models import (
+    BitacoraPublicacionLote,
+    CaracteristicasCalidad,
+    Cosecha,
+    Finca,
+    Lote,
+    Municipio,
+)
 from .permissions import rol_puede_administrar_catalogos
 from .serializers import (
+    BitacoraPublicacionLoteSerializer,
     CosechaCreateSerializer,
     CosechaSerializer,
+    CaracteristicasCalidadSerializer,
     FincaGeorreferenciacionSerializer,
+    LoteDespublicarInputSerializer,
+    LotePublicarInputSerializer,
     LoteSerializer,
     MunicipioSerializer,
 )
 from .services import (
     crear_cosecha,
+    crear_caracteristicas_calidad,
     crear_lote,
     crear_municipio,
+    despublicar_lote_de_catalogo,
     editar_municipio,
+    generar_snapshot_trazabilidad,
     inactivar_municipio,
+    publicar_lote_en_catalogo,
     reactivar_municipio,
     toggle_estado_municipio,
+    validar_lote_para_publicacion,
 )
 from usuarios.models import Usuario
 from usuarios.permissions import permiso_requerido_sesion
@@ -786,6 +807,64 @@ def api_crear_lote_view(request):
     return Response(LoteSerializer(lote).data, status=status.HTTP_201_CREATED)
 
 
+@api_view(["GET", "POST", "PUT", "PATCH"])
+def api_caracteristicas_calidad_view(request, lote_id):
+    """
+    CRUD REST de las características de calidad de un lote (HU15-ST1).
+
+    La URL anidada garantiza que la relación se resuelva desde un lote
+    existente y evita aceptar un lote arbitrario en el cuerpo de la petición.
+    """
+    try:
+        lote = Lote.objects.get(pk=lote_id)
+    except (Lote.DoesNotExist, ValueError, TypeError):
+        return Response(
+            {"lote": ["El lote indicado no existe."]},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    caracteristicas = CaracteristicasCalidad.objects.filter(lote=lote).first()
+
+    if request.method == "GET":
+        if caracteristicas is None:
+            return Response(
+                {"detail": "El lote no tiene características de calidad registradas."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(CaracteristicasCalidadSerializer(caracteristicas).data)
+
+    if request.method == "POST":
+        if caracteristicas is not None:
+            return Response(
+                {"lote": ["El lote ya tiene características de calidad registradas."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = CaracteristicasCalidadSerializer(
+            data=request.data,
+            context={"lote": lote},
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    if caracteristicas is None:
+        return Response(
+            {"detail": "El lote no tiene características de calidad registradas."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    serializer = CaracteristicasCalidadSerializer(
+        caracteristicas,
+        data=request.data,
+        partial=request.method == "PATCH",
+    )
+    if serializer.is_valid():
+        serializer.save()
+        return Response(serializer.data)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
 def registrar_cosecha_view(request):
     """
     Vista web de registro de cosechas (complemento de HU-13, ver nota en
@@ -950,7 +1029,14 @@ def mis_lotes_view(request):
 
     lotes = (
         Lote.objects.filter(cosecha__finca__productor_id=productor_id)
-        .select_related("cosecha", "cosecha__finca")
+        .select_related(
+            "cosecha",
+            "cosecha__finca",
+            "cosecha__finca__municipio",
+            "cosecha__variedad",
+            "proceso_beneficio",
+            "caracteristicas_calidad",
+        )
         .order_by("-creado_en")
     )
 
@@ -969,13 +1055,289 @@ def mis_lotes_view(request):
             lotes = lotes.filter(cosecha__finca_id=finca_id)
             finca_seleccionada = fincas_productor.filter(pk=finca_id).first()
 
+    # Precalculamos el estado de publicación y validación para la interfaz
+    lotes_info = []
+    for lote in lotes:
+        es_valido, errores_val = validar_lote_para_publicacion(lote)
+        lotes_info.append({
+            "lote": lote,
+            "puede_publicar": es_valido,
+            "errores_publicacion": errores_val,
+        })
+
     return render(
         request,
         "fincas/mis_lotes.html",
         {
+            "lotes_info": lotes_info,
             "lotes": lotes,
             "fincas": fincas_productor,
             "finca_seleccionada": finca_seleccionada,
             "finca_id_filtro": finca_id_raw,
         },
     )
+
+
+def _resolver_usuario_correo(request) -> Optional[str]:
+    """Resuelve el correo del usuario autenticado vía sesión o JWT."""
+    correo_sesion = request.session.get("correo") or request.session.get("usuario_email")
+    if correo_sesion:
+        return str(correo_sesion)
+
+    token = getattr(request, "auth", None)
+    if token is not None:
+        try:
+            email_claim = token.get("email")
+            if email_claim:
+                return str(email_claim)
+        except AttributeError:
+            pass
+
+    user = getattr(request, "user", None)
+    if user and getattr(user, "email", None):
+        return user.email
+    return None
+
+
+# ==============================================================================
+# ENDPOINTS REST DE PUBLICACIÓN EN CATÁLOGO PÚBLICO (HU-19 / SCRUM-228)
+# ==============================================================================
+
+@api_view(["POST"])
+def api_publicar_lote_view(request, pk):
+    """
+    Endpoint REST para publicar un lote en el catálogo público comercial
+    (HU19-ST1 / SCRUM-239, HU19-ST2 / SCRUM-240, HU19-ST5 / SCRUM-242).
+    POST /fincas/api/lotes/<pk>/publicar/
+    Body opcional: {"precio_referencial": <decimal>, "observaciones": <str>}
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        return Response(
+            {"error": "No se pudo identificar al productor autenticado."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    serializer = LotePublicarInputSerializer(data=request.data or {})
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    precio_referencial = serializer.validated_data.get("precio_referencial")
+    observaciones = serializer.validated_data.get("observaciones", "")
+    correo = _resolver_usuario_correo(request)
+
+    try:
+        lote = publicar_lote_en_catalogo(
+            lote_id=pk,
+            productor_id=productor_id,
+            precio_referencial=precio_referencial,
+            realizado_por_id=productor_id,
+            realizado_por_correo=correo,
+            observaciones=observaciones,
+        )
+    except ValidationError as exc:
+        msg_dict = exc.message_dict if hasattr(exc, "message_dict") else {}
+        if "permiso" in msg_dict:
+            return Response({"error": msg_dict["permiso"][0]}, status=status.HTTP_403_FORBIDDEN)
+        if "lote" in msg_dict:
+            return Response({"error": msg_dict["lote"][0]}, status=status.HTTP_404_NOT_FOUND)
+        if "publicacion" in msg_dict:
+            return Response(
+                {
+                    "error": "El lote no cumple con la información mínima requerida para publicarse.",
+                    "detalles": msg_dict["publicacion"],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        detalle = msg_dict if msg_dict else {"error": exc.messages}
+        return Response(detalle, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response(
+        {
+            "mensaje": f"El lote '{lote.codigo}' ha sido publicado exitosamente en el catálogo público.",
+            "lote": LoteSerializer(lote).data,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+@api_view(["POST"])
+def api_despublicar_lote_view(request, pk):
+    """
+    Endpoint REST para retirar un lote del catálogo público comercial
+    (HU19-ST1 / SCRUM-239, HU19-ST3 / SCRUM-243).
+    POST /fincas/api/lotes/<pk>/despublicar/
+    Body opcional: {"motivo": <str>}
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        return Response(
+            {"error": "No se pudo identificar al productor autenticado."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    serializer = LoteDespublicarInputSerializer(data=request.data or {})
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    motivo = serializer.validated_data.get("motivo", "")
+    correo = _resolver_usuario_correo(request)
+
+    try:
+        lote = despublicar_lote_de_catalogo(
+            lote_id=pk,
+            productor_id=productor_id,
+            realizado_por_id=productor_id,
+            realizado_por_correo=correo,
+            motivo=motivo,
+        )
+    except ValidationError as exc:
+        msg_dict = exc.message_dict if hasattr(exc, "message_dict") else {}
+        if "permiso" in msg_dict:
+            return Response({"error": msg_dict["permiso"][0]}, status=status.HTTP_403_FORBIDDEN)
+        if "lote" in msg_dict:
+            return Response({"error": msg_dict["lote"][0]}, status=status.HTTP_404_NOT_FOUND)
+        detalle = msg_dict if msg_dict else {"error": exc.messages}
+        return Response(detalle, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response(
+        {
+            "mensaje": f"El lote '{lote.codigo}' ha sido retirado del catálogo público.",
+            "lote": LoteSerializer(lote).data,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+@api_view(["GET"])
+def api_validar_publicacion_lote_view(request, pk):
+    """
+    Endpoint REST para consultar la verificación de información mínima
+    requerida de un lote previo a su publicación (HU19-ST4 / SCRUM-241).
+    GET /fincas/api/lotes/<pk>/validar-publicacion/
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        return Response(
+            {"error": "No se pudo identificar al productor autenticado."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    try:
+        lote = (
+            Lote.objects.select_related(
+                "cosecha__finca__municipio",
+                "cosecha__variedad",
+                "proceso_beneficio",
+                "caracteristicas_calidad",
+            )
+            .get(pk=pk)
+        )
+    except Lote.DoesNotExist:
+        return Response({"error": "El lote indicado no existe."}, status=status.HTTP_404_NOT_FOUND)
+
+    finca = getattr(getattr(lote, "cosecha", None), "finca", None)
+    if not finca or str(finca.productor_id) != str(productor_id):
+        return Response(
+            {"error": "No tiene permisos para consultar este lote."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    puede_publicar, errores = validar_lote_para_publicacion(lote)
+    return Response(
+        {
+            "lote_id": lote.id,
+            "codigo": lote.codigo,
+            "publicado_en_catalogo": lote.publicado_en_catalogo,
+            "puede_publicar": puede_publicar,
+            "errores": errores,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+# ==============================================================================
+# VISTAS WEB DE PUBLICACIÓN Y DESPUBLICACIÓN EN CATÁLOGO (HU-19 / SCRUM-228)
+# ==============================================================================
+
+def publicar_lote_web_view(request, pk):
+    """
+    Acción web para publicar un lote desde la pantalla 'Mis Lotes'
+    (HU19-ST1 / SCRUM-239, HU19-ST5 / SCRUM-242).
+    """
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(request, "Debe iniciar sesión para realizar esta acción.")
+        return redirect("login")
+
+    precio_raw = request.POST.get("precio_referencial", "").strip()
+    observaciones = request.POST.get("observaciones", "").strip()
+    precio_referencial = Decimal(precio_raw) if precio_raw else None
+    correo = _resolver_usuario_correo(request)
+
+    try:
+        lote = publicar_lote_en_catalogo(
+            lote_id=pk,
+            productor_id=productor_id,
+            precio_referencial=precio_referencial,
+            realizado_por_id=productor_id,
+            realizado_por_correo=correo,
+            observaciones=observaciones,
+        )
+        messages.success(
+            request,
+            f"¡El lote '{lote.codigo}' ha sido publicado exitosamente en el catálogo público comercial!"
+        )
+    except ValidationError as exc:
+        msg_dict = exc.message_dict if hasattr(exc, "message_dict") else {}
+        if "publicacion" in msg_dict:
+            detalles_str = " | ".join(msg_dict["publicacion"])
+            messages.error(
+                request,
+                f"No se pudo publicar el lote. Información mínima incompleta: {detalles_str}"
+            )
+        elif "precio_referencial" in msg_dict:
+            messages.error(request, f"Error en precio referencial: {msg_dict['precio_referencial'][0]}")
+        elif "permiso" in msg_dict:
+            messages.error(request, msg_dict["permiso"][0])
+        else:
+            messages.error(request, f"No se pudo publicar el lote: {exc}")
+
+    return redirect("mis_lotes")
+
+
+def despublicar_lote_web_view(request, pk):
+    """
+    Acción web para retirar un lote del catálogo público
+    (HU19-ST1 / SCRUM-239, HU19-ST3 / SCRUM-243).
+    """
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(request, "Debe iniciar sesión para realizar esta acción.")
+        return redirect("login")
+
+    motivo = request.POST.get("motivo", "").strip()
+    correo = _resolver_usuario_correo(request)
+
+    try:
+        lote = despublicar_lote_de_catalogo(
+            lote_id=pk,
+            productor_id=productor_id,
+            realizado_por_id=productor_id,
+            realizado_por_correo=correo,
+            motivo=motivo,
+        )
+        messages.info(
+            request,
+            f"El lote '{lote.codigo}' ha sido retirado del catálogo público comercial."
+        )
+    except ValidationError as exc:
+        messages.error(request, f"No se pudo retirar el lote del catálogo: {exc}")
+
+    return redirect("mis_lotes")

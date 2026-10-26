@@ -632,15 +632,35 @@ def home_view(request: HttpRequest) -> HttpResponse:
 
 def catalogo_view(request: HttpRequest) -> HttpResponse:
     """
-    Renderiza la vitrina comercial y catálogo público de lotes de café (HU04).
-    Muestra los lotes disponibles o redirige con notificación informativa
-    mientras se despliegan los lotes de la cosecha activa.
+    Renderiza la vitrina comercial y catálogo público de lotes de café (HU04 / HU19 / SCRUM-243).
+    Muestra los lotes con trazabilidad y calidad verificadas que han sido publicados
+    formalmente por los caficultores de Norte de Santander.
     """
-    messages.info(
-        request,
-        "El Catálogo Comercial de Lotes de Norte de Santander se encuentra en actualización con los lotes de la cosecha activa."
+    from fincas.models import Lote
+
+    lotes_publicados = (
+        Lote.objects.filter(
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+        .select_related(
+            "cosecha__finca__municipio",
+            "cosecha__variedad",
+            "proceso_beneficio",
+            "caracteristicas_calidad",
+        )
+        .order_by("-fecha_publicacion", "-creado_en")
     )
-    return redirect("/#pilares")
+
+    return render(
+        request,
+        "usuarios/catalogo.html",
+        {
+            "lotes": lotes_publicados,
+            "total_lotes": lotes_publicados.count(),
+        },
+    )
+
 
 
 def registro_view(request: HttpRequest) -> HttpResponse:

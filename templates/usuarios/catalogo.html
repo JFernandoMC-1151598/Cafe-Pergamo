@@ -1,0 +1,168 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Catálogo Comercial de Café — Café Pérgamo{% endblock %}
+
+{% block content %}
+<!-- Hero Section -->
+<section class="py-5 bg-gradient text-white position-relative" style="background: linear-gradient(135deg, #1f2937 0%, #374151 50%, #1e1b4b 100%);">
+    <div class="container py-4 text-center">
+        <span class="badge bg-warning text-dark px-3 py-2 rounded-pill fw-bold text-uppercase mb-3 shadow-sm">
+            <i class="bi bi-award me-1"></i> Origen Norte de Santander
+        </span>
+        <h1 class="display-5 fw-bold mb-3">Catálogo Comercial de Cafés Especiales</h1>
+        <p class="lead text-light opacity-90 mx-auto" style="max-width: 720px;">
+            Lotes con trazabilidad completa de origen, verificación de cosecha y evaluaciones sensoriales y físicas certificadas.
+        </p>
+    </div>
+</section>
+
+<!-- Contenedor Principal del Catálogo -->
+<div class="container py-5">
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+    {% endif %}
+
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
+        <div>
+            <h2 class="h4 fw-bold text-dark mb-1">Lotes Disponibles</h2>
+            <p class="text-muted small mb-0">
+                Mostrando <strong>{{ total_lotes }}</strong> lote{{ total_lotes|pluralize:"s" }} publicado{{ total_lotes|pluralize:"s" }} para comercialización directa.
+            </p>
+        </div>
+        {% if user.is_authenticated %}
+        <a href="{% url 'mis_lotes' %}" class="btn btn-outline-primary btn-sm">
+            <i class="bi bi-boxes me-1"></i>Gestionar Mis Lotes
+        </a>
+        {% endif %}
+    </div>
+
+    {% if lotes %}
+    <div class="row g-4">
+        {% for lote in lotes %}
+        <div class="col-md-6 col-lg-4">
+            <div class="card h-100 border-0 shadow-sm rounded-4 overflow-hidden position-relative hover-lift transition-all">
+                <!-- Banner de Calidad Superior -->
+                <div class="p-3 text-white d-flex align-items-center justify-content-between" style="background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);">
+                    <div>
+                        <span class="badge bg-white text-dark fw-bold px-2 py-1">
+                            Lote {{ lote.codigo }}
+                        </span>
+                    </div>
+                    {% if lote.caracteristicas_calidad and lote.caracteristicas_calidad.puntaje_taza %}
+                    <div class="text-end">
+                        <span class="badge bg-warning text-dark fw-bold px-2 py-1 shadow-sm fs-6">
+                            <i class="bi bi-star-fill text-dark me-1"></i>{{ lote.caracteristicas_calidad.puntaje_taza }} SCA
+                        </span>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <div class="card-body p-4 d-flex flex-column">
+                    <!-- Finca y Municipio -->
+                    <div class="mb-3">
+                        <h5 class="fw-bold text-dark mb-1">{{ lote.cosecha.finca.nombre }}</h5>
+                        <p class="text-muted small mb-0">
+                            <i class="bi bi-geo-alt text-danger me-1"></i>
+                            {% if lote.cosecha.finca.municipio %}
+                                {{ lote.cosecha.finca.municipio.nombre }}, {{ lote.cosecha.finca.municipio.departamento }}
+                            {% else %}
+                                Norte de Santander
+                            {% endif %}
+                            {% if lote.cosecha.finca.vereda %}
+                                <span class="text-secondary">(Vda. {{ lote.cosecha.finca.vereda }})</span>
+                            {% endif %}
+                        </p>
+                    </div>
+
+                    <!-- Ficha Técnica -->
+                    <div class="bg-light rounded-3 p-3 mb-3 small flex-grow-1">
+                        <div class="d-flex justify-content-between py-1 border-bottom">
+                            <span class="text-muted">Variedad:</span>
+                            <span class="fw-semibold text-dark">{{ lote.cosecha.variedad.nombre|default:"Tradicional" }}</span>
+                        </div>
+                        <div class="d-flex justify-content-between py-1 border-bottom">
+                            <span class="text-muted">Proceso de Beneficio:</span>
+                            <span class="fw-semibold text-dark">{{ lote.proceso_beneficio.nombre|default:"Lavado" }}</span>
+                        </div>
+                        <div class="d-flex justify-content-between py-1 border-bottom">
+                            <span class="text-muted">Cantidad Disponible:</span>
+                            <span class="fw-bold text-success">{{ lote.cantidad }} kg</span>
+                        </div>
+                        {% if lote.caracteristicas_calidad and lote.caracteristicas_calidad.humedad %}
+                        <div class="d-flex justify-content-between py-1 border-bottom">
+                            <span class="text-muted">Humedad:</span>
+                            <span class="text-dark">{{ lote.caracteristicas_calidad.humedad }}%</span>
+                        </div>
+                        {% endif %}
+                        {% if lote.cosecha.fecha_cosecha %}
+                        <div class="d-flex justify-content-between py-1">
+                            <span class="text-muted">Fecha Cosecha:</span>
+                            <span class="text-dark">{{ lote.cosecha.fecha_cosecha|date:"M Y" }}</span>
+                        </div>
+                        {% endif %}
+                    </div>
+
+                    <!-- Perfil Sensorial (si existe) -->
+                    {% if lote.caracteristicas_calidad and lote.caracteristicas_calidad.perfil_sensorial %}
+                    <div class="mb-3">
+                        <span class="small text-muted d-block fw-semibold mb-1">Notas Sensoriales:</span>
+                        <p class="small text-secondary fst-italic mb-0 bg-white border rounded p-2">
+                            "{{ lote.caracteristicas_calidad.perfil_sensorial }}"
+                        </p>
+                    </div>
+                    {% endif %}
+
+                    <!-- Precio y Contacto -->
+                    <div class="pt-3 border-top d-flex align-items-center justify-content-between mt-auto">
+                        <div>
+                            {% if lote.precio_referencial %}
+                                <div class="small text-muted">Precio orientativo:</div>
+                                <div class="h5 fw-bold text-primary mb-0">${{ lote.precio_referencial }} <small class="fs-6 text-muted">/ kg</small></div>
+                            {% else %}
+                                <span class="badge bg-light text-secondary border">A convenir</span>
+                            {% endif %}
+                        </div>
+                        <a href="mailto:comercial@cafepergamo.co?subject=Inter%C3%A9s%20en%20Lote%20{{ lote.codigo }}%20({{ lote.cosecha.finca.nombre }})" class="btn btn-outline-primary btn-sm px-3 fw-semibold">
+                            <i class="bi bi-chat-dots me-1"></i>Contactar
+                        </a>
+                    </div>
+                </div>
+
+                <div class="card-footer bg-white border-0 py-2 px-4 text-end text-muted small">
+                    <i class="bi bi-shield-check text-success me-1"></i>Trazabilidad verificada en Café Pérgamo
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <!-- Estado Vacío -->
+    <div class="card border-0 shadow-sm rounded-4 p-5 text-center">
+        <div class="py-4">
+            <div class="d-inline-flex align-items-center justify-content-center bg-warning-subtle text-warning rounded-circle p-4 mb-3" style="width: 80px; height: 80px;">
+                <i class="bi bi-shop fs-1"></i>
+            </div>
+            <h4 class="fw-bold text-dark mb-2">No hay lotes publicados en este momento</h4>
+            <p class="text-muted mx-auto mb-4" style="max-width: 540px;">
+                Los caficultores de Norte de Santander están cosechando y procesando sus muestras de calidad para publicar sus lotes. Si eres productor, ingresa a tu panel y publica tus lotes validados.
+            </p>
+            {% if user.is_authenticated %}
+            <a href="{% url 'mis_lotes' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
+                <i class="bi bi-boxes me-1"></i>Ir a Mis Lotes para Publicar
+            </a>
+            {% else %}
+            <a href="{% url 'login' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
+                <i class="bi bi-box-arrow-in-right me-1"></i>Iniciar Sesión como Productor
+            </a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

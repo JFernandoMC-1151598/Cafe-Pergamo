@@ -2,11 +2,21 @@
 Serializadores DRF para Fincas y Georreferenciación - CAFÉ PÉRGAMO
 Subtarea: SCRUM-96: Guardar georreferenciación en backend.
 Subtarea: SCRUM-142 / HU13-ST2: Implementar servicio/API para registrar lotes.
+Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
+físicas y de calidad del lote.
 """
 
 from decimal import Decimal
+from django.core.validators import MaxValueValidator, MinValueValidator
 from rest_framework import serializers
-from .models import Cosecha, Finca, Lote, Municipio
+from .models import (
+    BitacoraPublicacionLote,
+    CaracteristicasCalidad,
+    Cosecha,
+    Finca,
+    Lote,
+    Municipio,
+)
 from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
 
 
@@ -238,12 +248,107 @@ class LoteSerializer(serializers.ModelSerializer):
             "finca",
             "cantidad",
             "cantidad_disponible_cosecha",
+            "publicado_en_catalogo",
+            "fecha_publicacion",
+            "precio_referencial",
             "activo",
             "proceso_beneficio",
             "estado_lote",
             "creado_en",
         ]
         read_only_fields = fields
+
+
+class CaracteristicasCalidadSerializer(serializers.ModelSerializer):
+    """
+    Serializador para crear, actualizar y consultar la calidad de un lote.
+    """
+
+    lote_id = serializers.IntegerField(source="lote.id", read_only=True)
+    lote_codigo = serializers.CharField(source="lote.codigo", read_only=True)
+    humedad = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+    )
+    merma = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+    )
+    puntaje_taza = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+    )
+
+    class Meta:
+        model = CaracteristicasCalidad
+        fields = [
+            "id",
+            "lote_id",
+            "lote_codigo",
+            "humedad",
+            "merma",
+            "puntaje_taza",
+            "perfil_sensorial",
+            "observaciones",
+            "creado_en",
+            "actualizado_en",
+        ]
+        read_only_fields = [
+            "id",
+            "lote_id",
+            "lote_codigo",
+            "creado_en",
+            "actualizado_en",
+        ]
+
+    def validate(self, attrs):
+        for campo in ("perfil_sensorial", "observaciones"):
+            if campo in attrs and attrs[campo] is not None:
+                attrs[campo] = attrs[campo].strip()
+        return attrs
+
+    def create(self, validated_data):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .services import crear_caracteristicas_calidad
+
+        try:
+            return crear_caracteristicas_calidad(
+                lote_o_id=self.context["lote"],
+                **validated_data,
+            )
+        except DjangoValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                raise serializers.ValidationError(exc.message_dict)
+            raise serializers.ValidationError(exc.messages)
+
+    def update(self, instance, validated_data):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .services import editar_caracteristicas_calidad
+
+        try:
+            return editar_caracteristicas_calidad(instance, **validated_data)
+        except DjangoValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                raise serializers.ValidationError(exc.message_dict)
+            raise serializers.ValidationError(exc.messages)
 
 
 class CosechaSerializer(serializers.ModelSerializer):
@@ -285,3 +390,64 @@ class CosechaCreateSerializer(serializers.Serializer):
     cantidad_total = serializers.DecimalField(
         max_digits=10, decimal_places=2, min_value=Decimal("0.01"), required=True
     )
+
+
+class LotePublicarInputSerializer(serializers.Serializer):
+    """
+    Serializador de entrada para publicar un lote en el catálogo comercial (HU19-ST1 / SCRUM-239).
+    """
+
+    precio_referencial = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal("0.01"),
+        required=False,
+        allow_null=True,
+        help_text="Precio orientativo por kg en COP (opcional pero debe ser > 0 si se define).",
+    )
+    observaciones = serializers.CharField(
+        max_length=500,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Observaciones o notas para la bitácora de publicación.",
+    )
+
+
+class LoteDespublicarInputSerializer(serializers.Serializer):
+    """
+    Serializador de entrada para retirar un lote del catálogo comercial (HU19-ST1 / SCRUM-239).
+    """
+
+    motivo = serializers.CharField(
+        max_length=500,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Motivo por el cual se retira el lote del catálogo público.",
+    )
+
+
+class BitacoraPublicacionLoteSerializer(serializers.ModelSerializer):
+    """
+    Serializador de consulta para la bitácora de publicación de lotes (HU19-ST6 / SCRUM-244).
+    """
+
+    lote_id = serializers.IntegerField(source="lote.id", read_only=True)
+    lote_codigo = serializers.CharField(source="lote.codigo", read_only=True)
+
+    class Meta:
+        model = BitacoraPublicacionLote
+        fields = [
+            "id",
+            "lote_id",
+            "lote_codigo",
+            "accion",
+            "realizado_por_id",
+            "realizado_por_correo",
+            "detalles_trazabilidad",
+            "observaciones",
+            "creado_en",
+        ]
+        read_only_fields = fields
+
