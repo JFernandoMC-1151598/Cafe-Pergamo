@@ -4964,4 +4964,175 @@ class FichaDigitalGeneracionActualizacionE2ETests(TestCase):
         self.assertEqual(auditorias[1].tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_API)
 
 
+# ==============================================================================
+# SUITE HU-17 (SCRUM-170): CONSOLIDACIÓN DE DATOS DEL LOTE (ST5)
+# ==============================================================================
+
+class FichaDigitalConsolidacionDatosTests(TestCase):
+    """
+    Pruebas unitarias y de integración para HU17-ST5 (SCRUM-170):
+    Implementar la lógica de consolidación de datos del lote.
+
+    Verifica la orquestación multientidad en `obtener_ficha_consolidada_lote()`:
+    resolución polimórfica (instancia, código, PK), integración de datos de
+    finca, productor, cosecha, variedad, beneficio, estado y diagnóstico.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca La Consolidación",
+            municipio=self.municipio,
+            vereda="Siravita",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.812345"),
+            longitud=Decimal("-72.712345"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Geisha Dorado",
+            defaults={"especie": "Arábica", "descripcion": "Perfil floral y cítrico"},
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="HONEY",
+            defaults={"nombre": "Honey Amarillo", "descripcion": "Despulpado con mucílago"},
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible para Venta", "descripcion": "Lote apto"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 5),
+            cantidad_total=Decimal("1200.00"),
+            cantidad_disponible=Decimal("1200.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTECONSOLIDADO01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("400.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_consolidacion_multientidad_datos_completos(self):
+        """
+        SCRUM-170: Verifica que la función de dominio consolide correctamente
+        la información proveniente de Lote, Finca, Productor, Cosecha,
+        Variedad y Proceso en una sola estructura unificada.
+        """
+        ficha = obtener_ficha_consolidada_lote(self.lote)
+
+        # 1. Validación de campos del lote
+        self.assertEqual(ficha["id"], self.lote.id)
+        self.assertEqual(ficha["codigo"], "LOTECONSOLIDADO01")
+        self.assertEqual(ficha["cantidad_kg"], Decimal("400.00"))
+        self.assertTrue(ficha["activo"])
+
+        # 2. Validación de datos de finca y municipio
+        self.assertEqual(ficha["finca"]["id"], self.finca.id)
+        self.assertEqual(ficha["finca"]["nombre"], "Finca La Consolidación")
+        self.assertEqual(ficha["finca"]["municipio"], "Arboledas")
+        self.assertEqual(ficha["finca"]["departamento"], "Norte de Santander")
+        self.assertTrue(ficha["finca"]["tiene_georreferenciacion"])
+
+        # 3. Validación de cosecha y variedad botánica
+        self.assertEqual(ficha["cosecha"]["id"], self.cosecha.id)
+        self.assertEqual(ficha["cosecha"]["fecha_cosecha"], date(2026, 10, 5))
+        self.assertEqual(ficha["variedad"]["nombre"], "Geisha Dorado")
+        self.assertEqual(ficha["variedad"]["especie"], "Arábica")
+
+        # 4. Validación de proceso de beneficio
+        self.assertEqual(ficha["proceso_beneficio"]["codigo"], "HONEY")
+        self.assertEqual(ficha["proceso_beneficio"]["nombre"], "Honey Amarillo")
+
+        # 5. Validación de disponibilidad comercial y URL pública
+        self.assertEqual(ficha["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha["disponible_para_venta"])
+        self.assertEqual(ficha["url_publica"], "/trazabilidad/lote/LOTECONSOLIDADO01/")
+
+        # 6. Serialización formal con FichaDigitalSerializer
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(serializer.is_valid(), f"Errores en serializador: {serializer.errors}")
+
+    def test_resolucion_polimorfica_por_instancia_codigo_y_pk(self):
+        """
+        SCRUM-170: Comprueba que obtener_ficha_consolidada_lote resuelva
+        el lote indistintamente por instancia de modelo, código alfanumérico o ID numérico.
+        """
+        ficha_por_instancia = obtener_ficha_consolidada_lote(self.lote)
+        ficha_por_codigo = obtener_ficha_consolidada_lote("LOTECONSOLIDADO01")
+        ficha_por_pk_int = obtener_ficha_consolidada_lote(self.lote.pk)
+        ficha_por_pk_str = obtener_ficha_consolidada_lote(str(self.lote.pk))
+
+        self.assertEqual(ficha_por_instancia["id"], self.lote.id)
+        self.assertEqual(ficha_por_codigo["id"], self.lote.id)
+        self.assertEqual(ficha_por_pk_int["id"], self.lote.id)
+        self.assertEqual(ficha_por_pk_str["id"], self.lote.id)
+        self.assertEqual(ficha_por_codigo["codigo"], "LOTECONSOLIDADO01")
+
+    def test_consolidacion_con_lote_parcial(self):
+        """
+        SCRUM-170: Comprueba la consolidación resiliente cuando el lote carece
+        de proceso de beneficio o la finca carece de coordenadas GPS.
+        """
+        finca_sin_gps = Finca.objects.create(
+            nombre="Finca Sin Coordenadas",
+            municipio=self.municipio,
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        cosecha_parcial = Cosecha.objects.create(
+            finca=finca_sin_gps,
+            variedad=None,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("300.00"),
+            cantidad_disponible=Decimal("300.00"),
+            activo=True,
+        )
+        lote_parcial = Lote.objects.create(
+            codigo="LOTEPARCIAL01",
+            cosecha=cosecha_parcial,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=None,
+            estado_lote=None,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote_parcial)
+        self.assertFalse(ficha["finca"]["tiene_georreferenciacion"])
+        self.assertIsNone(ficha["finca"]["latitud"])
+        self.assertIsNone(ficha["proceso_beneficio"]["id"])
+        self.assertEqual(ficha["variedad"]["nombre"], "Mezcla tradicional / No especificada")
+
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(serializer.is_valid(), f"Errores en serialización parcial: {serializer.errors}")
+
+    def test_consolidacion_lote_inexistente_lanza_validation_error(self):
+        """
+        SCRUM-170: Comprueba que intentar consolidar un lote inexistente o
+        con identificador no válido dispare una excepción ValidationError amigable.
+        """
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote("LOTEINEXISTENTE999")
+
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote(99999999)
+
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote([])
+
+
+
 
