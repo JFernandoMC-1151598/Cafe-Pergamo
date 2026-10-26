@@ -8,6 +8,8 @@ Subtarea: SCRUM-157 / HU15-ST5: Diseñar el modelo de datos para característica
 físicas y de calidad del lote.
 Subtarea: SCRUM-148 / HU14-ST1 y SCRUM-149 / HU14-ST2: modelo de etapas de
 beneficio del lote (requerido por el formulario de captura y el historial).
+Subtarea: SCRUM-152 / HU14-ST3 y SCRUM-150 / HU14-ST4: validaciones del modelo y
+sin eliminación física de etapas (RNF-14).
 
 Cubre:
 - RF06: registrar fincas asociadas a cada productor (perfil usuarios.Usuario).
@@ -36,7 +38,13 @@ from django.db import models
 
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from usuarios.models import Usuario
-from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
+from .validators import (
+    OBSERVACIONES_ETAPA_MAX,
+    validar_latitud,
+    validar_longitud,
+    validar_observaciones_etapa,
+    validar_par_coordenadas,
+)
 
 
 class Municipio(models.Model):
@@ -509,6 +517,28 @@ class CaracteristicasCalidad(models.Model):
         return f"Calidad del lote {self.lote.codigo}"
 
 
+class EtapaBeneficioQuerySet(models.QuerySet):
+    """
+    Sin eliminación física (RNF-14): `delete()` solo marca las etapas como
+    inactivas. `hard_delete()` existe únicamente para herramientas de
+    desarrollo (p. ej. el comando de datos de demostración).
+    """
+
+    def delete(self):
+        return self.update(activo=False)
+
+    delete.alters_data = True
+    delete.queryset_only = True
+
+    def hard_delete(self):
+        return super().delete()
+
+    hard_delete.alters_data = True
+
+    def vigentes(self):
+        return self.filter(activo=True)
+
+
 class EtapaBeneficio(models.Model):
     """
     Etapa del proceso de beneficio registrada sobre un lote (HU-14 / RF13).
@@ -519,6 +549,10 @@ class EtapaBeneficio(models.Model):
     (Lavado, Honey, Natural...): aquí se documenta cada paso concreto
     que se le hizo al lote, con su fecha y observaciones, para construir
     el historial cronológico de HU14-ST2.
+
+    Las reglas de HU14-ST3 viven aquí (validadores y `clean`), de modo que
+    se aplican igual desde el formulario web y desde el servicio de
+    registro (`services.registrar_etapa_beneficio`, HU14-ST4, RNF-09).
     """
 
     class TipoEtapa(models.TextChoices):
@@ -529,7 +563,9 @@ class EtapaBeneficio(models.Model):
 
     lote = models.ForeignKey(
         Lote,
-        on_delete=models.CASCADE,
+        # PROTECT: un lote con etapas no puede borrarse físicamente y
+        # arrastrar su historial (RNF-14).
+        on_delete=models.PROTECT,
         related_name="etapas_beneficio",
         verbose_name="Lote",
         help_text="Lote al que se le registra la etapa de beneficio.",
@@ -540,21 +576,39 @@ class EtapaBeneficio(models.Model):
         choices=TipoEtapa.choices,
         verbose_name="Etapa de beneficio",
         help_text="Etapa del proceso de beneficio (lista fija, no texto libre).",
+        error_messages={
+            "blank": "Debe seleccionar la etapa de beneficio.",
+            "null": "Debe seleccionar la etapa de beneficio.",
+            "invalid_choice": "La etapa seleccionada no es una etapa de beneficio válida.",
+        },
     )
 
     fecha = models.DateField(
         verbose_name="Fecha de la etapa",
         help_text="Fecha en que se realizó la etapa sobre el lote.",
+        error_messages={
+            "blank": "La fecha de la etapa es obligatoria.",
+            "null": "La fecha de la etapa es obligatoria.",
+            "invalid": "Ingrese una fecha válida.",
+        },
     )
 
     observaciones = models.TextField(
         blank=True,
         default="",
+        validators=[validar_observaciones_etapa],
         verbose_name="Observaciones",
-        help_text="Notas libres sobre las condiciones en que se realizó la etapa.",
+        help_text=f"Notas libres sobre la etapa (máximo {OBSERVACIONES_ETAPA_MAX} caracteres).",
     )
 
+    activo = models.BooleanField(
+        default=True,
+        verbose_name="Etapa vigente",
+        help_text="Inactivación lógica: las etapas nunca se eliminan físicamente (RNF-14).",
+    )
     creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de registro")
+
+    objects = EtapaBeneficioQuerySet.as_manager()
 
     class Meta:
         managed = True
@@ -567,6 +621,19 @@ class EtapaBeneficio(models.Model):
 
     def __str__(self):
         return f"{self.get_etapa_display()} - Lote {self.lote.codigo} ({self.fecha})"
+
+    def clean(self):
+        super().clean()
+        if self.observaciones:
+            self.observaciones = self.observaciones.strip()
+
+    def delete(self, using=None, keep_parents=False):
+        """Inactivación lógica en lugar de borrado físico (RNF-14)."""
+        self.activo = False
+        self.save(update_fields=["activo"])
+        return 0, {}
+
+    delete.alters_data = True
 
 
 class BitacoraPublicacionLote(models.Model):

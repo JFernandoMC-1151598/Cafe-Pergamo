@@ -22,6 +22,7 @@ from .models import (
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
     Cosecha,
+    EtapaBeneficio,
     Finca,
     Lote,
     Municipio,
@@ -911,3 +912,49 @@ def obtener_opciones_filtro_catalogo() -> dict:
         "puntajes_minimos": OPCIONES_PUNTAJE_MINIMO_CATALOGO,
     }
 
+
+# ==============================================================================
+# ETAPAS DE BENEFICIO DEL LOTE (HU-14 / SCRUM-18)
+# ==============================================================================
+
+def registrar_etapa_beneficio(
+    *,
+    lote_o_id,
+    etapa,
+    fecha,
+    observaciones="",
+    productor_id=None,
+) -> EtapaBeneficio:
+    """
+    Registra una etapa de beneficio sobre un lote (HU14-ST4 / SCRUM-150).
+
+    - Valida SIEMPRE en backend (RNF-09), sin depender del formulario: fecha
+      obligatoria, etapa de la lista válida y observaciones consistentes
+      (reglas de HU14-ST3, definidas en el modelo `EtapaBeneficio`).
+    - Operación atómica: si algo falla no queda información parcial.
+    - Si se indica `productor_id`, el lote debe pertenecer a una finca de
+      ese productor.
+    - Solo permite lotes activos. La etapa nunca se elimina físicamente
+      (RNF-14): queda disponible de inmediato en el historial del lote.
+
+    Lanza `ValidationError` con errores por campo (`etapa`, `fecha`,
+    `observaciones`) o `lote` / `permiso` para errores de contexto.
+    """
+    with transaction.atomic():
+        lote = _resolver_lote(lote_o_id)
+
+        if productor_id is not None and str(lote.cosecha.finca.productor_id) != str(productor_id):
+            raise ValidationError({"permiso": "No tiene permiso para registrar etapas en este lote."})
+
+        if not lote.activo:
+            raise ValidationError({"lote": "No se pueden registrar etapas en un lote inactivo."})
+
+        nueva = EtapaBeneficio(
+            lote=lote,
+            etapa=etapa,
+            fecha=fecha,
+            observaciones=observaciones or "",
+        )
+        nueva.full_clean(exclude=["activo"])
+        nueva.save()
+        return nueva

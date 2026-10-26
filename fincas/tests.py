@@ -63,6 +63,7 @@ from fincas.services import (
     normalizar_filtros_catalogo,
     obtener_opciones_filtro_catalogo,
     publicar_lote_en_catalogo,
+    registrar_etapa_beneficio,
     validar_lote_para_publicacion,
 )
 from fincas.views import (
@@ -5358,3 +5359,201 @@ class EtapasBeneficioHU14Tests(TestCase):
         _iniciar_sesion_productor(self.client)
         response = self.client.get(self.url_detalle)
         self.assertEqual(response.status_code, 404)
+
+
+class ReglasRegistroEtapasHU14ST3ST4Tests(TestCase):
+    """
+    Subtareas:
+    - SCRUM-152 / HU14-ST3: Validar reglas de registro de etapas.
+    - SCRUM-150 / HU14-ST4: Implementar la lógica de negocio para registrar etapas.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca La Loma", productor_id=self.productor_id, municipio=self.municipio
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca, fecha_cosecha="2026-09-01", cantidad_total=Decimal("300.00")
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTEST34", cosecha=self.cosecha, cantidad=Decimal("100.00")
+        )
+        self.url_registro = reverse("lote_etapa_registro", kwargs={"pk": self.lote.pk})
+        self.url_detalle = reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+
+    def _datos(self, **extra):
+        datos = {"lote_o_id": self.lote, "etapa": "LAVADO", "fecha": "2026-09-05", "observaciones": "ok"}
+        datos.update(extra)
+        return datos
+
+    # ------------------------------ ST3 ------------------------------
+    def test_rechaza_etapa_sin_fecha(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(fecha=None))
+        self.assertIn("fecha", ctx.exception.message_dict)
+        self.assertEqual(
+            ctx.exception.message_dict["fecha"], ["La fecha de la etapa es obligatoria."]
+        )
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_rechaza_etapa_fuera_de_la_lista(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(etapa="TOSTADO"))
+        self.assertIn("etapa", ctx.exception.message_dict)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_rechaza_etapa_vacia(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(etapa=""))
+        self.assertIn("etapa", ctx.exception.message_dict)
+
+    def test_rechaza_observaciones_demasiado_largas(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(observaciones="x" * 501))
+        self.assertIn("observaciones", ctx.exception.message_dict)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_acepta_observaciones_en_el_limite(self):
+        etapa = registrar_etapa_beneficio(**self._datos(observaciones="x" * 500))
+        self.assertEqual(len(etapa.observaciones), 500)
+
+    def test_rechaza_observaciones_con_caracteres_de_control(self):
+        for texto in ["hola\x00mundo", "texto\x07", "otro\x1b[31m"]:
+            with self.subTest(texto=texto):
+                with self.assertRaises(ValidationError) as ctx:
+                    registrar_etapa_beneficio(**self._datos(observaciones=texto))
+                self.assertIn("observaciones", ctx.exception.message_dict)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_acepta_saltos_de_linea_y_tabulaciones_en_observaciones(self):
+        etapa = registrar_etapa_beneficio(**self._datos(observaciones="Línea 1\nLínea 2\tfin"))
+        self.assertEqual(etapa.observaciones, "Línea 1\nLínea 2\tfin")
+
+    def test_formulario_web_aplica_las_mismas_reglas_de_observaciones(self):
+        form = EtapaBeneficioForm(data={"etapa": "LAVADO", "fecha": "2026-09-05", "observaciones": "x" * 501})
+        self.assertFalse(form.is_valid())
+        self.assertIn("observaciones", form.errors)
+        form = EtapaBeneficioForm(data={"etapa": "LAVADO", "fecha": "2026-09-05", "observaciones": "a\x00b"})
+        self.assertFalse(form.is_valid())
+
+    def test_formulario_web_limita_longitud_en_el_navegador(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_registro)
+        self.assertContains(response, 'maxlength="500"')
+
+    def test_pantalla_muestra_error_de_observaciones_largas(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.post(
+            self.url_registro, {"etapa": "LAVADO", "fecha": "2026-09-05", "observaciones": "x" * 501}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "no pueden superar 500 caracteres")
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    # ------------------------------ ST4 ------------------------------
+    def test_registro_valido_queda_guardado_y_asociado_al_lote(self):
+        etapa = registrar_etapa_beneficio(**self._datos(observaciones="  Lavado completo  "))
+        self.assertEqual(etapa.lote, self.lote)
+        self.assertEqual(etapa.etapa, "LAVADO")
+        self.assertEqual(str(etapa.fecha), "2026-09-05")
+        self.assertEqual(etapa.observaciones, "Lavado completo")
+        self.assertTrue(etapa.activo)
+        self.assertEqual(self.lote.etapas_beneficio.count(), 1)
+
+    def test_acepta_id_del_lote_en_lugar_del_objeto(self):
+        etapa = registrar_etapa_beneficio(**self._datos(lote_o_id=self.lote.pk))
+        self.assertEqual(etapa.lote_id, self.lote.pk)
+
+    def test_lote_inexistente_se_rechaza(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(lote_o_id=999999))
+        self.assertIn("lote", ctx.exception.message_dict)
+
+    def test_lote_inactivo_se_rechaza(self):
+        Lote.objects.filter(pk=self.lote.pk).update(activo=False)
+        lote = Lote.objects.get(pk=self.lote.pk)
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(lote_o_id=lote))
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_lote_de_otro_productor_se_rechaza(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(productor_id=uuid.uuid4()))
+        self.assertIn("permiso", ctx.exception.message_dict)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_productor_dueno_puede_registrar(self):
+        etapa = registrar_etapa_beneficio(**self._datos(productor_id=self.productor_id))
+        self.assertEqual(etapa.lote, self.lote)
+
+    def test_operacion_atomica_no_guarda_nada_si_falla(self):
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="DESPULPADO", fecha="2026-09-02")
+        antes = EtapaBeneficio.objects.count()
+        with self.assertRaises(ValidationError):
+            registrar_etapa_beneficio(**self._datos(fecha="no-es-fecha"))
+        with self.assertRaises(ValidationError):
+            registrar_etapa_beneficio(**self._datos(observaciones="x" * 501))
+        self.assertEqual(EtapaBeneficio.objects.count(), antes)
+
+    def test_si_el_guardado_falla_no_queda_informacion_parcial(self):
+        antes = EtapaBeneficio.objects.count()
+        with patch.object(EtapaBeneficio, "save", side_effect=IntegrityError("fallo simulado")):
+            with self.assertRaises(IntegrityError):
+                registrar_etapa_beneficio(**self._datos())
+        self.assertEqual(EtapaBeneficio.objects.count(), antes)
+
+    def test_etapa_registrada_aparece_de_inmediato_en_el_historial(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.post(
+            self.url_registro,
+            {"etapa": "FERMENTACION", "fecha": "2026-09-03", "observaciones": "18 horas en tanque"},
+            follow=True,
+        )
+        self.assertEqual(response.redirect_chain[-1][0], self.url_detalle)
+        self.assertContains(response, "Fermentación")
+        self.assertContains(response, "18 horas en tanque")
+        self.assertContains(response, "03/09/2026")
+        self.assertNotContains(response, "todavía no tiene etapas de beneficio registradas")
+
+    def test_vista_web_usa_validacion_de_backend_aunque_el_formulario_pase(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        Lote.objects.filter(pk=self.lote.pk).update(activo=False)
+        response = self.client.post(self.url_registro, {"etapa": "LAVADO", "fecha": "2026-09-05"})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    # ------------------- RNF-14: sin eliminación física -------------------
+    def test_eliminar_una_etapa_solo_la_inactiva(self):
+        etapa = registrar_etapa_beneficio(**self._datos())
+        etapa.delete()
+        self.assertTrue(EtapaBeneficio.objects.filter(pk=etapa.pk).exists())
+        etapa.refresh_from_db()
+        self.assertFalse(etapa.activo)
+
+    def test_eliminar_un_queryset_de_etapas_solo_las_inactiva(self):
+        registrar_etapa_beneficio(**self._datos())
+        registrar_etapa_beneficio(**self._datos(etapa="SECADO", fecha="2026-09-09"))
+        self.lote.etapas_beneficio.all().delete()
+        self.assertEqual(EtapaBeneficio.objects.count(), 2)
+        self.assertEqual(EtapaBeneficio.objects.filter(activo=True).count(), 0)
+
+    def test_historial_oculta_etapas_inactivas(self):
+        etapa = registrar_etapa_beneficio(**self._datos(observaciones="Observación inactiva"))
+        etapa.delete()
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_detalle)
+        self.assertNotContains(response, "Observación inactiva")
+        self.assertContains(response, "todavía no tiene etapas de beneficio registradas")
+
+    def test_no_se_puede_borrar_un_lote_con_etapas(self):
+        registrar_etapa_beneficio(**self._datos())
+        with self.assertRaises(ProtectedError):
+            self.lote.delete()
+        self.assertTrue(Lote.objects.filter(pk=self.lote.pk).exists())
+        self.assertEqual(EtapaBeneficio.objects.count(), 1)

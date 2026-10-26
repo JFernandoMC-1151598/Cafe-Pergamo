@@ -1,6 +1,7 @@
 """
 Validadores de dominio para Fincas y Georreferenciación - CAFÉ PÉRGAMO
 Subtarea: SCRUM-97: Validar formato de coordenadas.
+Subtarea: SCRUM-152 / HU14-ST3: Validar reglas de registro de etapas de beneficio.
 
 Criterios de Aceptación Cumplidos:
 - Validador que rechaza textos o valores no numéricos.
@@ -95,3 +96,37 @@ def validar_par_coordenadas(latitud, longitud):
 
     if errores:
         raise ValidationError(errores)
+
+
+# Regla de "observaciones consistentes" de HU14-ST3 (la descripción de Jira no
+# la precisa; se definió así): máximo 500 caracteres y sin caracteres de
+# control (se permiten salto de línea, retorno de carro y tabulación).
+OBSERVACIONES_ETAPA_MAX = 500
+_CONTROL_PERMITIDOS = {"\n", "\r", "\t"}
+
+
+def validar_observaciones_etapa(valor):
+    """
+    Observaciones de una etapa de beneficio (HU14-ST3 / SCRUM-152): texto
+    libre opcional, de máximo 500 caracteres y sin caracteres de control
+    (datos corruptos como NUL u otros no imprimibles).
+    """
+    if valor is None or valor == "":
+        return valor
+
+    if len(valor) > OBSERVACIONES_ETAPA_MAX:
+        raise ValidationError(
+            f"Las observaciones no pueden superar {OBSERVACIONES_ETAPA_MAX} caracteres "
+            f"(tiene {len(valor)}).",
+            code="observaciones_demasiado_largas",
+        )
+
+    if any(
+        (ord(c) < 32 or 127 <= ord(c) <= 159) and c not in _CONTROL_PERMITIDOS
+        for c in valor
+    ):
+        raise ValidationError(
+            "Las observaciones contienen caracteres no válidos (de control o no imprimibles).",
+            code="observaciones_caracteres_invalidos",
+        )
+    return valor
