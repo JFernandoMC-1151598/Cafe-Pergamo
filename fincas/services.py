@@ -11,10 +11,18 @@ físicas y de calidad del lote.
 from decimal import Decimal
 from typing import Optional
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
+from django.utils import timezone
 
-from .models import CaracteristicasCalidad, Cosecha, Finca, Lote, Municipio
+from .models import (
+    BitacoraPublicacionLote,
+    CaracteristicasCalidad,
+    Cosecha,
+    Finca,
+    Lote,
+    Municipio,
+)
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 
 
@@ -455,3 +463,277 @@ def crear_lote(
         cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
 
     return lote
+
+
+def validar_lote_para_publicacion(lote: Lote) -> tuple[bool, list[str]]:
+    """
+    Evalúa si un lote cumple con la información mínima requerida para ser
+    publicado en el catálogo público comercial (HU-19 / SCRUM-241).
+
+    Criterios de Aceptación (DoD):
+    1. Solo se publican lotes con información mínima completa.
+    2. La información mínima requerida incluye trazabilidad y calidad:
+       - Lote activo y con cantidad mayor a 0 kg.
+       - Cosecha asociada activa.
+       - Finca asociada activa con municipio asignado (trazabilidad de origen).
+       - Variedad de café asignada a la cosecha.
+       - Proceso de beneficio asignado al lote (Lavado, Honey, Natural, etc.).
+       - Registro de características de calidad asociado, con al menos puntaje
+         en taza (SCA) o porcentaje de humedad reportado.
+
+    Retorna:
+        tuple[bool, list[str]]: (es_valido, lista_de_mensajes_de_error).
+    """
+    errores: list[str] = []
+
+    if not lote.activo:
+        errores.append("El lote se encuentra inactivo y no puede ser publicado en el catálogo.")
+
+    if lote.cantidad is None or lote.cantidad <= Decimal("0.00"):
+        errores.append("El lote debe tener una cantidad disponible mayor a cero (0 kg).")
+
+    cosecha = getattr(lote, "cosecha", None)
+    if not cosecha:
+        errores.append("El lote debe tener una cosecha asociada para garantizar su trazabilidad.")
+    else:
+        if not cosecha.activo:
+            errores.append("La cosecha asociada al lote se encuentra inactiva.")
+
+        if not cosecha.variedad:
+            errores.append("La cosecha debe tener una variedad de café asignada para trazabilidad.")
+
+        finca = getattr(cosecha, "finca", None)
+        if not finca:
+            errores.append("La cosecha debe estar vinculada a una finca registrada.")
+        else:
+            if not finca.activo:
+                errores.append("La finca de origen se encuentra inactiva.")
+
+            municipio = None
+            try:
+                municipio = finca.municipio
+            except ObjectDoesNotExist:
+                municipio = None
+
+            if not municipio:
+                errores.append("La finca debe tener un municipio registrado para su georreferenciación en el catálogo.")
+
+    if not lote.proceso_beneficio:
+        errores.append("El lote debe tener asignado un proceso de beneficio (Lavado, Natural, Honey, etc.).")
+
+    # Validación de calidad (HU-15)
+    calidad = getattr(lote, "caracteristicas_calidad", None)
+    if not calidad:
+        errores.append("El lote debe contar con registro de características físicas y de calidad antes de publicarse.")
+    else:
+        tiene_puntaje = calidad.puntaje_taza is not None
+        tiene_humedad = calidad.humedad is not None
+        if not (tiene_puntaje or tiene_humedad):
+            errores.append(
+                "La evaluación de calidad debe incluir al menos el puntaje en taza o el porcentaje de humedad."
+            )
+
+    return (len(errores) == 0, errores)
+
+
+def generar_snapshot_trazabilidad(lote: Lote) -> dict:
+    """
+    Construye una instantánea (snapshot) estructurada de la trazabilidad completa
+    y calidad del lote al momento de su publicación (HU19-ST6 / SCRUM-244).
+    Este JSON se almacena inmutablemente en la BitacoraPublicacionLote.
+    """
+    cosecha = getattr(lote, "cosecha", None)
+    finca = getattr(cosecha, "finca", None) if cosecha else None
+    municipio = None
+    if finca:
+        try:
+            municipio = finca.municipio
+        except ObjectDoesNotExist:
+            municipio = None
+    variedad = getattr(cosecha, "variedad", None) if cosecha else None
+    proceso = getattr(lote, "proceso_beneficio", None)
+    calidad = getattr(lote, "caracteristicas_calidad", None)
+
+    return {
+        "lote": {
+            "id": lote.id,
+            "codigo": lote.codigo,
+            "cantidad_kg": float(lote.cantidad) if lote.cantidad is not None else 0.0,
+            "precio_referencial": (
+                float(lote.precio_referencial) if lote.precio_referencial is not None else None
+            ),
+            "publicado_en_catalogo": lote.publicado_en_catalogo,
+            "fecha_publicacion": (
+                lote.fecha_publicacion.isoformat() if lote.fecha_publicacion else None
+            ),
+        },
+        "finca": {
+            "id": finca.id if finca else None,
+            "nombre": finca.nombre if finca else "",
+            "vereda": (finca.vereda or "") if finca else "",
+            "municipio": municipio.nombre if municipio else "",
+            "departamento": municipio.departamento if municipio else "",
+            "latitud": str(finca.latitud) if finca and finca.latitud is not None else None,
+            "longitud": str(finca.longitud) if finca and finca.longitud is not None else None,
+        },
+        "cosecha": {
+            "id": cosecha.id if cosecha else None,
+            "fecha_cosecha": str(cosecha.fecha_cosecha) if cosecha and cosecha.fecha_cosecha else "",
+            "variedad": variedad.nombre if variedad else "",
+        },
+        "proceso_beneficio": proceso.nombre if proceso else "",
+        "calidad": {
+            "puntaje_taza": (
+                float(calidad.puntaje_taza) if calidad and calidad.puntaje_taza is not None else None
+            ),
+            "humedad": (
+                float(calidad.humedad) if calidad and calidad.humedad is not None else None
+            ),
+            "merma": (
+                float(calidad.merma) if calidad and calidad.merma is not None else None
+            ),
+            "perfil_sensorial": calidad.perfil_sensorial if calidad else "",
+            "observaciones": calidad.observaciones if calidad else "",
+        },
+    }
+
+
+def publicar_lote_en_catalogo(
+    *,
+    lote_id: int,
+    productor_id: Optional[str] = None,
+    precio_referencial: Optional[Decimal] = None,
+    realizado_por_id: Optional[str] = None,
+    realizado_por_correo: Optional[str] = None,
+    observaciones: str = "",
+) -> Lote:
+    """
+    Aplica las reglas de negocio para publicar un lote en el catálogo
+    público comercial (HU-19 / SCRUM-240 / SCRUM-243 / SCRUM-244).
+
+    Validaciones:
+    - Existencia del lote.
+    - Pertenencia al productor autenticado (aislamiento entre productores).
+    - Validación completa de información mínima (trazabilidad y calidad).
+    - Validación de precio referencial si es suministrado (> 0).
+
+    Acciones atómicas:
+    - Actualiza `publicado_en_catalogo = True`.
+    - Asigna `fecha_publicacion = now()`.
+    - Actualiza `precio_referencial` si se indicó.
+    - Registra el evento en `BitacoraPublicacionLote` con snapshot de trazabilidad.
+    """
+    try:
+        lote = (
+            Lote.objects.select_related(
+                "cosecha__finca__municipio",
+                "cosecha__variedad",
+                "proceso_beneficio",
+                "caracteristicas_calidad",
+            )
+            .get(pk=lote_id)
+        )
+    except Lote.DoesNotExist:
+        raise ValidationError({"lote": "El lote especificado no existe."})
+
+    # Aislamiento entre productores
+    if productor_id is not None:
+        finca = getattr(getattr(lote, "cosecha", None), "finca", None)
+        if not finca or str(finca.productor_id) != str(productor_id):
+            raise ValidationError(
+                {"permiso": "No tiene permisos para publicar este lote porque no pertenece a sus fincas."}
+            )
+
+    # Validación de precio referencial opcional
+    if precio_referencial is not None:
+        try:
+            precio_dec = Decimal(str(precio_referencial))
+            if precio_dec <= Decimal("0.00"):
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise ValidationError(
+                {"precio_referencial": "El precio referencial debe ser un monto mayor a 0."}
+            )
+    else:
+        precio_dec = None
+
+    # Regla de negocio: información mínima requerida (DoD 1 y 2)
+    es_valido, errores = validar_lote_para_publicacion(lote)
+    if not es_valido:
+        raise ValidationError({"publicacion": errores})
+
+    with transaction.atomic():
+        lote.publicado_en_catalogo = True
+        lote.fecha_publicacion = timezone.now()
+        if precio_dec is not None:
+            lote.precio_referencial = precio_dec
+
+        update_fields = ["publicado_en_catalogo", "fecha_publicacion"]
+        if precio_dec is not None:
+            update_fields.append("precio_referencial")
+        lote.save(update_fields=update_fields)
+
+        snapshot = generar_snapshot_trazabilidad(lote)
+        BitacoraPublicacionLote.objects.create(
+            lote=lote,
+            accion="PUBLICAR",
+            realizado_por_id=str(realizado_por_id) if realizado_por_id else None,
+            realizado_por_correo=str(realizado_por_correo) if realizado_por_correo else None,
+            detalles_trazabilidad=snapshot,
+            observaciones=str(observaciones).strip(),
+        )
+
+    return lote
+
+
+def despublicar_lote_de_catalogo(
+    *,
+    lote_id: int,
+    productor_id: Optional[str] = None,
+    realizado_por_id: Optional[str] = None,
+    realizado_por_correo: Optional[str] = None,
+    motivo: str = "",
+) -> Lote:
+    """
+    Retira un lote del catálogo público comercial (HU-19 / SCRUM-243 / SCRUM-244).
+    Cambia `publicado_en_catalogo` a False y genera la traza en la bitácora.
+    """
+    try:
+        lote = (
+            Lote.objects.select_related(
+                "cosecha__finca__municipio",
+                "cosecha__variedad",
+                "proceso_beneficio",
+                "caracteristicas_calidad",
+            )
+            .get(pk=lote_id)
+        )
+    except Lote.DoesNotExist:
+        raise ValidationError({"lote": "El lote especificado no existe."})
+
+    if productor_id is not None:
+        finca = getattr(getattr(lote, "cosecha", None), "finca", None)
+        if not finca or str(finca.productor_id) != str(productor_id):
+            raise ValidationError(
+                {"permiso": "No tiene permisos para modificar este lote porque no pertenece a sus fincas."}
+            )
+
+    if not lote.publicado_en_catalogo:
+        raise ValidationError({"publicacion": "El lote ya se encuentra fuera del catálogo público."})
+
+    with transaction.atomic():
+        lote.publicado_en_catalogo = False
+        lote.save(update_fields=["publicado_en_catalogo"])
+
+        snapshot = generar_snapshot_trazabilidad(lote)
+        BitacoraPublicacionLote.objects.create(
+            lote=lote,
+            accion="DESPUBLICAR",
+            realizado_por_id=str(realizado_por_id) if realizado_por_id else None,
+            realizado_por_correo=str(realizado_por_correo) if realizado_por_correo else None,
+            detalles_trazabilidad=snapshot,
+            observaciones=str(motivo).strip(),
+        )
+
+    return lote
+

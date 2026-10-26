@@ -18,10 +18,12 @@ urlpatterns = [
     path('registro/', views.registrar_finca_view, name='finca_registro'),
     path('mis-fincas/', views.mis_fincas_view, name='mis_fincas'),
 
-    # Interfaz Web de Cosechas y Lotes (HU-13)
+    # Interfaz Web de Cosechas y Lotes (HU-13 / HU-19)
     path('cosechas/registro/', views.registrar_cosecha_view, name='cosecha_registro'),
     path('lotes/registro/', views.registrar_lote_view, name='lote_registro'),
     path('mis-lotes/', views.mis_lotes_view, name='mis_lotes'),
+    path('lotes/<int:pk>/publicar/', views.publicar_lote_web_view, name='lote_publicar'),
+    path('lotes/<int:pk>/despublicar/', views.despublicar_lote_web_view, name='lote_despublicar'),
 
     # Interfaz Web de Catálogo de Municipios (HU-09 / SCRUM-111)
     path('municipios/', views.admin_municipios_view, name='admin_municipios'),
@@ -42,11 +44,27 @@ urlpatterns = [
     # API REST de Cosechas (HU-12 / SCRUM-137)
     path('api/cosechas/', views.api_crear_cosecha_view, name='api_cosecha_crear'),
 
-    # API REST de Lotes (HU-13 / SCRUM-142)
+    # API REST de Lotes (HU-13 / SCRUM-142, HU-15 / SCRUM-155, HU-19 / SCRUM-239)
     path('api/lotes/', views.api_crear_lote_view, name='api_lote_crear'),
     path(
         'api/lotes/<int:lote_id>/calidad/',
         views.api_caracteristicas_calidad_view,
         name='api_lote_calidad',
     ),
+    path(
+        'api/lotes/<int:pk>/publicar/',
+        views.api_publicar_lote_view,
+        name='api_lote_publicar',
+    ),
+    path(
+        'api/lotes/<int:pk>/despublicar/',
+        views.api_despublicar_lote_view,
+        name='api_lote_despublicar',
+    ),
+    path(
+        'api/lotes/<int:pk>/validar-publicacion/',
+        views.api_validar_publicacion_lote_view,
+        name='api_lote_validar_publicacion',
+    ),
 ]
+

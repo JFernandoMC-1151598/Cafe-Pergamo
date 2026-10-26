@@ -9,7 +9,14 @@ físicas y de calidad del lote.
 from decimal import Decimal
 from django.core.validators import MaxValueValidator, MinValueValidator
 from rest_framework import serializers
-from .models import CaracteristicasCalidad, Cosecha, Finca, Lote, Municipio
+from .models import (
+    BitacoraPublicacionLote,
+    CaracteristicasCalidad,
+    Cosecha,
+    Finca,
+    Lote,
+    Municipio,
+)
 from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
 
 
@@ -241,6 +248,9 @@ class LoteSerializer(serializers.ModelSerializer):
             "finca",
             "cantidad",
             "cantidad_disponible_cosecha",
+            "publicado_en_catalogo",
+            "fecha_publicacion",
+            "precio_referencial",
             "activo",
             "proceso_beneficio",
             "estado_lote",
@@ -380,3 +390,64 @@ class CosechaCreateSerializer(serializers.Serializer):
     cantidad_total = serializers.DecimalField(
         max_digits=10, decimal_places=2, min_value=Decimal("0.01"), required=True
     )
+
+
+class LotePublicarInputSerializer(serializers.Serializer):
+    """
+    Serializador de entrada para publicar un lote en el catálogo comercial (HU19-ST1 / SCRUM-239).
+    """
+
+    precio_referencial = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal("0.01"),
+        required=False,
+        allow_null=True,
+        help_text="Precio orientativo por kg en COP (opcional pero debe ser > 0 si se define).",
+    )
+    observaciones = serializers.CharField(
+        max_length=500,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Observaciones o notas para la bitácora de publicación.",
+    )
+
+
+class LoteDespublicarInputSerializer(serializers.Serializer):
+    """
+    Serializador de entrada para retirar un lote del catálogo comercial (HU19-ST1 / SCRUM-239).
+    """
+
+    motivo = serializers.CharField(
+        max_length=500,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Motivo por el cual se retira el lote del catálogo público.",
+    )
+
+
+class BitacoraPublicacionLoteSerializer(serializers.ModelSerializer):
+    """
+    Serializador de consulta para la bitácora de publicación de lotes (HU19-ST6 / SCRUM-244).
+    """
+
+    lote_id = serializers.IntegerField(source="lote.id", read_only=True)
+    lote_codigo = serializers.CharField(source="lote.codigo", read_only=True)
+
+    class Meta:
+        model = BitacoraPublicacionLote
+        fields = [
+            "id",
+            "lote_id",
+            "lote_codigo",
+            "accion",
+            "realizado_por_id",
+            "realizado_por_correo",
+            "detalles_trazabilidad",
+            "observaciones",
+            "creado_en",
+        ]
+        read_only_fields = fields
+

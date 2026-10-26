@@ -390,6 +390,26 @@ class Lote(models.Model):
         help_text="Cantidad asignada a este lote; no puede superar el saldo disponible de la cosecha.",
     )
 
+    publicado_en_catalogo = models.BooleanField(
+        default=False,
+        verbose_name="Publicado en catálogo comercial",
+        help_text="Indica si el lote se encuentra visible y disponible para compradores en el catálogo público (HU-19 / SCRUM-243).",
+    )
+    fecha_publicacion = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Fecha de publicación en catálogo",
+    )
+    precio_referencial = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        verbose_name="Precio referencial por kg (COP)",
+        help_text="Precio orientativo por kilogramo para compradores en el catálogo comercial.",
+    )
+
     activo = models.BooleanField(default=True, verbose_name="Lote activo")
     creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de creación")
 
@@ -401,7 +421,8 @@ class Lote(models.Model):
         ordering = ["-creado_en"]
 
     def __str__(self):
-        return f"Lote {self.codigo} ({self.cantidad} kg) de {self.cosecha}"
+        estado_cat = " [Publicado]" if self.publicado_en_catalogo else ""
+        return f"Lote {self.codigo} ({self.cantidad} kg){estado_cat} de {self.cosecha}"
 
 
 class CaracteristicasCalidad(models.Model):
@@ -484,3 +505,64 @@ class CaracteristicasCalidad(models.Model):
 
     def __str__(self):
         return f"Calidad del lote {self.lote.codigo}"
+
+
+class BitacoraPublicacionLote(models.Model):
+    """
+    Registro inmutable de trazabilidad para eventos de publicación y
+    despublicación de lotes en el catálogo comercial (HU19-ST6 / SCRUM-244).
+    """
+
+    ACCION_CHOICES = [
+        ("PUBLICAR", "Publicar en catálogo"),
+        ("DESPUBLICAR", "Retirar de catálogo"),
+        ("ACTUALIZAR", "Actualizar publicación"),
+    ]
+
+    lote = models.ForeignKey(
+        Lote,
+        on_delete=models.CASCADE,
+        related_name="historial_publicaciones",
+        verbose_name="Lote",
+    )
+    accion = models.CharField(
+        max_length=20,
+        choices=ACCION_CHOICES,
+        verbose_name="Acción realizada",
+    )
+    realizado_por_id = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        verbose_name="ID de usuario que realizó la acción",
+    )
+    realizado_por_correo = models.EmailField(
+        null=True,
+        blank=True,
+        verbose_name="Correo de usuario que realizó la acción",
+    )
+    detalles_trazabilidad = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="Snapshot de trazabilidad y calidad al momento de publicar",
+    )
+    observaciones = models.TextField(
+        blank=True,
+        default="",
+        verbose_name="Observaciones o motivo",
+    )
+    creado_en = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Fecha de registro",
+    )
+
+    class Meta:
+        managed = True
+        db_table = "fincas_bitacora_publicacion_lote"
+        verbose_name = "Registro de publicación de lote"
+        verbose_name_plural = "Bitácora de publicaciones de lotes"
+        ordering = ["-creado_en", "-id"]
+
+    def __str__(self):
+        return f"{self.accion} - Lote {self.lote.codigo} ({self.creado_en})"
+
