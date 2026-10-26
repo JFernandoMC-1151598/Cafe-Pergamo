@@ -451,3 +451,65 @@ class BitacoraPublicacionLoteSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+
+class CatalogoLoteSerializer(serializers.ModelSerializer):
+    """
+    Representación pública de un lote del catálogo comercial
+    (SCRUM-250 / HU20-ST3). Expone nombres legibles para que un comprador o
+    un cliente externo pueda mostrar el lote sin consultas adicionales. No
+    incluye datos del productor (identificación ni correo).
+    """
+
+    finca = serializers.CharField(source="cosecha.finca.nombre", read_only=True)
+    vereda = serializers.CharField(source="cosecha.finca.vereda", read_only=True)
+    municipio_id = serializers.IntegerField(source="cosecha.finca.municipio_id", read_only=True)
+    municipio = serializers.CharField(source="cosecha.finca.municipio.nombre", read_only=True)
+    variedad_id = serializers.IntegerField(source="cosecha.variedad_id", read_only=True, allow_null=True)
+    variedad = serializers.CharField(source="cosecha.variedad.nombre", read_only=True, allow_null=True)
+    proceso_id = serializers.IntegerField(source="proceso_beneficio_id", read_only=True, allow_null=True)
+    proceso = serializers.CharField(source="proceso_beneficio.nombre", read_only=True, allow_null=True)
+    puntaje_taza = serializers.SerializerMethodField()
+    humedad = serializers.SerializerMethodField()
+    perfil_sensorial = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Lote
+        fields = [
+            "id",
+            "codigo",
+            "cantidad",
+            "precio_referencial",
+            "fecha_publicacion",
+            "finca",
+            "vereda",
+            "municipio_id",
+            "municipio",
+            "variedad_id",
+            "variedad",
+            "proceso_id",
+            "proceso",
+            "puntaje_taza",
+            "humedad",
+            "perfil_sensorial",
+        ]
+        read_only_fields = fields
+
+    @staticmethod
+    def _calidad(obj):
+        try:
+            return obj.caracteristicas_calidad
+        except CaracteristicasCalidad.DoesNotExist:
+            return None
+
+    def get_puntaje_taza(self, obj):
+        calidad = self._calidad(obj)
+        return str(calidad.puntaje_taza) if calidad and calidad.puntaje_taza is not None else None
+
+    def get_humedad(self, obj):
+        calidad = self._calidad(obj)
+        return str(calidad.humedad) if calidad and calidad.humedad is not None else None
+
+    def get_perfil_sensorial(self, obj):
+        calidad = self._calidad(obj)
+        return calidad.perfil_sensorial if calidad else ""
+

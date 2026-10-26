@@ -6,6 +6,8 @@ Subtarea: SCRUM-145 / HU013-ST4: Validar cantidad disponible antes de crear el l
 Subtarea: SCRUM-146 / HU013-ST5: Actualizar trazabilidad de la cosecha al crear lotes.
 Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
 físicas y de calidad del lote.
+Subtarea: SCRUM-248 / HU20-ST4: Definir criterios y reglas de filtrado del catálogo.
+Subtarea: SCRUM-249 / HU20-ST5: Implementar consulta de filtrado para lotes disponibles.
 """
 
 from decimal import Decimal
@@ -13,6 +15,7 @@ from typing import Optional
 
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from .models import (
@@ -736,4 +739,175 @@ def despublicar_lote_de_catalogo(
         )
 
     return lote
+
+
+# ==============================================================================
+# HU-20 (SCRUM-229): FILTRADO DEL CATÁLOGO COMERCIAL
+# ==============================================================================
+
+# SCRUM-248 / HU20-ST4: Opciones de calidad mínima ofrecidas en la interfaz
+# (escala SCA). 80+ es el umbral convencional de "café de especialidad".
+OPCIONES_PUNTAJE_MINIMO_CATALOGO = (80, 84, 86, 88)
+
+# Parámetros GET aceptados por la vista web y la API del catálogo.
+PARAMETROS_FILTRO_CATALOGO = ("municipio", "variedad", "proceso", "puntaje_min", "q")
+
+
+def lotes_disponibles_en_catalogo():
+    """
+    Queryset base de lotes "disponibles" en el catálogo público
+    (SCRUM-248 / HU20-ST4). El criterio de aceptación de la HU-20 exige que
+    los filtros devuelvan *solo lotes disponibles*, así que cualquier filtro
+    se aplica SIEMPRE encima de esta base, nunca sobre `Lote.objects.all()`:
+
+    - Publicado en el catálogo (HU-19) y lote activo.
+    - Cantidad mayor a 0 kg.
+    - Cosecha y finca de origen activas (un lote publicado cuya finca se
+      inactivó después no debe seguir ofreciéndose).
+    """
+    return (
+        Lote.objects.filter(
+            publicado_en_catalogo=True,
+            activo=True,
+            cantidad__gt=Decimal("0.00"),
+            cosecha__activo=True,
+            cosecha__finca__activo=True,
+        )
+        .select_related(
+            "cosecha__finca__municipio",
+            "cosecha__variedad",
+            "proceso_beneficio",
+            "caracteristicas_calidad",
+        )
+        .order_by("-fecha_publicacion", "-creado_en")
+    )
+
+
+def _normalizar_id_filtro(valor, campo: str, errores: dict) -> Optional[int]:
+    """Convierte un id de filtro a entero positivo; registra el error si no es válido."""
+    if valor is None or str(valor).strip() == "":
+        return None
+    try:
+        valor_int = int(str(valor).strip())
+    except (TypeError, ValueError):
+        errores[campo] = f"El filtro '{campo}' debe ser un identificador numérico válido."
+        return None
+    if valor_int <= 0:
+        errores[campo] = f"El filtro '{campo}' debe ser un identificador numérico válido."
+        return None
+    return valor_int
+
+
+def normalizar_filtros_catalogo(parametros) -> tuple[dict, dict]:
+    """
+    Valida y normaliza los parámetros de filtro del catálogo
+    (SCRUM-248 / HU20-ST4). Acepta un `QueryDict` (request.GET) o un dict.
+
+    Reglas:
+    - `municipio`, `variedad`, `proceso`: id numérico positivo.
+    - `puntaje_min`: decimal entre 0 y 100 (escala SCA de puntaje en taza).
+    - `q`: texto libre, se recorta y se limita a 100 caracteres.
+    - Valores vacíos se ignoran (equivalen a "sin filtro").
+
+    Retorna:
+        (filtros_validos, errores): los filtros válidos se pueden aplicar
+        aunque otros parámetros vengan mal; la vista decide si muestra una
+        advertencia (web) o responde 400 (API).
+    """
+    parametros = parametros or {}
+    errores: dict = {}
+    filtros: dict = {}
+
+    for campo in ("municipio", "variedad", "proceso"):
+        valor = _normalizar_id_filtro(parametros.get(campo), campo, errores)
+        if valor is not None:
+            filtros[campo] = valor
+
+    puntaje_raw = parametros.get("puntaje_min")
+    if puntaje_raw is not None and str(puntaje_raw).strip() != "":
+        try:
+            puntaje = Decimal(str(puntaje_raw).strip())
+            if not puntaje.is_finite():
+                raise ValueError()
+        except (ArithmeticError, TypeError, ValueError):
+            errores["puntaje_min"] = "El puntaje mínimo de calidad debe ser un número."
+        else:
+            if puntaje < Decimal("0") or puntaje > Decimal("100"):
+                errores["puntaje_min"] = "El puntaje mínimo de calidad debe estar entre 0 y 100."
+            else:
+                filtros["puntaje_min"] = puntaje
+
+    q = str(parametros.get("q") or "").strip()[:100]
+    if q:
+        filtros["q"] = q
+
+    return filtros, errores
+
+
+def filtrar_catalogo_lotes(
+    *,
+    municipio: Optional[int] = None,
+    variedad: Optional[int] = None,
+    proceso: Optional[int] = None,
+    puntaje_min: Optional[Decimal] = None,
+    q: Optional[str] = None,
+):
+    """
+    Consulta filtrada de lotes disponibles en el catálogo
+    (SCRUM-249 / HU20-ST5, SCRUM-251 / HU20-ST6).
+
+    Filtros combinados: cada criterio indicado se suma con AND sobre la base
+    de `lotes_disponibles_en_catalogo()`, de modo que el resultado solo
+    contiene lotes disponibles que cumplen TODOS los criterios a la vez.
+    Un criterio en None/vacío no restringe nada.
+
+    - puntaje_min: exige evaluación de calidad con puntaje en taza >= valor.
+      Los lotes publicados solo con humedad (sin puntaje) quedan fuera
+      cuando se filtra por calidad, porque no se puede afirmar que lo cumplan.
+    - q: búsqueda de texto en código del lote, finca, vereda, municipio y
+      perfil sensorial.
+    """
+    lotes = lotes_disponibles_en_catalogo()
+
+    if municipio:
+        lotes = lotes.filter(cosecha__finca__municipio_id=municipio)
+    if variedad:
+        lotes = lotes.filter(cosecha__variedad_id=variedad)
+    if proceso:
+        lotes = lotes.filter(proceso_beneficio_id=proceso)
+    if puntaje_min is not None:
+        lotes = lotes.filter(caracteristicas_calidad__puntaje_taza__gte=puntaje_min)
+    if q:
+        lotes = lotes.filter(
+            Q(codigo__icontains=q)
+            | Q(cosecha__finca__nombre__icontains=q)
+            | Q(cosecha__finca__vereda__icontains=q)
+            | Q(cosecha__finca__municipio__nombre__icontains=q)
+            | Q(caracteristicas_calidad__perfil_sensorial__icontains=q)
+        )
+
+    return lotes
+
+
+def obtener_opciones_filtro_catalogo() -> dict:
+    """
+    Opciones para los controles de filtro de la interfaz (SCRUM-246 / HU20-ST1).
+
+    Solo se ofrecen municipios, variedades y procesos que tienen al menos un
+    lote disponible en el catálogo: así el comprador nunca elige una opción
+    que por construcción devolvería cero resultados.
+    """
+    base = lotes_disponibles_en_catalogo()
+    return {
+        "municipios": Municipio.objects.filter(
+            pk__in=base.values("cosecha__finca__municipio_id")
+        ).order_by("nombre"),
+        "variedades": VariedadCafe.objects.filter(
+            pk__in=base.values("cosecha__variedad_id")
+        ).order_by("nombre"),
+        "procesos": ProcesoBeneficio.objects.filter(
+            pk__in=base.values("proceso_beneficio_id")
+        ).order_by("orden", "nombre"),
+        "puntajes_minimos": OPCIONES_PUNTAJE_MINIMO_CATALOGO,
+    }
 
