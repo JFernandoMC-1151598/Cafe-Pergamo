@@ -19,6 +19,7 @@ import uuid
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+from django import forms as forms_module
 from django.contrib.auth.models import User
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core.exceptions import ValidationError
@@ -33,6 +34,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from fincas.forms import (
     CosechaRegistroForm,
+    EtapaBeneficioForm,
     FincaModelForm,
     FincaRegistroForm,
     GeorreferenciacionFormMixin,
@@ -43,6 +45,7 @@ from fincas.models import (
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
     Cosecha,
+    EtapaBeneficio,
     Finca,
     Lote,
     Municipio,
@@ -5199,3 +5202,159 @@ class FiltradoCatalogoComercialHU20Tests(TestCase):
         self.assertIn(MENSAJE_CATALOGO_VACIO, content)
 
 
+# =============================================================================
+# HU-14 / SCRUM-18: Registrar etapas de beneficio de un lote
+# =============================================================================
+class EtapasBeneficioHU14Tests(TestCase):
+    """
+    Subtareas:
+    - SCRUM-148 / HU14-ST1: Diseñar la interfaz para capturar etapas de beneficio.
+    - SCRUM-149 / HU14-ST2: Mostrar el historial de beneficio del lote.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca El Mirador",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-09-01",
+            cantidad_total=Decimal("300.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTEHU14",
+            cosecha=self.cosecha,
+            cantidad=Decimal("100.00"),
+        )
+        self.url_detalle = reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        self.url_registro = reverse("lote_etapa_registro", kwargs={"pk": self.lote.pk})
+
+    # ---------------------------- HU14-ST1 ----------------------------
+    def test_formulario_ofrece_solo_etapas_validas_de_la_lista(self):
+        form = EtapaBeneficioForm()
+        valores = [valor for valor, _ in form.fields["etapa"].choices if valor]
+        self.assertEqual(
+            valores, ["DESPULPADO", "FERMENTACION", "LAVADO", "SECADO"]
+        )
+        self.assertIsInstance(form.fields["etapa"].widget, forms_module.Select)
+
+    def test_formulario_rechaza_etapa_en_texto_libre(self):
+        form = EtapaBeneficioForm(data={"etapa": "Tostado", "fecha": "2026-09-05"})
+        self.assertFalse(form.is_valid())
+        self.assertIn("etapa", form.errors)
+
+    def test_formulario_exige_fecha(self):
+        form = EtapaBeneficioForm(data={"etapa": "LAVADO", "fecha": ""})
+        self.assertFalse(form.is_valid())
+        self.assertIn("La fecha de la etapa es obligatoria.", form.errors["fecha"])
+
+    def test_formulario_observaciones_son_opcionales(self):
+        form = EtapaBeneficioForm(data={"etapa": "SECADO", "fecha": "2026-09-05"})
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_registro_sin_sesion_redirige_a_login(self):
+        response = self.client.get(self.url_registro)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+
+    def test_pantalla_registro_muestra_contexto_del_lote_y_campos(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_registro)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "LOTEHU14")
+        self.assertContains(response, "Finca El Mirador")
+        self.assertContains(response, 'id="id_etapa"')
+        self.assertContains(response, 'type="date"')
+        self.assertContains(response, 'id="id_observaciones"')
+        # Fecha marcada visualmente como obligatoria
+        self.assertContains(response, 'Fecha de la etapa <span class="text-danger">*</span>', html=False)
+
+    def test_registro_valido_guarda_etapa_y_redirige_al_historial(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.post(
+            self.url_registro,
+            {"etapa": "DESPULPADO", "fecha": "2026-09-02", "observaciones": "  Despulpado el mismo día  "},
+        )
+        self.assertRedirects(response, self.url_detalle)
+        etapa = EtapaBeneficio.objects.get(lote=self.lote)
+        self.assertEqual(etapa.etapa, EtapaBeneficio.TipoEtapa.DESPULPADO)
+        self.assertEqual(str(etapa.fecha), "2026-09-02")
+        self.assertEqual(etapa.observaciones, "Despulpado el mismo día")
+
+    def test_registro_invalido_no_guarda_y_muestra_errores(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.post(self.url_registro, {"etapa": "", "fecha": ""})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+        self.assertContains(response, "Debe seleccionar la etapa de beneficio.")
+        self.assertContains(response, "La fecha de la etapa es obligatoria.")
+
+    def test_no_permite_registrar_etapa_en_lote_de_otro_productor(self):
+        _iniciar_sesion_productor(self.client)
+        response = self.client.post(
+            self.url_registro, {"etapa": "LAVADO", "fecha": "2026-09-03"}
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_mis_lotes_enlaza_historial_y_nueva_etapa(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(reverse("mis_lotes"))
+        self.assertContains(response, self.url_detalle)
+        self.assertContains(response, self.url_registro)
+
+    # ---------------------------- HU14-ST2 ----------------------------
+    def test_historial_vacio_muestra_estado_claro(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_detalle)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "todavía no tiene etapas de beneficio registradas")
+
+    def test_historial_muestra_etapas_en_orden_cronologico(self):
+        # Se registran desordenadas a propósito
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="SECADO", fecha="2026-09-10", observaciones="Secado en marquesina")
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="DESPULPADO", fecha="2026-09-02")
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="FERMENTACION", fecha="2026-09-03", observaciones="18 horas")
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_detalle)
+        self.assertEqual(response.status_code, 200)
+        etapas = list(response.context["etapas"])
+        self.assertEqual(
+            [e.etapa for e in etapas], ["DESPULPADO", "FERMENTACION", "SECADO"]
+        )
+        contenido = response.content.decode()
+        self.assertLess(contenido.index("Despulpado"), contenido.index("Fermentación"))
+        self.assertLess(contenido.index("Fermentación"), contenido.index("Secado</span>"))
+        self.assertContains(response, "10/09/2026")
+        self.assertContains(response, "Secado en marquesina")
+        self.assertContains(response, "18 horas")
+        self.assertNotContains(response, "todavía no tiene etapas de beneficio registradas")
+
+    def test_historial_misma_fecha_respeta_orden_de_registro(self):
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="FERMENTACION", fecha="2026-09-03")
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="LAVADO", fecha="2026-09-03")
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_detalle)
+        self.assertEqual(
+            [e.etapa for e in response.context["etapas"]], ["FERMENTACION", "LAVADO"]
+        )
+
+    def test_historial_solo_muestra_etapas_del_lote_consultado(self):
+        otro_lote = Lote.objects.create(codigo="LOTEOTRO", cosecha=self.cosecha, cantidad=Decimal("50.00"))
+        EtapaBeneficio.objects.create(lote=otro_lote, etapa="LAVADO", fecha="2026-09-04", observaciones="De otro lote")
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_detalle)
+        self.assertNotContains(response, "De otro lote")
+        self.assertContains(response, "todavía no tiene etapas de beneficio registradas")
+
+    def test_historial_de_lote_ajeno_responde_404(self):
+        _iniciar_sesion_productor(self.client)
+        response = self.client.get(self.url_detalle)
+        self.assertEqual(response.status_code, 404)

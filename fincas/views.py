@@ -14,6 +14,8 @@ Subtarea: SCRUM-146 / HU013-ST5: Actualizar trazabilidad de la cosecha al crear 
 (idem, el descuento del saldo vive en services.crear_lote()).
 Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
 físicas y de calidad del lote.
+Subtarea: SCRUM-148 / HU14-ST1: Diseñar la interfaz para capturar etapas de beneficio.
+Subtarea: SCRUM-149 / HU14-ST2: Mostrar el historial de beneficio del lote.
 Nota: incluye también una vista de registro de cosechas, complemento necesario para
 poder usar el formulario de lotes de principio a fin (ver nota en fincas/forms.py).
 Nota: incluye además una vista de listado "Mis Lotes" con filtro por finca -- pedida
@@ -40,11 +42,12 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
-from .forms import CosechaRegistroForm, FincaRegistroForm, FincaModelForm, LoteRegistroForm, MunicipioForm
+from .forms import CosechaRegistroForm, EtapaBeneficioForm, FincaRegistroForm, FincaModelForm, LoteRegistroForm, MunicipioForm
 from .models import (
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
     Cosecha,
+    EtapaBeneficio,
     Finca,
     Lote,
     Municipio,
@@ -1256,6 +1259,101 @@ def api_validar_publicacion_lote_view(request, pk):
             "errores": errores,
         },
         status=status.HTTP_200_OK,
+    )
+
+
+# ==============================================================================
+# VISTAS WEB DE ETAPAS DE BENEFICIO DEL LOTE (HU-14 / SCRUM-18)
+# ==============================================================================
+
+def _obtener_lote_del_productor(productor_id, pk):
+    """
+    Devuelve el lote `pk` solo si pertenece a una finca del productor; si
+    es de otro productor responde 404, igual que si no existiera, para no
+    revelar lotes ajenos.
+    """
+    return get_object_or_404(
+        Lote.objects.select_related(
+            "cosecha",
+            "cosecha__finca",
+            "cosecha__finca__municipio",
+            "cosecha__variedad",
+            "proceso_beneficio",
+            "estado_lote",
+        ),
+        pk=pk,
+        cosecha__finca__productor_id=productor_id,
+    )
+
+
+def detalle_lote_view(request, pk):
+    """
+    Detalle de un lote con su historial de beneficio (HU14-ST2 /
+    SCRUM-149): todas las etapas registradas, en orden cronológico, con
+    fecha, etapa y observaciones. Si el lote todavía no tiene etapas se
+    muestra un estado vacío explícito, nunca un error ni una página en
+    blanco.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(
+            request,
+            "Debe iniciar sesión con su cuenta de productor para consultar el lote."
+        )
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    lote = _obtener_lote_del_productor(productor_id, pk)
+    # El orden cronológico lo define EtapaBeneficio.Meta.ordering; se
+    # repite aquí para que el historial no dependa de un cambio en Meta.
+    etapas = lote.etapas_beneficio.order_by("fecha", "creado_en", "id")
+
+    return render(
+        request,
+        "fincas/detalle_lote.html",
+        {"lote": lote, "etapas": etapas},
+    )
+
+
+def registrar_etapa_beneficio_view(request, pk):
+    """
+    Formulario web para registrar una nueva etapa de beneficio sobre un
+    lote (HU14-ST1 / SCRUM-148). El lote viene fijado por la URL y se
+    muestra en el encabezado del formulario, así el productor siempre
+    sabe a qué lote le está registrando la etapa.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(
+            request,
+            "Debe iniciar sesión con su cuenta de productor para registrar etapas de beneficio."
+        )
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    lote = _obtener_lote_del_productor(productor_id, pk)
+
+    if request.method == "POST":
+        form = EtapaBeneficioForm(request.POST)
+        if form.is_valid():
+            etapa = form.save(commit=False)
+            etapa.lote = lote
+            etapa.save()
+            messages.success(
+                request,
+                f"Etapa '{etapa.get_etapa_display()}' registrada exitosamente "
+                f"para el lote '{lote.codigo}'."
+            )
+            return redirect("lote_detalle", pk=lote.pk)
+        messages.error(
+            request,
+            "Por favor revise los errores señalados en el formulario antes de continuar."
+        )
+    else:
+        form = EtapaBeneficioForm()
+
+    return render(
+        request,
+        "fincas/registro_etapa_beneficio.html",
+        {"form": form, "lote": lote},
     )
 
 
