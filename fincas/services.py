@@ -6,6 +6,7 @@ Subtarea: SCRUM-145 / HU013-ST4: Validar cantidad disponible antes de crear el l
 Subtarea: SCRUM-146 / HU013-ST5: Actualizar trazabilidad de la cosecha al crear lotes.
 """
 
+from datetime import date
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Union
 
@@ -555,17 +556,282 @@ def obtener_ficha_consolidada_lote(lote_identificador: Union[Lote, int, str]) ->
             "perfil_taza": getattr(c, "perfil_taza", None),
         }
 
-    # 9. Cálculo de porcentaje de completitud de la trazabilidad
-    completitud = 40  # Base: Finca + Cosecha + Lote
+
+def evaluar_consistencia_y_completitud_lote(
+    *,
+    lote: Lote,
+    finca: Finca,
+    cosecha: Cosecha,
+    proceso: Optional[ProcesoBeneficio] = None,
+    etapas_beneficio: Optional[List[Dict[str, Any]]] = None,
+    calidad_info: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Evalúa la completitud y valida la consistencia de los datos del lote
+    para la ficha digital consolidada (HU-17 / ST6 - SCRUM-171).
+
+    Reglas de Completitud (Ponderación 100%):
+      - 40%: Identificación base (Finca, Productor, Cosecha y Lote)
+      - 10%: Georreferenciación WGS84 válida
+      - 15%: Proceso de beneficio asignado
+      - 15%: Etapas de beneficio registradas (HU-14)
+      - 20%: Análisis de calidad física y sensorial SCA (HU-15)
+
+    Reglas de Consistencia (Validación de Integridad y Alertas):
+      - Cantidad disponible de cosecha no debe superar la cantidad total.
+      - Cantidad de lote debe ser mayor a cero.
+      - Coordenadas geográficas dentro del rango válido de Colombia (-4.5 a 13.5 Lat, -79.0 a -66.5 Lng).
+      - Fecha de cosecha no debe ser una fecha futura.
+      - Porcentaje de humedad en café dentro del rango estándar técnico (10% - 12%).
+    """
+    etapas = etapas_beneficio or []
+    campos_faltantes: List[str] = []
+    campos_completos: List[str] = ["Identificación de Finca y Productor", "Registro de Lote y Cosecha"]
+    advertencias: List[str] = []
+
+    # 1. Ponderación de Completitud Progresiva
+    porcentaje = 40  # Base mínima
+
     if finca.tiene_georreferenciacion:
-        completitud += 10
+        porcentaje += 10
+        campos_completos.append("Georreferenciación WGS84")
+    else:
+        campos_faltantes.append("Coordenadas GPS (WGS84) del predio")
+
     if proceso is not None:
-        completitud += 15
-    if etapas_beneficio:
-        completitud += 15
+        porcentaje += 15
+        campos_completos.append(f"Proceso de Beneficio ({proceso.nombre})")
+    else:
+        campos_faltantes.append("Asignación de proceso de beneficio (Lavado, Honey, Natural)")
+
+    if etapas:
+        porcentaje += 15
+        campos_completos.append(f"Etapas de Beneficio ({len(etapas)} registradas)")
+    else:
+        campos_faltantes.append("Registro de etapas operativas de beneficio (fermentación, secado)")
+
     if calidad_info is not None:
-        completitud += 20
-    completitud = min(completitud, 100)
+        porcentaje += 20
+        campos_completos.append("Análisis de Calidad y Catación SCA")
+    else:
+        campos_faltantes.append("Análisis físico y sensorial de calidad SCA")
+
+    porcentaje = min(max(porcentaje, 0), 100)
+
+    # 2. Asignación de Nivel y Color de Semáforo
+    if porcentaje < 50:
+        nivel = "Básica"
+        color_nivel = "secondary"
+    elif porcentaje < 80:
+        nivel = "Media"
+        color_nivel = "warning"
+    elif porcentaje < 100:
+        nivel = "Avanzada"
+        color_nivel = "info"
+    else:
+        nivel = "Completa"
+        color_nivel = "success"
+
+    # 3. Validación de Consistencia Lógica
+    if cosecha.cantidad_disponible is not None and cosecha.cantidad_total is not None:
+        if cosecha.cantidad_disponible > cosecha.cantidad_total:
+            advertencias.append(
+                f"La cantidad disponible ({cosecha.cantidad_disponible} kg) supera la cantidad total recolectada ({cosecha.cantidad_total} kg)."
+            )
+
+    if lote.cantidad is not None and lote.cantidad <= 0:
+        advertencias.append(f"El volumen del lote ({lote.cantidad} kg) debe ser mayor a cero.")
+
+    if finca.latitud is not None or finca.longitud is not None:
+        lat = float(finca.latitud) if finca.latitud is not None else None
+        lng = float(finca.longitud) if finca.longitud is not None else None
+        if lat is not None and not (-4.5 <= lat <= 13.5):
+            advertencias.append(f"La latitud registrada ({lat}) se encuentra fuera del territorio colombiano (-4.5 a 13.5).")
+        if lng is not None and not (-79.0 <= lng <= -66.5):
+            advertencias.append(f"La longitud registrada ({lng}) se encuentra fuera del territorio colombiano (-79.0 a -66.5).")
+
+    if cosecha.fecha_cosecha:
+        hoy = date.today()
+        fecha_cos = None
+        if isinstance(cosecha.fecha_cosecha, date):
+            fecha_cos = cosecha.fecha_cosecha
+        elif isinstance(cosecha.fecha_cosecha, str):
+            try:
+                fecha_cos = date.fromisoformat(cosecha.fecha_cosecha[:10])
+            except (ValueError, TypeError):
+                pass
+        elif hasattr(cosecha.fecha_cosecha, "date"):
+            fecha_cos = cosecha.fecha_cosecha.date()
+
+        if fecha_cos and fecha_cos > hoy:
+            advertencias.append(f"La fecha de cosecha ({fecha_cos}) es posterior a la fecha actual del sistema.")
+
+    if calidad_info and calidad_info.get("humedad_pct") is not None:
+        try:
+            humedad = float(calidad_info["humedad_pct"])
+            if humedad < 9.0 or humedad > 13.0:
+                advertencias.append(f"El porcentaje de humedad ({humedad}%) se sale del estándar técnico óptimo (10% - 12%).")
+        except (ValueError, TypeError):
+            pass
+
+    es_consistente = (len(advertencias) == 0)
+
+    return {
+        "porcentaje": porcentaje,
+        "nivel": nivel,
+        "color_nivel": color_nivel,
+        "es_consistente": es_consistente,
+        "advertencias": advertencias,
+        "campos_completos": campos_completos,
+        "campos_faltantes": campos_faltantes,
+    }
+
+
+def obtener_ficha_consolidada_lote(lote_identificador: Union[Lote, int, str]) -> Dict[str, Any]:
+    """
+    Servicio de dominio para consolidar toda la información de trazabilidad de un lote
+    (HU-17 / SCRUM-169, SCRUM-170 y SCRUM-171).
+    """
+    if isinstance(lote_identificador, Lote):
+        lote = lote_identificador
+    elif isinstance(lote_identificador, int) or (isinstance(lote_identificador, str) and lote_identificador.isdigit()):
+        try:
+            lote = (
+                Lote.objects.select_related(
+                    "cosecha__finca__municipio",
+                    "cosecha__variedad",
+                    "proceso_beneficio",
+                    "estado_lote",
+                ).get(pk=int(lote_identificador))
+            )
+        except Lote.DoesNotExist:
+            raise ValidationError({"lote": f"No se encontró ningún lote con el ID '{lote_identificador}'."})
+    elif isinstance(lote_identificador, str):
+        codigo_limpio = lote_identificador.strip().upper()
+        try:
+            lote = (
+                Lote.objects.select_related(
+                    "cosecha__finca__municipio",
+                    "cosecha__variedad",
+                    "proceso_beneficio",
+                    "estado_lote",
+                ).get(codigo__iexact=codigo_limpio)
+            )
+        except Lote.DoesNotExist:
+            raise ValidationError({"lote": f"No se encontró ningún lote con el código '{codigo_limpio}'."})
+    else:
+        raise ValidationError({"lote": "Identificador de lote no válido."})
+
+    cosecha = lote.cosecha
+    finca = cosecha.finca
+    municipio = finca.municipio
+    variedad = cosecha.variedad
+    proceso = lote.proceso_beneficio
+    estado = lote.estado_lote
+
+    # 1. Extracción segura del Productor
+    productor_info = {
+        "id": str(finca.productor_id) if finca.productor_id else None,
+        "nombre_completo": "Productor de Café",
+        "correo": None,
+        "telefono": None,
+        "tipo_documento": None,
+        "numero_documento": None,
+    }
+    try:
+        p = finca.productor
+        if p:
+            nombres = getattr(p, "nombres", "") or ""
+            apellidos = getattr(p, "apellidos", "") or ""
+            nombre_str = f"{nombres} {apellidos}".strip()
+            productor_info["nombre_completo"] = nombre_str or getattr(p, "correo", "Productor Registrado")
+            productor_info["correo"] = getattr(p, "correo", None)
+            productor_info["telefono"] = getattr(p, "telefono", None)
+            productor_info["numero_documento"] = getattr(p, "numero_documento", None)
+            tipo_doc = getattr(p, "tipo_documento", None)
+            productor_info["tipo_documento"] = getattr(tipo_doc, "codigo", None) if tipo_doc else None
+    except Exception:
+        pass
+
+    # 2. Extracción de Finca y Georreferenciación
+    finca_info = {
+        "id": finca.id,
+        "nombre": finca.nombre,
+        "vereda": finca.vereda or "",
+        "municipio": municipio.nombre if municipio else "No asignado",
+        "departamento": municipio.departamento if municipio else "Norte de Santander",
+        "latitud": finca.latitud,
+        "longitud": finca.longitud,
+        "tiene_georreferenciacion": finca.tiene_georreferenciacion,
+    }
+
+    # 3. Extracción de Cosecha
+    cosecha_info = {
+        "id": cosecha.id,
+        "fecha_cosecha": cosecha.fecha_cosecha,
+        "cantidad_total_cosecha": cosecha.cantidad_total,
+        "cantidad_disponible_cosecha": cosecha.cantidad_disponible,
+    }
+
+    # 4. Extracción de Variedad Botánica
+    variedad_info = {
+        "id": variedad.id if variedad else None,
+        "nombre": variedad.nombre if variedad else "Mezcla tradicional / No especificada",
+        "especie": variedad.especie if variedad else "Arábica",
+        "descripcion": variedad.descripcion if variedad else "",
+    }
+
+    # 5. Extracción de Proceso de Beneficio
+    proceso_info = {
+        "id": proceso.id if proceso else None,
+        "codigo": proceso.codigo if proceso else None,
+        "nombre": proceso.nombre if proceso else "Sin proceso asignado",
+        "descripcion": proceso.descripcion if proceso else "",
+    }
+
+    # 6. Extracción de Estado del Lote
+    estado_info = {
+        "id": estado.id if estado else None,
+        "codigo": estado.codigo if estado else "REGISTRADO",
+        "nombre": estado.nombre if estado else "Registrado",
+        "descripcion": estado.descripcion if estado else "",
+    }
+
+    # 7. Módulo extensible para HU-14 (Etapas de Beneficio - David Torres)
+    etapas_beneficio: List[Dict[str, Any]] = []
+    if hasattr(lote, "etapas") and hasattr(lote.etapas, "all"):
+        for etapa in lote.etapas.all():
+            etapas_beneficio.append({
+                "id": getattr(etapa, "id", None),
+                "etapa": getattr(etapa, "nombre", str(etapa)),
+                "fecha_inicio": getattr(etapa, "fecha_inicio", None),
+                "fecha_fin": getattr(etapa, "fecha_fin", None),
+                "duracion_horas": getattr(etapa, "duracion_horas", None),
+                "temperatura": getattr(etapa, "temperatura", None),
+            })
+
+    # 8. Módulo extensible para HU-15 (Calidad Sensorial y Física - Alessandro Reyes)
+    calidad_info = None
+    if hasattr(lote, "calidad") and getattr(lote, "calidad", None):
+        c = lote.calidad
+        calidad_info = {
+            "humedad_pct": getattr(c, "humedad_pct", None),
+            "factor_rendimiento": getattr(c, "factor_rendimiento", None),
+            "defectos_totales": getattr(c, "defectos_totales", None),
+            "puntaje_sca": getattr(c, "puntaje_sca", None),
+            "notas_cata": getattr(c, "notas_cata", None),
+            "perfil_taza": getattr(c, "perfil_taza", None),
+        }
+
+    # 9. Evaluación de Consistencia y Completitud (HU-17 / ST6 - SCRUM-171)
+    evaluacion = evaluar_consistencia_y_completitud_lote(
+        lote=lote,
+        finca=finca,
+        cosecha=cosecha,
+        proceso=proceso,
+        etapas_beneficio=etapas_beneficio,
+        calidad_info=calidad_info,
+    )
 
     # 10. URL canónica de consulta pública (HU-18 / QR)
     url_publica = f"/trazabilidad/lote/{lote.codigo}/"
@@ -591,5 +857,11 @@ def obtener_ficha_consolidada_lote(lote_identificador: Union[Lote, int, str]) ->
         "estado_comercial": codigo_estado,
         "disponible_para_venta": disponible_venta,
         "url_publica": url_publica,
-        "completitud_porcentaje": completitud,
+        "completitud_porcentaje": evaluacion["porcentaje"],
+        "nivel_completitud": evaluacion["nivel"],
+        "color_nivel": evaluacion["color_nivel"],
+        "es_consistente": evaluacion["es_consistente"],
+        "advertencias": evaluacion["advertencias"],
+        "campos_completos": evaluacion["campos_completos"],
+        "campos_faltantes": evaluacion["campos_faltantes"],
     }

@@ -15,6 +15,7 @@ Integración de:
 """
 
 import uuid
+from datetime import date
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -42,6 +43,7 @@ from fincas.models import Cosecha, Finca, Lote, Municipio
 from fincas.services import (
     crear_cosecha,
     crear_lote,
+    evaluar_consistencia_y_completitud_lote,
     generar_codigo_lote,
     obtener_ficha_consolidada_lote,
 )
@@ -4388,3 +4390,222 @@ class FichaDigitalWebTests(TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertTemplateUsed(response, "fincas/ficha_digital_error.html")
         self.assertIn("NO-EXISTE-LOTE-404", response.content.decode("utf-8"))
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-171): VALIDACIÓN DE CONSISTENCIA Y COMPLETITUD DE DATOS
+# ==============================================================================
+
+class FichaDigitalConsistenciaCompletitudTests(TestCase):
+    """
+    Pruebas automatizadas para HU17-ST6 (SCRUM-171): Validar la consistencia y
+    completitud de los datos en la Ficha Digital Consolidada.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+
+        self.finca_completa = Finca.objects.create(
+            nombre="Finca Consistencia",
+            municipio=self.municipio,
+            vereda="Siravita",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.865432"),
+            longitud=Decimal("-72.765432"),
+        )
+        self.finca_sin_gps = Finca.objects.create(
+            nombre="Finca Sin Coordenadas",
+            municipio=self.municipio,
+            vereda="Centro",
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+        )
+
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Caturra",
+            defaults={"especie": "Arábica", "descripcion": "Variedad clásica"},
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="HONEY",
+            defaults={"nombre": "Honey Amarillo", "descripcion": "Secado con mucílago"},
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Lote en venta"},
+        )
+
+        self.cosecha_normal = Cosecha.objects.create(
+            finca=self.finca_completa,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("800.00"),
+        )
+        self.lote_normal = Lote.objects.create(
+            codigo="LOTE-CONSIST-01",
+            cosecha=self.cosecha_normal,
+            cantidad=Decimal("200.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_diagnostico_completitud_lote_base_sin_gps_ni_proceso(self):
+        """Un lote con solo datos base y sin georreferenciación debe tener 40% (Básica) y campos faltantes."""
+        cosecha_base = Cosecha.objects.create(
+            finca=self.finca_sin_gps,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 5),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("500.00"),
+        )
+        lote_base = Lote.objects.create(
+            codigo="LOTE-BASE-01",
+            cosecha=cosecha_base,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=None,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote_base)
+
+        self.assertEqual(ficha["completitud_porcentaje"], 40)
+        self.assertEqual(ficha["nivel_completitud"], "Básica")
+        self.assertEqual(ficha["color_nivel"], "secondary")
+        self.assertTrue(ficha["es_consistente"])
+        self.assertIn("Coordenadas GPS (WGS84) del predio", ficha["campos_faltantes"])
+        self.assertIn("Asignación de proceso de beneficio (Lavado, Honey, Natural)", ficha["campos_faltantes"])
+
+    def test_diagnostico_completitud_lote_con_geo_y_proceso(self):
+        """Un lote con GPS y proceso de beneficio alcanza 65% y Nivel Media."""
+        ficha = obtener_ficha_consolidada_lote(self.lote_normal)
+
+        self.assertEqual(ficha["completitud_porcentaje"], 65)
+        self.assertEqual(ficha["nivel_completitud"], "Media")
+        self.assertEqual(ficha["color_nivel"], "warning")
+        self.assertTrue(ficha["es_consistente"])
+        self.assertIn("Georreferenciación WGS84", ficha["campos_completos"])
+        self.assertIn("Proceso de Beneficio (Honey Amarillo)", ficha["campos_completos"])
+        self.assertIn("Registro de etapas operativas de beneficio (fermentación, secado)", ficha["campos_faltantes"])
+        self.assertIn("Análisis físico y sensorial de calidad SCA", ficha["campos_faltantes"])
+
+    def test_evaluacion_completitud_100_por_ciento(self):
+        """Prueba unitaria de evaluar_consistencia_y_completitud_lote con etapas y calidad simuladas."""
+        etapas_simuladas = [
+            {"etapa": "Despulpado", "duracion_horas": 2},
+            {"etapa": "Fermentación Honey", "duracion_horas": 24},
+        ]
+        calidad_simulada = {
+            "humedad_pct": Decimal("11.5"),
+            "puntaje_sca": Decimal("86.5"),
+            "notas_cata": "Panela, jazmín y frutas amarillas",
+        }
+
+        evaluacion = evaluar_consistencia_y_completitud_lote(
+            lote=self.lote_normal,
+            finca=self.finca_completa,
+            cosecha=self.cosecha_normal,
+            proceso=self.proceso,
+            etapas_beneficio=etapas_simuladas,
+            calidad_info=calidad_simulada,
+        )
+
+        self.assertEqual(evaluacion["porcentaje"], 100)
+        self.assertEqual(evaluacion["nivel"], "Completa")
+        self.assertEqual(evaluacion["color_nivel"], "success")
+        self.assertTrue(evaluacion["es_consistente"])
+        self.assertEqual(len(evaluacion["campos_faltantes"]), 0)
+        self.assertEqual(len(evaluacion["advertencias"]), 0)
+
+    def test_deteccion_inconsistencia_volumenes_cosecha(self):
+        """Detecta inconsistencia cuando cantidad_disponible supera la cantidad_total o el lote tiene volumen <= 0."""
+        # 1. Validación de lote con cantidad <= 0
+        lote_cero = Lote(
+            codigo="LOTE-CERO",
+            cosecha=self.cosecha_normal,
+            cantidad=Decimal("0.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+        )
+        evaluacion_cero = evaluar_consistencia_y_completitud_lote(
+            lote=lote_cero,
+            finca=self.finca_completa,
+            cosecha=self.cosecha_normal,
+            proceso=self.proceso,
+        )
+        self.assertFalse(evaluacion_cero["es_consistente"])
+        self.assertTrue(any("debe ser mayor a cero" in adv for adv in evaluacion_cero["advertencias"]))
+
+        # 2. Validación de cosecha con saldo superior al total
+        cosecha_desfasada = Cosecha(
+            finca=self.finca_completa,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("600.00"),
+        )
+        evaluacion_cosecha = evaluar_consistencia_y_completitud_lote(
+            lote=self.lote_normal,
+            finca=self.finca_completa,
+            cosecha=cosecha_desfasada,
+            proceso=self.proceso,
+        )
+        self.assertFalse(evaluacion_cosecha["es_consistente"])
+        self.assertTrue(any("supera la cantidad total" in adv for adv in evaluacion_cosecha["advertencias"]))
+
+    def test_deteccion_inconsistencia_coordenadas_fuera_de_colombia(self):
+        """Detecta inconsistencia cuando las coordenadas decimales están fuera del territorio nacional."""
+        finca_fuera_pais = Finca.objects.create(
+            nombre="Finca Fuera de Rango",
+            municipio=self.municipio,
+            productor_id=self.productor_uuid,
+            latitud=Decimal("45.000000"),   # Latitud europea/norteamericana
+            longitud=Decimal("10.000000"),  # Fuera de Colombia (-79 a -66.5)
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca_fuera_pais,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("500.00"),
+        )
+        lote = Lote.objects.create(
+            codigo="LOTE-INV-GPS",
+            cosecha=cosecha,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote)
+
+        self.assertFalse(ficha["es_consistente"])
+        self.assertTrue(any("fuera del territorio colombiano" in adv for adv in ficha["advertencias"]))
+
+    def test_diagnostico_consistencia_y_completitud_en_api_rest(self):
+        """Verifica que el endpoint REST exponga el diagnóstico de completitud y consistencia."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote_normal.codigo})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertIn("nivel_completitud", data)
+        self.assertEqual(data["nivel_completitud"], "Media")
+        self.assertIn("color_nivel", data)
+        self.assertEqual(data["color_nivel"], "warning")
+        self.assertIn("es_consistente", data)
+        self.assertTrue(data["es_consistente"])
+        self.assertIn("advertencias", data)
+        self.assertIn("campos_faltantes", data)
+        self.assertIn("campos_completos", data)
+

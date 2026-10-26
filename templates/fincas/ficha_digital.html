@@ -156,7 +156,12 @@
                 <div class="bg-black bg-opacity-25 p-3 rounded-4" style="max-width: 500px;">
                     <div class="d-flex justify-content-between align-items-center mb-1">
                         <span class="small fw-semibold text-white">Completitud de Trazabilidad:</span>
-                        <span class="small fw-bold text-warning">{{ ficha.completitud_porcentaje }}%</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <span class="badge bg-{{ ficha.color_nivel|default:'warning' }} text-dark rounded-pill px-2 py-1 small fw-bold">
+                                Nivel {{ ficha.nivel_completitud|default:'En Progreso' }}
+                            </span>
+                            <span class="small fw-bold text-warning">{{ ficha.completitud_porcentaje }}%</span>
+                        </div>
                     </div>
                     <div class="progress bg-white bg-opacity-25" style="height: 8px;">
                         <div class="progress-bar trace-progress-bar" role="progressbar" 
@@ -182,6 +187,43 @@
             </div>
         </div>
     </div>
+
+    <!-- BANNER DE DIAGNÓSTICO: COMPLETITUD Y ADVERTENCIAS DE CONSISTENCIA (HU-17 / ST6 - SCRUM-171) -->
+    {% if ficha.campos_faltantes or ficha.advertencias %}
+    <div class="row g-3 mb-4">
+        {% if ficha.campos_faltantes %}
+        <div class="col-md-{% if ficha.advertencias %}6{% else %}12{% endif %}">
+            <div class="card border-0 shadow-sm rounded-4 h-100 bg-white p-3 border-start border-4 border-info">
+                <div class="d-flex align-items-center gap-2 mb-2">
+                    <i class="bi bi-info-circle-fill text-info fs-5"></i>
+                    <h6 class="fw-bold mb-0 text-dark">Información Pendiente para Trazabilidad Completa (100%)</h6>
+                </div>
+                <ul class="small text-muted mb-0 ps-3">
+                    {% for campo in ficha.campos_faltantes %}
+                        <li>{{ campo }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if ficha.advertencias %}
+        <div class="col-md-{% if ficha.campos_faltantes %}6{% else %}12{% endif %}">
+            <div class="card border-0 shadow-sm rounded-4 h-100 bg-white p-3 border-start border-4 border-warning">
+                <div class="d-flex align-items-center gap-2 mb-2">
+                    <i class="bi bi-exclamation-triangle-fill text-warning fs-5"></i>
+                    <h6 class="fw-bold mb-0 text-dark">Advertencias de Consistencia de Datos</h6>
+                </div>
+                <ul class="small text-muted mb-0 ps-3">
+                    {% for adv in ficha.advertencias %}
+                        <li>{{ adv }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
 
     <!-- GRID DE SECCIONES CONSOLIDADAS -->
     <div class="row g-4">

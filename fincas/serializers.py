@@ -375,3 +375,11 @@ class FichaDigitalSerializer(serializers.Serializer):
     # Metadatos de navegación y trazabilidad
     url_publica = serializers.CharField(required=False)
     completitud_porcentaje = serializers.IntegerField(required=False, default=50)
+
+    # Diagnóstico de consistencia y completitud (HU-17 / ST6 - SCRUM-171)
+    nivel_completitud = serializers.CharField(required=False, default="Media")
+    color_nivel = serializers.CharField(required=False, default="warning")
+    es_consistente = serializers.BooleanField(required=False, default=True)
+    advertencias = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    campos_completos = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    campos_faltantes = serializers.ListField(child=serializers.CharField(), required=False, default=list)
