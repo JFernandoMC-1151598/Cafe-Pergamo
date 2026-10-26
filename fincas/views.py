@@ -16,6 +16,7 @@ Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
 físicas y de calidad del lote.
 Subtarea: SCRUM-148 / HU14-ST1: Diseñar la interfaz para capturar etapas de beneficio.
 Subtarea: SCRUM-149 / HU14-ST2: Mostrar el historial de beneficio del lote.
+Subtarea: SCRUM-150 / HU14-ST4: la vista usa services.registrar_etapa_beneficio.
 Nota: incluye también una vista de registro de cosechas, complemento necesario para
 poder usar el formulario de lotes de principio a fin (ver nota en fincas/forms.py).
 Nota: incluye además una vista de listado "Mis Lotes" con filtro por finca -- pedida
@@ -78,6 +79,7 @@ from .services import (
     normalizar_filtros_catalogo,
     publicar_lote_en_catalogo,
     reactivar_municipio,
+    registrar_etapa_beneficio,
     toggle_estado_municipio,
     validar_lote_para_publicacion,
 )
@@ -1305,7 +1307,7 @@ def detalle_lote_view(request, pk):
     lote = _obtener_lote_del_productor(productor_id, pk)
     # El orden cronológico lo define EtapaBeneficio.Meta.ordering; se
     # repite aquí para que el historial no dependa de un cambio en Meta.
-    etapas = lote.etapas_beneficio.order_by("fecha", "creado_en", "id")
+    etapas = lote.etapas_beneficio.filter(activo=True).order_by("fecha", "creado_en", "id")
 
     return render(
         request,
@@ -1334,19 +1336,38 @@ def registrar_etapa_beneficio_view(request, pk):
     if request.method == "POST":
         form = EtapaBeneficioForm(request.POST)
         if form.is_valid():
-            etapa = form.save(commit=False)
-            etapa.lote = lote
-            etapa.save()
-            messages.success(
+            try:
+                etapa = registrar_etapa_beneficio(
+                    lote_o_id=lote,
+                    etapa=form.cleaned_data["etapa"],
+                    fecha=form.cleaned_data["fecha"],
+                    observaciones=form.cleaned_data.get("observaciones", ""),
+                    productor_id=productor_id,
+                )
+            except ValidationError as exc:
+                # Igual que en registrar_lote_view: los errores de negocio
+                # del servicio se muestran como errores del formulario.
+                errores = exc.message_dict if hasattr(exc, "message_dict") else {"__all__": exc.messages}
+                for campo, lista_errores in errores.items():
+                    destino = campo if campo in form.fields else None
+                    for error in lista_errores:
+                        form.add_error(destino, error)
+                messages.error(
+                    request,
+                    "Por favor revise los errores señalados en el formulario antes de continuar."
+                )
+            else:
+                messages.success(
+                    request,
+                    f"Etapa '{etapa.get_etapa_display()}' registrada exitosamente "
+                    f"para el lote '{lote.codigo}'."
+                )
+                return redirect("lote_detalle", pk=lote.pk)
+        else:
+            messages.error(
                 request,
-                f"Etapa '{etapa.get_etapa_display()}' registrada exitosamente "
-                f"para el lote '{lote.codigo}'."
+                "Por favor revise los errores señalados en el formulario antes de continuar."
             )
-            return redirect("lote_detalle", pk=lote.pk)
-        messages.error(
-            request,
-            "Por favor revise los errores señalados en el formulario antes de continuar."
-        )
     else:
         form = EtapaBeneficioForm()
 
