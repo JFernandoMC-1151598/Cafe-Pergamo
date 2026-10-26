@@ -5134,5 +5134,146 @@ class FichaDigitalConsolidacionDatosTests(TestCase):
             obtener_ficha_consolidada_lote([])
 
 
+# ==============================================================================
+# SUITE HU-17 (SCRUM-166): MECANISMO DE ACTUALIZACIÓN EN TIEMPO REAL (ST1)
+# ==============================================================================
+
+class FichaDigitalActualizacionTiempoRealTests(TestCase):
+    """
+    Pruebas unitarias y de integración para HU17-ST1 (SCRUM-166):
+    Crear mecanismo de actualización automática en tiempo real.
+
+    Criterio de Aceptación HU-17 (SCRUM-21):
+    'La ficha se actualiza automáticamente al registrarse nueva información del lote.'
+
+    Verifica que la consolidación en tiempo de ejecución garantice cero persistencias
+    desfasadas ante mutaciones de volumen, estado comercial, proceso o finca.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca Tiempo Real",
+            municipio=self.municipio,
+            vereda="El Suspiro",
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Borbón Amarillo",
+            defaults={"especie": "Arábica", "descripcion": "Variedad dulce"},
+        )
+        self.proceso_lavado, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={"nombre": "Lavado Tradicional", "descripcion": "Fermentación estándar"},
+        )
+        self.proceso_natural, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="NATURAL",
+            defaults={"nombre": "Natural Clásico", "descripcion": "Secado en cereza"},
+        )
+        self.estado_disponible, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Apto para venta"},
+        )
+        self.estado_vendido, _ = EstadoLote.objects.get_or_create(
+            codigo="VENDIDO",
+            defaults={"nombre": "Vendido", "descripcion": "Lote adjudicado"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 12),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("1000.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTEREALTIME01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("250.00"),
+            proceso_beneficio=self.proceso_lavado,
+            estado_lote=self.estado_disponible,
+            activo=True,
+        )
+
+    def test_actualizacion_tiempo_real_mutacion_volumen_lote(self):
+        """
+        SCRUM-166: Al actualizar el volumen del lote, la siguiente consulta
+        a la ficha digital refleja el nuevo peso inmediatamente sin desfase temporal.
+        """
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_inicial["cantidad_kg"], Decimal("250.00"))
+
+        # Mutación directa de base de datos
+        self.lote.cantidad = Decimal("310.50")
+        self.lote.save(update_fields=["cantidad"])
+
+        # Reflejo inmediato en la siguiente consulta
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_actualizada["cantidad_kg"], Decimal("310.50"))
+
+    def test_actualizacion_tiempo_real_cambio_estado_disponible_a_vendido(self):
+        """
+        SCRUM-166: Al cambiar el estado de DISPONIBLE a VENDIDO, la ficha digital
+        actualiza automáticamente la disponibilidad comercial y la bandera disponible_para_venta.
+        """
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_inicial["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha_inicial["disponible_para_venta"])
+
+        # Transición de estado comercial
+        self.lote.estado_lote = self.estado_vendido
+        self.lote.save(update_fields=["estado_lote"])
+
+        # Reflejo inmediato
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_actualizada["estado_comercial"], "VENDIDO")
+        self.assertFalse(ficha_actualizada["disponible_para_venta"])
+
+    def test_actualizacion_tiempo_real_mutacion_datos_finca(self):
+        """
+        SCRUM-166: Al agregar coordenadas GPS a la finca asociada, la ficha digital
+        refleja al instante la georreferenciación y eleva la completitud.
+        """
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertFalse(ficha_inicial["finca"]["tiene_georreferenciacion"])
+
+        # Mutación en la finca
+        self.finca.latitud = Decimal("7.889900")
+        self.finca.longitud = Decimal("-72.778899")
+        self.finca.save(update_fields=["latitud", "longitud"])
+
+        # Reflejo instantáneo
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertTrue(ficha_actualizada["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(ficha_actualizada["finca"]["latitud"], Decimal("7.889900"))
+        self.assertEqual(ficha_actualizada["finca"]["longitud"], Decimal("-72.778899"))
+
+    def test_actualizacion_tiempo_real_reasignacion_proceso_beneficio(self):
+        """
+        SCRUM-166: Al reasignar el proceso de beneficio (Lavado -> Natural),
+        la ficha digital refleja el nuevo proceso al instante.
+        """
+        ficha_lavado = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_lavado["proceso_beneficio"]["codigo"], "LAVADO")
+
+        # Reasignación de proceso
+        self.lote.proceso_beneficio = self.proceso_natural
+        self.lote.save(update_fields=["proceso_beneficio"])
+
+        ficha_natural = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_natural["proceso_beneficio"]["codigo"], "NATURAL")
+        self.assertEqual(ficha_natural["proceso_beneficio"]["nombre"], "Natural Clásico")
+
+
+
 
 
