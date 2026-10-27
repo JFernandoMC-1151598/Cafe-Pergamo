@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('fincas', '0007_alter_cosecha_options_alter_lote_options'),
+        ('fincas', '0011_etapabeneficio_validaciones_activo'),
     ]
 
     operations = [

@@ -1,0 +1,112 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Lote {{ lote.codigo }} — Café Pérgamo{% endblock %}
+
+{% block messages %}{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-lg-9 col-xl-8">
+            <!-- Breadcrumb de Navegación -->
+            <nav aria-label="breadcrumb" class="mb-4">
+                <ol class="breadcrumb">
+                    <li class="breadcrumb-item"><a href="{% url 'home' %}" class="text-decoration-none">Inicio</a></li>
+                    <li class="breadcrumb-item"><a href="{% url 'mis_lotes' %}" class="text-decoration-none">Mis Lotes</a></li>
+                    <li class="breadcrumb-item active" aria-current="page">Lote {{ lote.codigo }}</li>
+                </ol>
+            </nav>
+
+            {% if messages %}
+                {% for message in messages %}
+                    <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+
+            <!-- Datos del lote -->
+            <div class="card border-0 shadow-sm rounded-4 overflow-hidden mb-4">
+                <div class="card-header bg-white p-4 border-bottom">
+                    <div class="d-flex align-items-center justify-content-between flex-wrap gap-3">
+                        <div class="d-flex align-items-center gap-3">
+                            <div class="bg-success text-white rounded-3 d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+                                <i class="bi bi-box-seam fs-4"></i>
+                            </div>
+                            <div>
+                                <h1 class="h4 mb-0 fw-bold text-dark">Lote {{ lote.codigo }}</h1>
+                                <p class="text-muted small mb-0">Registrado el {{ lote.creado_en|date:"d/m/Y" }}</p>
+                            </div>
+                        </div>
+                        <a href="{% url 'lote_etapa_registro' lote.pk %}" class="btn btn-primary bg-primary px-4 fw-semibold" id="btn-nueva-etapa">
+                            <i class="bi bi-plus-circle me-1"></i> Nueva etapa de beneficio
+                        </a>
+                    </div>
+                </div>
+                <div class="card-body p-4 small">
+                    <div class="row g-2">
+                        <div class="col-sm-6"><strong>Finca:</strong> {{ lote.cosecha.finca.nombre }}</div>
+                        <div class="col-sm-6"><strong>Municipio:</strong> {{ lote.cosecha.finca.municipio.nombre|default:"Sin municipio" }}</div>
+                        <div class="col-sm-6"><strong>Cosecha:</strong> {{ lote.cosecha.fecha_cosecha|date:"d/m/Y" }}</div>
+                        <div class="col-sm-6"><strong>Variedad:</strong> {{ lote.cosecha.variedad.nombre|default:"Sin variedad" }}</div>
+                        <div class="col-sm-6"><strong>Proceso de beneficio:</strong> {{ lote.proceso_beneficio.nombre|default:"Sin proceso" }}</div>
+                        <div class="col-sm-6"><strong>Cantidad:</strong> {{ lote.cantidad }} kg</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Historial de beneficio (HU14-ST2) -->
+            <div class="card border-0 shadow-sm rounded-4 overflow-hidden" id="historial-beneficio">
+                <div class="card-header bg-white p-4 border-bottom">
+                    <h2 class="h5 mb-0 fw-bold text-dark">
+                        <i class="bi bi-clock-history me-1 text-secondary"></i> Historial de beneficio
+                    </h2>
+                    <p class="text-muted small mb-0">Etapas registradas en orden cronológico, de la más antigua a la más reciente.</p>
+                </div>
+                <div class="card-body p-4">
+                    {% if etapas %}
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle border rounded-3 overflow-hidden mb-0">
+                            <thead class="table-light">
+                                <tr class="small text-muted">
+                                    <th style="width: 3rem;">#</th>
+                                    <th>Fecha</th>
+                                    <th>Etapa</th>
+                                    <th>Observaciones</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for etapa in etapas %}
+                                <tr>
+                                    <td class="text-muted small">{{ forloop.counter }}</td>
+                                    <td class="fw-semibold text-dark small text-nowrap">{{ etapa.fecha|date:"d/m/Y" }}</td>
+                                    <td class="small">
+                                        <span class="badge bg-info-subtle text-info border border-info-subtle">{{ etapa.get_etapa_display }}</span>
+                                    </td>
+                                    <td class="small text-secondary">
+                                        {% if etapa.observaciones %}{{ etapa.observaciones|linebreaksbr }}{% else %}<span class="fst-italic text-muted">Sin observaciones</span>{% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <!-- Estado vacío -->
+                    <div class="text-center p-4" id="historial-vacio">
+                        <i class="bi bi-hourglass fs-1 text-muted mb-3 d-block"></i>
+                        <h5 class="fw-bold text-dark">Este lote todavía no tiene etapas de beneficio registradas</h5>
+                        <p class="text-muted mb-4">Registra la primera etapa (despulpado, fermentación, lavado o secado) para empezar su historial.</p>
+                        <a href="{% url 'lote_etapa_registro' lote.pk %}" class="btn btn-primary bg-primary px-4 fw-semibold">
+                            <i class="bi bi-plus-circle me-1"></i> Registrar primera etapa
+                        </a>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

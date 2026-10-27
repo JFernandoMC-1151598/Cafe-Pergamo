@@ -632,15 +632,61 @@ def home_view(request: HttpRequest) -> HttpResponse:
 
 def catalogo_view(request: HttpRequest) -> HttpResponse:
     """
-    Renderiza la vitrina comercial y catálogo público de lotes de café (HU04).
-    Muestra los lotes disponibles o redirige con notificación informativa
-    mientras se despliegan los lotes de la cosecha activa.
+    Renderiza la vitrina comercial y catálogo público de lotes de café
+    con capacidades de búsqueda y filtrado multicriterio (HU04 / HU19 / HU20 / SCRUM-229).
+
+    Criterios de aceptación (HU-20):
+    - SCRUM-246 / HU20-ST1: Barra de filtros interactiva con opciones activas.
+    - SCRUM-247 / HU20-ST2: Desplegable de municipios con lotes disponibles.
+    - SCRUM-248 / HU20-ST4: Reglas y normalización de filtros combinados.
+    - SCRUM-249 / HU20-ST5: Consulta de filtrado AND sobre lotes disponibles.
+    - SCRUM-251 / HU20-ST6: Filtrado por calidad mínima en taza (SCA).
+    - SCRUM-252 / HU20-ST7: Manejo amigable cuando no hay resultados para los filtros.
     """
-    messages.info(
-        request,
-        "El Catálogo Comercial de Lotes de Norte de Santander se encuentra en actualización con los lotes de la cosecha activa."
+    from fincas.services import (
+        filtrar_catalogo_lotes,
+        lotes_disponibles_en_catalogo,
+        normalizar_filtros_catalogo,
+        obtener_opciones_filtro_catalogo,
     )
-    return redirect("/#pilares")
+    from fincas.views import (
+        MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO,
+        MENSAJE_CATALOGO_VACIO,
+    )
+
+    filtros, errores = normalizar_filtros_catalogo(request.GET)
+    if errores:
+        for campo, err in errores.items():
+            messages.warning(request, f"Filtro '{campo}': {err}")
+
+    lotes_filtrados = filtrar_catalogo_lotes(**filtros)
+    total_catalogo = lotes_disponibles_en_catalogo().count()
+    opciones = obtener_opciones_filtro_catalogo()
+
+    filtros_activos = {
+        "municipio": request.GET.get("municipio", "").strip(),
+        "variedad": request.GET.get("variedad", "").strip(),
+        "proceso": request.GET.get("proceso", "").strip(),
+        "puntaje_min": request.GET.get("puntaje_min", "").strip(),
+        "q": request.GET.get("q", "").strip(),
+    }
+    hay_filtros_activos = any(bool(v) for v in filtros_activos.values())
+
+    return render(
+        request,
+        "usuarios/catalogo.html",
+        {
+            "lotes": lotes_filtrados,
+            "total_lotes": lotes_filtrados.count(),
+            "total_catalogo": total_catalogo,
+            "opciones": opciones,
+            "filtros_activos": filtros_activos,
+            "hay_filtros_activos": hay_filtros_activos,
+            "mensaje_sin_resultados": MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO,
+            "mensaje_catalogo_vacio": MENSAJE_CATALOGO_VACIO,
+        },
+    )
+
 
 
 def registro_view(request: HttpRequest) -> HttpResponse:

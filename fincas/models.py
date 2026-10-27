@@ -4,6 +4,12 @@ Subtarea: SCRUM-87 / HU06-ST1: Definir modelo de datos para fincas y relación c
 Subtarea: SCRUM-98 / HU07-ST5: Actualizar el modelo o esquema de datos para georreferenciación.
 Subtarea: SCRUM-97: Validar formato de coordenadas.
 Subtarea: SCRUM-141 / HU13-ST1: Definir modelo de datos y relación Cosecha-Lote.
+Subtarea: SCRUM-157 / HU15-ST5: Diseñar el modelo de datos para características
+físicas y de calidad del lote.
+Subtarea: SCRUM-148 / HU14-ST1 y SCRUM-149 / HU14-ST2: modelo de etapas de
+beneficio del lote (requerido por el formulario de captura y el historial).
+Subtarea: SCRUM-152 / HU14-ST3 y SCRUM-150 / HU14-ST4: validaciones del modelo y
+sin eliminación física de etapas (RNF-14).
 
 Cubre:
 - RF06: registrar fincas asociadas a cada productor (perfil usuarios.Usuario).
@@ -32,7 +38,13 @@ from django.db import models
 
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from usuarios.models import Usuario
-from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
+from .validators import (
+    OBSERVACIONES_ETAPA_MAX,
+    validar_latitud,
+    validar_longitud,
+    validar_observaciones_etapa,
+    validar_par_coordenadas,
+)
 
 
 class Municipio(models.Model):
@@ -388,6 +400,26 @@ class Lote(models.Model):
         help_text="Cantidad asignada a este lote; no puede superar el saldo disponible de la cosecha.",
     )
 
+    publicado_en_catalogo = models.BooleanField(
+        default=False,
+        verbose_name="Publicado en catálogo comercial",
+        help_text="Indica si el lote se encuentra visible y disponible para compradores en el catálogo público (HU-19 / SCRUM-243).",
+    )
+    fecha_publicacion = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Fecha de publicación en catálogo",
+    )
+    precio_referencial = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        verbose_name="Precio referencial por kg (COP)",
+        help_text="Precio orientativo por kilogramo para compradores en el catálogo comercial.",
+    )
+
     activo = models.BooleanField(default=True, verbose_name="Lote activo")
     creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de creación")
 
@@ -399,7 +431,269 @@ class Lote(models.Model):
         ordering = ["-creado_en"]
 
     def __str__(self):
-        return f"Lote {self.codigo} ({self.cantidad} kg) de {self.cosecha}"
+        estado_cat = " [Publicado]" if self.publicado_en_catalogo else ""
+        return f"Lote {self.codigo} ({self.cantidad} kg){estado_cat} de {self.cosecha}"
+
+
+class CaracteristicasCalidad(models.Model):
+    """
+    Características físicas y sensoriales asociadas a un lote (HU15-ST5).
+
+    Un lote puede tener como máximo un registro de calidad. Los campos
+    numéricos son opcionales para permitir que la captura se complete por
+    etapas; sus rangos básicos se aplican desde el modelo.
+    """
+
+    lote = models.OneToOneField(
+        Lote,
+        on_delete=models.CASCADE,
+        related_name="caracteristicas_calidad",
+        verbose_name="Lote",
+        help_text="Lote al que pertenece esta evaluación de calidad.",
+    )
+
+    humedad = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+        verbose_name="Humedad (%)",
+        help_text="Porcentaje de humedad del café.",
+    )
+
+    merma = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+        verbose_name="Merma (%)",
+        help_text="Porcentaje de merma identificado en el lote.",
+    )
+
+    puntaje_taza = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+        verbose_name="Puntaje en taza",
+        help_text="Puntaje sensorial de taza en una escala de 0 a 100.",
+    )
+
+    perfil_sensorial = models.TextField(
+        blank=True,
+        verbose_name="Perfil sensorial",
+        help_text="Descripción de las notas y atributos sensoriales del lote.",
+    )
+
+    observaciones = models.TextField(
+        blank=True,
+        verbose_name="Observaciones",
+        help_text="Observaciones adicionales de la evaluación de calidad.",
+    )
+
+    creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de registro")
+    actualizado_en = models.DateTimeField(auto_now=True, verbose_name="Última actualización")
+
+    class Meta:
+        managed = True
+        db_table = "caracteristicas_calidad"
+        verbose_name = "Característica de calidad"
+        verbose_name_plural = "Características de calidad"
+        ordering = ["-actualizado_en"]
+
+    def __str__(self):
+        return f"Calidad del lote {self.lote.codigo}"
+
+
+class EtapaBeneficioQuerySet(models.QuerySet):
+    """
+    Sin eliminación física (RNF-14): `delete()` solo marca las etapas como
+    inactivas. `hard_delete()` existe únicamente para herramientas de
+    desarrollo (p. ej. el comando de datos de demostración).
+    """
+
+    def delete(self):
+        return self.update(activo=False)
+
+    delete.alters_data = True
+    delete.queryset_only = True
+
+    def hard_delete(self):
+        return super().delete()
+
+    hard_delete.alters_data = True
+
+    def vigentes(self):
+        return self.filter(activo=True)
+
+
+class EtapaBeneficio(models.Model):
+    """
+    Etapa del proceso de beneficio registrada sobre un lote (HU-14 / RF13).
+
+    La etapa se elige de una lista fija (`TipoEtapa`), nunca como texto
+    libre (criterio de aceptación de HU14-ST1). No se confunde con el
+    catálogo `ProcesoBeneficio` del lote, que describe el método general
+    (Lavado, Honey, Natural...): aquí se documenta cada paso concreto
+    que se le hizo al lote, con su fecha y observaciones, para construir
+    el historial cronológico de HU14-ST2.
+
+    Las reglas de HU14-ST3 viven aquí (validadores y `clean`), de modo que
+    se aplican igual desde el formulario web y desde el servicio de
+    registro (`services.registrar_etapa_beneficio`, HU14-ST4, RNF-09).
+    """
+
+    class TipoEtapa(models.TextChoices):
+        DESPULPADO = "DESPULPADO", "Despulpado"
+        FERMENTACION = "FERMENTACION", "Fermentación"
+        LAVADO = "LAVADO", "Lavado"
+        SECADO = "SECADO", "Secado"
+
+    lote = models.ForeignKey(
+        Lote,
+        # PROTECT: un lote con etapas no puede borrarse físicamente y
+        # arrastrar su historial (RNF-14).
+        on_delete=models.PROTECT,
+        related_name="etapas_beneficio",
+        verbose_name="Lote",
+        help_text="Lote al que se le registra la etapa de beneficio.",
+    )
+
+    etapa = models.CharField(
+        max_length=20,
+        choices=TipoEtapa.choices,
+        verbose_name="Etapa de beneficio",
+        help_text="Etapa del proceso de beneficio (lista fija, no texto libre).",
+        error_messages={
+            "blank": "Debe seleccionar la etapa de beneficio.",
+            "null": "Debe seleccionar la etapa de beneficio.",
+            "invalid_choice": "La etapa seleccionada no es una etapa de beneficio válida.",
+        },
+    )
+
+    fecha = models.DateField(
+        verbose_name="Fecha de la etapa",
+        help_text="Fecha en que se realizó la etapa sobre el lote.",
+        error_messages={
+            "blank": "La fecha de la etapa es obligatoria.",
+            "null": "La fecha de la etapa es obligatoria.",
+            "invalid": "Ingrese una fecha válida.",
+        },
+    )
+
+    observaciones = models.TextField(
+        blank=True,
+        default="",
+        validators=[validar_observaciones_etapa],
+        verbose_name="Observaciones",
+        help_text=f"Notas libres sobre la etapa (máximo {OBSERVACIONES_ETAPA_MAX} caracteres).",
+    )
+
+    activo = models.BooleanField(
+        default=True,
+        verbose_name="Etapa vigente",
+        help_text="Inactivación lógica: las etapas nunca se eliminan físicamente (RNF-14).",
+    )
+    creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de registro")
+
+    objects = EtapaBeneficioQuerySet.as_manager()
+
+    class Meta:
+        managed = True
+        db_table = "etapas_beneficio"
+        verbose_name = "Etapa de beneficio"
+        verbose_name_plural = "Etapas de beneficio"
+        # Orden cronológico del historial (HU14-ST2): primero por la fecha
+        # de la etapa y, a igual fecha, por el orden en que se registró.
+        ordering = ["fecha", "creado_en", "id"]
+
+    def __str__(self):
+        return f"{self.get_etapa_display()} - Lote {self.lote.codigo} ({self.fecha})"
+
+    def clean(self):
+        super().clean()
+        if self.observaciones:
+            self.observaciones = self.observaciones.strip()
+
+    def delete(self, using=None, keep_parents=False):
+        """Inactivación lógica en lugar de borrado físico (RNF-14)."""
+        self.activo = False
+        self.save(update_fields=["activo"])
+        return 0, {}
+
+    delete.alters_data = True
+
+
+class BitacoraPublicacionLote(models.Model):
+    """
+    Registro inmutable de trazabilidad para eventos de publicación y
+    despublicación de lotes en el catálogo comercial (HU19-ST6 / SCRUM-244).
+    """
+
+    ACCION_CHOICES = [
+        ("PUBLICAR", "Publicar en catálogo"),
+        ("DESPUBLICAR", "Retirar de catálogo"),
+        ("ACTUALIZAR", "Actualizar publicación"),
+    ]
+
+    lote = models.ForeignKey(
+        Lote,
+        on_delete=models.CASCADE,
+        related_name="historial_publicaciones",
+        verbose_name="Lote",
+    )
+    accion = models.CharField(
+        max_length=20,
+        choices=ACCION_CHOICES,
+        verbose_name="Acción realizada",
+    )
+    realizado_por_id = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        verbose_name="ID de usuario que realizó la acción",
+    )
+    realizado_por_correo = models.EmailField(
+        null=True,
+        blank=True,
+        verbose_name="Correo de usuario que realizó la acción",
+    )
+    detalles_trazabilidad = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="Snapshot de trazabilidad y calidad al momento de publicar",
+    )
+    observaciones = models.TextField(
+        blank=True,
+        default="",
+        verbose_name="Observaciones o motivo",
+    )
+    creado_en = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Fecha de registro",
+    )
+
+    class Meta:
+        managed = True
+        db_table = "fincas_bitacora_publicacion_lote"
+        verbose_name = "Registro de publicación de lote"
+        verbose_name_plural = "Bitácora de publicaciones de lotes"
+        ordering = ["-creado_en", "-id"]
+
+    def __str__(self):
+        return f"{self.accion} - Lote {self.lote.codigo} ({self.creado_en})"
 
 
 class BitacoraFichaDigital(models.Model):
@@ -481,4 +775,5 @@ class BitacoraFichaDigital(models.Model):
 
     def __str__(self):
         return f"{self.tipo_evento} - Lote {self.lote.codigo} ({self.creado_en:%Y-%m-%d %H:%M})"
+
 

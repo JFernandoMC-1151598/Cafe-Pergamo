@@ -6,6 +6,8 @@ Subtarea: SCRUM-97: Validar formato de coordenadas.
 Subtarea: SCRUM-91 / HU06-ST3: Crear formulario de registro de finca(s) en la interfaz.
 Subtarea: SCRUM-89 / HU06-ST4: Validar campos obligatorios y consistencia de datos del registro.
 Subtarea: SCRUM-144 / HU13: Crear formulario o pantalla de registro de lotes.
+Subtarea: SCRUM-148 / HU14-ST1: Diseñar la interfaz para capturar etapas de beneficio.
+Subtarea: SCRUM-152 / HU14-ST3: Validar reglas de registro de etapas.
 Nota: para que ese formulario tenga cosechas entre las cuales elegir, también se agrega
 aquí un formulario de registro de cosechas (complemento necesario: ninguna subtarea de
 Jira lo pedía todavía, pero sin él el formulario de lotes no se puede usar de principio
@@ -16,9 +18,11 @@ from decimal import Decimal
 from django import forms
 from django.db import models
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
-from .models import Cosecha, Finca, Lote, Municipio
+from .models import Cosecha, EtapaBeneficio, Finca, Lote, Municipio
 
 from .validators import (
+    OBSERVACIONES_ETAPA_MAX,
+    validar_observaciones_etapa,
     validar_latitud,
     validar_longitud,
     validar_par_coordenadas,
@@ -603,3 +607,65 @@ class LoteRegistroForm(forms.Form):
         if codigo and not codigo.isalnum():
             raise forms.ValidationError("El código del lote debe ser alfanumérico (sin espacios ni símbolos).")
         return codigo
+
+
+class EtapaBeneficioForm(forms.ModelForm):
+    """
+    Formulario de captura de una etapa de beneficio sobre un lote
+    (HU14-ST1 / SCRUM-148). El lote NO es un campo del formulario: lo fija
+    la URL (`lotes/<pk>/etapas/nueva/`) y la vista lo asigna antes de
+    guardar, así no hay ambigüedad sobre a qué lote se registra la etapa.
+    """
+
+    etapa = forms.ChoiceField(
+        required=True,
+        label="Etapa de beneficio",
+        choices=[("", "Seleccione la etapa de beneficio...")] + list(EtapaBeneficio.TipoEtapa.choices),
+        widget=forms.Select(attrs={"class": "form-select", "id": "id_etapa"}),
+        error_messages={
+            "required": "Debe seleccionar la etapa de beneficio.",
+            "invalid_choice": "La etapa seleccionada no es una etapa de beneficio válida.",
+        },
+    )
+
+    fecha = forms.DateField(
+        required=True,
+        label="Fecha de la etapa",
+        widget=forms.DateInput(
+            format="%Y-%m-%d",
+            attrs={
+                "class": "form-control",
+                "id": "id_fecha",
+                "type": "date",
+                "required": "required",
+            },
+        ),
+        error_messages={
+            "required": "La fecha de la etapa es obligatoria.",
+            "invalid": "Ingrese una fecha válida.",
+        },
+    )
+
+    observaciones = forms.CharField(
+        required=False,
+        label="Observaciones",
+        max_length=OBSERVACIONES_ETAPA_MAX,
+        validators=[validar_observaciones_etapa],
+        error_messages={
+            "max_length": f"Las observaciones no pueden superar {OBSERVACIONES_ETAPA_MAX} caracteres.",
+        },
+        widget=forms.Textarea(attrs={
+            "class": "form-control",
+            "id": "id_observaciones",
+            "maxlength": str(OBSERVACIONES_ETAPA_MAX),
+            "rows": 4,
+            "placeholder": "Ej: Fermentación de 18 horas en tanque, temperatura ambiente 22 °C...",
+        }),
+    )
+
+    class Meta:
+        model = EtapaBeneficio
+        fields = ["etapa", "fecha", "observaciones"]
+
+    def clean_observaciones(self):
+        return (self.cleaned_data.get("observaciones") or "").strip()

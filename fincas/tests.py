@@ -12,6 +12,7 @@ Integración de:
   al crear el lote para mantener su trazabilidad (ST5 / SCRUM-146); formularios web de registro de
   cosechas (complemento) y de lotes (SCRUM-144); y cobertura de pruebas de código único, restricción de
   cantidad y flujo exitoso de registro (ST6 / SCRUM-147).
+- HU-15-ST1 (SCRUM-155): Persistencia API de características físicas y de calidad del lote.
 """
 
 import uuid
@@ -19,6 +20,7 @@ from datetime import date
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+from django import forms as forms_module
 from django.contrib.auth.models import User
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core.exceptions import ValidationError
@@ -33,22 +35,47 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from fincas.forms import (
     CosechaRegistroForm,
+    EtapaBeneficioForm,
     FincaModelForm,
     FincaRegistroForm,
     GeorreferenciacionFormMixin,
     LoteRegistroForm,
     MunicipioForm,
 )
-from fincas.models import BitacoraFichaDigital, Cosecha, Finca, Lote, Municipio
+from fincas.models import (
+    BitacoraFichaDigital,
+    BitacoraPublicacionLote,
+    CaracteristicasCalidad,
+    Cosecha,
+    EtapaBeneficio,
+    Finca,
+    Lote,
+    Municipio,
+)
 from fincas.services import (
+    crear_caracteristicas_calidad,
     crear_cosecha,
     crear_lote,
+    despublicar_lote_de_catalogo,
+    editar_caracteristicas_calidad,
     evaluar_consistencia_y_completitud_lote,
-    generar_codigo_lote,
     obtener_ficha_consolidada_lote,
     registrar_auditoria_ficha_digital,
+    filtrar_catalogo_lotes,
+    generar_codigo_lote,
+    generar_snapshot_trazabilidad,
+    lotes_disponibles_en_catalogo,
+    normalizar_filtros_catalogo,
+    obtener_opciones_filtro_catalogo,
+    publicar_lote_en_catalogo,
+    registrar_etapa_beneficio,
+    validar_lote_para_publicacion,
 )
 from fincas.serializers import FichaDigitalSerializer
+from fincas.views import (
+    MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO,
+    MENSAJE_CATALOGO_VACIO,
+)
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from fincas.validators import (
     validar_latitud,
@@ -3194,6 +3221,132 @@ class ApiCrearLoteViewTests(TestCase):
         self.assertEqual(cosecha.cantidad_disponible, Decimal("180.00"))
 
 
+class CaracteristicasCalidadApiTests(TestCase):
+    """Pruebas CRUD de HU15-ST1 y validaciones de HU15-ST4."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(codigo="TEST_CALIDAD_MUN", nombre="Mutiscua (prueba)")
+        finca = Finca.objects.create(
+            nombre="Finca Calidad",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-05-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="CALIDAD01",
+            cosecha=cosecha,
+            cantidad=Decimal("50.00"),
+        )
+        self.url = reverse("api_lote_calidad", kwargs={"lote_id": self.lote.pk})
+        self.client = Client()
+
+    def test_crea_consulta_y_actualiza_caracteristicas(self):
+        datos = {
+            "humedad": "11.50",
+            "merma": "2.00",
+            "puntaje_taza": "84.50",
+            "perfil_sensorial": "Chocolate y caramelo",
+            "observaciones": "Muestra de laboratorio",
+        }
+        respuesta = self.client.post(
+            self.url,
+            datos,
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(respuesta.status_code, 201, respuesta.content)
+        self.assertIn("lote_id", respuesta.json(), respuesta.content)
+        self.assertEqual(respuesta.json()["lote_id"], self.lote.pk)
+        self.assertEqual(respuesta.json()["puntaje_taza"], "84.50")
+
+        consulta = self.client.get(self.url, **_jwt_bearer_headers())
+        self.assertEqual(consulta.status_code, 200)
+        self.assertEqual(consulta.json()["lote_codigo"], "CALIDAD01")
+
+        actualizacion = self.client.patch(
+            self.url,
+            {"puntaje_taza": "86.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(actualizacion.status_code, 200)
+        self.assertEqual(actualizacion.json()["puntaje_taza"], "86.00")
+        self.assertEqual(CaracteristicasCalidad.objects.get(lote=self.lote).humedad, Decimal("11.50"))
+
+    def test_no_permite_dos_registros_para_el_mismo_lote(self):
+        crear_caracteristicas_calidad(lote_o_id=self.lote, humedad=Decimal("10.00"))
+        respuesta = self.client.post(
+            self.url,
+            {"humedad": "12.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn("lote", respuesta.json())
+
+    def test_rechaza_puntaje_fuera_de_rango(self):
+        respuesta = self.client.post(
+            self.url,
+            {"puntaje_taza": "101.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn("puntaje_taza", respuesta.json())
+
+    def test_rechaza_porcentajes_fisicos_fuera_de_rango(self):
+        for campo, valor in (("humedad", "100.01"), ("merma", "-0.01")):
+            respuesta = self.client.post(
+                self.url,
+                {campo: valor},
+                content_type="application/json",
+                **_jwt_bearer_headers(),
+            )
+            self.assertEqual(respuesta.status_code, 400)
+            self.assertIn(campo, respuesta.json())
+
+    def test_rechaza_formato_decimal_invalido(self):
+        respuesta = self.client.post(
+            self.url,
+            {"humedad": "once coma cinco"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn("humedad", respuesta.json())
+
+    def test_acepta_limites_validos_y_normaliza_textos(self):
+        respuesta = self.client.post(
+            self.url,
+            {
+                "humedad": "0.00",
+                "merma": "100.00",
+                "puntaje_taza": "100.00",
+                "perfil_sensorial": "  Chocolate  ",
+                "observaciones": "  Muestra válida  ",
+            },
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(respuesta.status_code, 201, respuesta.content)
+        self.assertEqual(respuesta.json()["perfil_sensorial"], "Chocolate")
+        self.assertEqual(respuesta.json()["observaciones"], "Muestra válida")
+
+    def test_servicio_actualiza_y_puede_limpiar_un_campo_de_texto(self):
+        registro = crear_caracteristicas_calidad(
+            lote_o_id=self.lote,
+            humedad=Decimal("10.00"),
+            observaciones="Inicial",
+        )
+        editar_caracteristicas_calidad(registro, observaciones="")
+        registro.refresh_from_db()
+        self.assertEqual(registro.observaciones, "")
+
+
 # =============================================================================
 # SUITE HU-13: FORMULARIOS WEB DE REGISTRO DE COSECHAS Y LOTES
 # (SCRUM-144 / "Crear formulario o pantalla de registro de lotes";
@@ -3967,6 +4120,1449 @@ class CosechaWebFormViewTests(TestCase):
         self.assertFalse(form.is_valid())
         self.assertIn("finca", form.errors)
         self.assertIn("variedad", form.errors)
+
+
+# ==============================================================================
+# SUITE HU-19: PUBLICAR LOTE EN EL CATÁLOGO PÚBLICO (SCRUM-228 / HU-19)
+# ==============================================================================
+
+
+class TestScrum241ValidacionInformacionMinimaPublicacion(TestCase):
+    """
+    Subtarea: SCRUM-241 / HU19-ST4: Definir la validación de información mínima
+    para publicar un lote.
+
+    Criterios de Aceptación (DoD):
+    1. Solo se publican lotes con información mínima completa.
+    2. La información mínima requerida incluye trazabilidad y calidad:
+       - Lote activo y con cantidad mayor a 0 kg.
+       - Cosecha asociada activa.
+       - Finca asociada activa con municipio asignado (trazabilidad de origen).
+       - Variedad de café asignada a la cosecha.
+       - Proceso de beneficio asignado al lote (Lavado, Honey, Natural, etc.).
+       - Registro de características de calidad asociado, con al menos puntaje
+         en taza (SCA) o porcentaje de humedad reportado.
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(
+            codigo="MUN-TEST-HU19",
+            nombre="Arboledas (HU19)",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca Trazable",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO_HU19",
+            nombre="Lavado",
+            activo=True,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-07-15",
+            cantidad_total=Decimal("600.00"),
+            cantidad_disponible=Decimal("600.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-HU19-01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("150.00"),
+            proceso_beneficio=self.proceso,
+            activo=True,
+        )
+        self.calidad = CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            puntaje_taza=Decimal("86.50"),
+            humedad=Decimal("11.20"),
+            merma=Decimal("1.50"),
+            perfil_sensorial="Notas a chocolate y frutos rojos",
+        )
+
+    def test_lote_completo_con_trazabilidad_y_calidad_es_valido(self):
+        """Un lote con todos los requisitos de trazabilidad y calidad aprueba la validación (True, [])."""
+        es_valido, errores = validar_lote_para_publicacion(self.lote)
+        self.assertTrue(es_valido)
+        self.assertEqual(errores, [])
+
+    def test_lote_con_calidad_solo_humedad_es_valido(self):
+        """Si solo cuenta con humedad (sin puntaje en taza), es válido para publicación."""
+        self.calidad.puntaje_taza = None
+        self.calidad.save()
+        self.lote.refresh_from_db()
+
+        es_valido, errores = validar_lote_para_publicacion(self.lote)
+        self.assertTrue(es_valido)
+        self.assertEqual(errores, [])
+
+    def test_lote_con_calidad_solo_puntaje_taza_es_valido(self):
+        """Si solo cuenta con puntaje en taza (sin humedad), es válido para publicación."""
+        self.calidad.humedad = None
+        self.calidad.save()
+        self.lote.refresh_from_db()
+
+        es_valido, errores = validar_lote_para_publicacion(self.lote)
+        self.assertTrue(es_valido)
+        self.assertEqual(errores, [])
+
+    def test_lote_sin_registro_de_calidad_es_invalido(self):
+        """Un lote sin evaluación de calidad (HU-15) no puede ser publicado."""
+        self.calidad.delete()
+        # Forzamos refresco de relación OneToOne
+        lote_sin_calidad = Lote.objects.get(pk=self.lote.pk)
+
+        es_valido, errores = validar_lote_para_publicacion(lote_sin_calidad)
+        self.assertFalse(es_valido)
+        self.assertTrue(any("calidad" in e.lower() for e in errores))
+
+    def test_lote_con_calidad_sin_puntaje_ni_humedad_es_invalido(self):
+        """Un registro de calidad vacío (sin puntaje ni humedad) es rechazado."""
+        self.calidad.puntaje_taza = None
+        self.calidad.humedad = None
+        self.calidad.save()
+        self.lote.refresh_from_db()
+
+        es_valido, errores = validar_lote_para_publicacion(self.lote)
+        self.assertFalse(es_valido)
+        self.assertTrue(any("puntaje en taza o el porcentaje de humedad" in e for e in errores))
+
+    def test_lote_sin_proceso_beneficio_es_invalido(self):
+        """Un lote sin proceso de beneficio asignado es rechazado por falta de trazabilidad técnica."""
+        self.lote.proceso_beneficio = None
+        self.lote.save()
+
+        es_valido, errores = validar_lote_para_publicacion(self.lote)
+        self.assertFalse(es_valido)
+        self.assertTrue(any("proceso de beneficio" in e.lower() for e in errores))
+
+    def test_lote_sin_variedad_en_cosecha_es_invalido(self):
+        """Una cosecha sin variedad de café no puede publicar sus lotes."""
+        self.cosecha.variedad = None
+        self.cosecha.save()
+        self.lote.refresh_from_db()
+
+        es_valido, errores = validar_lote_para_publicacion(self.lote)
+        self.assertFalse(es_valido)
+        self.assertTrue(any("variedad" in e.lower() for e in errores))
+
+    def test_lote_sin_municipio_en_finca_es_invalido(self):
+        """Una finca sin municipio no garantiza georreferenciación en el catálogo."""
+        self.lote.cosecha.finca.municipio = None
+
+        es_valido, errores = validar_lote_para_publicacion(self.lote)
+        self.assertFalse(es_valido)
+        self.assertTrue(any("municipio" in e.lower() for e in errores))
+
+    def test_lote_inactivo_es_invalido(self):
+        """Un lote inactivo no puede publicarse."""
+        self.lote.activo = False
+        self.lote.save()
+
+        es_valido, errores = validar_lote_para_publicacion(self.lote)
+        self.assertFalse(es_valido)
+        self.assertTrue(any("inactivo" in e.lower() for e in errores))
+
+    def test_lote_con_cantidad_cero_es_invalido(self):
+        """Un lote con cantidad 0 no puede publicarse en el catálogo."""
+        self.lote.cantidad = Decimal("0.00")
+        self.lote.save()
+
+        es_valido, errores = validar_lote_para_publicacion(self.lote)
+        self.assertFalse(es_valido)
+        self.assertTrue(any("mayor a cero" in e.lower() for e in errores))
+
+    def test_cosecha_inactiva_o_finca_inactiva_es_invalida(self):
+        """Cosecha o finca inactiva invalida la publicación."""
+        self.cosecha.activo = False
+        self.cosecha.save()
+        self.lote.refresh_from_db()
+
+        es_valido, errores = validar_lote_para_publicacion(self.lote)
+        self.assertFalse(es_valido)
+        self.assertTrue(any("cosecha" in e.lower() and "inactiva" in e.lower() for e in errores))
+
+
+class TestScrum240ServiciosPublicacionYBitacora(TestCase):
+    """
+    Subtareas:
+    - SCRUM-240 / HU19-ST2: Implementar la regla de negocio para habilitar la publicación.
+    - SCRUM-243 / HU19-ST3: Actualizar el estado del lote en el catálogo público.
+    - SCRUM-244 / HU19-ST6: Registrar la publicación del lote para trazabilidad.
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(
+            codigo="MUN-SRV-HU19",
+            nombre="Salazar (Servicio)",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca La Esperanza",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            vereda="El Porvenir",
+            latitud=Decimal("7.889100"),
+            longitud=Decimal("-72.507800"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Caturra",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="HONEY_HU19",
+            nombre="Honey",
+            activo=True,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-08-01",
+            cantidad_total=Decimal("800.00"),
+            cantidad_disponible=Decimal("800.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOT-SRV-01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("200.00"),
+            proceso_beneficio=self.proceso,
+            activo=True,
+        )
+        self.calidad = CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            puntaje_taza=Decimal("87.25"),
+            humedad=Decimal("10.80"),
+            merma=Decimal("1.20"),
+            perfil_sensorial="Miel, panela y jazmín",
+        )
+
+    def test_publicar_lote_exitoso_actualiza_estado_y_registra_bitacora(self):
+        """Al publicar exitosamente, se activa la bandera, fecha, precio y se crea el registro inmutable en bitácora."""
+        lote_pub = publicar_lote_en_catalogo(
+            lote_id=self.lote.id,
+            productor_id=self.productor_id,
+            precio_referencial=Decimal("26500.00"),
+            realizado_por_id=str(self.productor_id),
+            realizado_por_correo="productor.finca@cafepergamo.test",
+            observaciones="Lote especial de altura",
+        )
+
+        self.assertTrue(lote_pub.publicado_en_catalogo)
+        self.assertIsNotNone(lote_pub.fecha_publicacion)
+        self.assertEqual(lote_pub.precio_referencial, Decimal("26500.00"))
+
+        # Verificación de bitácora inmutable (SCRUM-244 / HU19-ST6)
+        registros = BitacoraPublicacionLote.objects.filter(lote=self.lote)
+        self.assertEqual(registros.count(), 1)
+        bita = registros.first()
+        self.assertEqual(bita.accion, "PUBLICAR")
+        self.assertEqual(bita.realizado_por_correo, "productor.finca@cafepergamo.test")
+        self.assertEqual(bita.observaciones, "Lote especial de altura")
+
+        # Verificación del snapshot de trazabilidad almacenado
+        snapshot = bita.detalles_trazabilidad
+        self.assertEqual(snapshot["lote"]["codigo"], "LOT-SRV-01")
+        self.assertEqual(snapshot["finca"]["nombre"], "Finca La Esperanza")
+        self.assertEqual(snapshot["finca"]["municipio"], "Salazar (Servicio)")
+        self.assertEqual(snapshot["cosecha"]["variedad"], "Caturra")
+        self.assertEqual(snapshot["proceso_beneficio"], "Honey")
+        self.assertEqual(snapshot["calidad"]["puntaje_taza"], 87.25)
+
+    def test_publicar_lote_sin_precio_mantiene_precio_none(self):
+        """El precio referencial es opcional para el productor."""
+        lote_pub = publicar_lote_en_catalogo(
+            lote_id=self.lote.id,
+            productor_id=self.productor_id,
+            precio_referencial=None,
+        )
+        self.assertTrue(lote_pub.publicado_en_catalogo)
+        self.assertIsNone(lote_pub.precio_referencial)
+
+    def test_publicar_lote_con_precio_invalido_falla(self):
+        """Un precio referencial cero o negativo es rechazado con ValidationError."""
+        with self.assertRaises(ValidationError) as ctx:
+            publicar_lote_en_catalogo(
+                lote_id=self.lote.id,
+                productor_id=self.productor_id,
+                precio_referencial=Decimal("0.00"),
+            )
+        self.assertIn("precio_referencial", ctx.exception.message_dict)
+
+    def test_publicar_lote_ajeno_lanza_error_de_permiso(self):
+        """Aislamiento entre productores: no se puede publicar el lote de otro productor."""
+        otro_productor = uuid.uuid4()
+        with self.assertRaises(ValidationError) as ctx:
+            publicar_lote_en_catalogo(
+                lote_id=self.lote.id,
+                productor_id=otro_productor,
+            )
+        self.assertIn("permiso", ctx.exception.message_dict)
+
+    def test_publicar_lote_incompleto_lanza_validation_error_con_lista(self):
+        """Si falta información mínima, el servicio lanza ValidationError con lista de detalles."""
+        self.calidad.delete()
+        with self.assertRaises(ValidationError) as ctx:
+            publicar_lote_en_catalogo(
+                lote_id=self.lote.id,
+                productor_id=self.productor_id,
+            )
+        self.assertIn("publicacion", ctx.exception.message_dict)
+        self.assertTrue(len(ctx.exception.message_dict["publicacion"]) >= 1)
+
+    def test_despublicar_lote_exitoso_actualiza_estado_y_bitacora(self):
+        """Retirar un lote del catálogo cambia su estado y genera la traza en la bitácora."""
+        # Publicamos primero
+        publicar_lote_en_catalogo(lote_id=self.lote.id, productor_id=self.productor_id)
+
+        # Ahora despublicamos
+        lote_retirado = despublicar_lote_de_catalogo(
+            lote_id=self.lote.id,
+            productor_id=self.productor_id,
+            realizado_por_id=str(self.productor_id),
+            realizado_por_correo="test@cafe.com",
+            motivo="Vendido a comprador local",
+        )
+
+        self.assertFalse(lote_retirado.publicado_en_catalogo)
+
+        # La bitácora debe tener 2 eventos: PUBLICAR y DESPUBLICAR
+        historial = BitacoraPublicacionLote.objects.filter(lote=self.lote).order_by("creado_en")
+        self.assertEqual(historial.count(), 2)
+        ultimo_evento = historial.last()
+        self.assertEqual(ultimo_evento.accion, "DESPUBLICAR")
+        self.assertEqual(ultimo_evento.observaciones, "Vendido a comprador local")
+
+    def test_despublicar_lote_no_publicado_lanza_validation_error(self):
+        """Intentar retirar un lote que no estaba publicado genera un error controlado."""
+        with self.assertRaises(ValidationError) as ctx:
+            despublicar_lote_de_catalogo(
+                lote_id=self.lote.id,
+                productor_id=self.productor_id,
+            )
+        self.assertIn("publicacion", ctx.exception.message_dict)
+
+
+class TestScrum239EndpointsRestPublicacion(TestCase):
+    """
+    Subtarea: SCRUM-239 / HU19-ST1: Crear la acción o endpoint para publicar un lote.
+    Endpoints:
+    - POST /fincas/api/lotes/<pk>/publicar/
+    - POST /fincas/api/lotes/<pk>/despublicar/
+    - GET /fincas/api/lotes/<pk>/validar-publicacion/
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.create(
+            codigo="MUN-API-HU19",
+            nombre="Bochalema (API)",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca API",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Geisha",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="NATURAL_API",
+            nombre="Natural",
+            activo=True,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-07-20",
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("500.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOT-API-01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proceso,
+            activo=True,
+        )
+        self.calidad = CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            puntaje_taza=Decimal("89.00"),
+            humedad=Decimal("10.50"),
+        )
+        self.url_publicar = reverse("api_lote_publicar", kwargs={"pk": self.lote.pk})
+        self.url_despublicar = reverse("api_lote_despublicar", kwargs={"pk": self.lote.pk})
+        self.url_validar = reverse("api_lote_validar_publicacion", kwargs={"pk": self.lote.pk})
+
+    def test_api_publicar_sin_autenticacion_retorna_401(self):
+        """Petición anónima es rechazada con HTTP 401 Unauthorized."""
+        response = self.client.post(self.url_publicar, {}, content_type="application/json")
+        self.assertEqual(response.status_code, 401)
+
+    @patch("fincas.views.Usuario")
+    def test_api_publicar_lote_ajeno_retorna_403(self, mock_usuario_model):
+        """Petición con usuario que no es dueño del lote retorna HTTP 403 Forbidden."""
+        productor_ajeno = uuid.uuid4()
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=productor_ajeno)
+
+        response = self.client.post(
+            self.url_publicar,
+            {"precio_referencial": "28000.00"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("error", response.json())
+
+    @patch("fincas.views.Usuario")
+    def test_api_publicar_lote_incompleto_retorna_400_con_detalles(self, mock_usuario_model):
+        """Petición para lote incompleto retorna HTTP 400 Bad Request con lista de requisitos pendientes."""
+        self.calidad.delete()
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.productor_id)
+
+        response = self.client.post(
+            self.url_publicar,
+            {},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertIn("detalles", data)
+        self.assertTrue(len(data["detalles"]) >= 1)
+
+    @patch("fincas.views.Usuario")
+    def test_api_publicar_lote_exitoso_retorna_200(self, mock_usuario_model):
+        """Petición válida publica el lote y retorna HTTP 200 OK con payload estructurado."""
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.productor_id)
+
+        response = self.client.post(
+            self.url_publicar,
+            {
+                "precio_referencial": "32000.00",
+                "observaciones": "Microlote Geisha Natural",
+            },
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("mensaje", data)
+        self.assertTrue(data["lote"]["publicado_en_catalogo"])
+        self.assertEqual(data["lote"]["precio_referencial"], "32000.00")
+
+        self.lote.refresh_from_db()
+        self.assertTrue(self.lote.publicado_en_catalogo)
+
+    @patch("fincas.views.Usuario")
+    def test_api_despublicar_lote_exitoso_retorna_200(self, mock_usuario_model):
+        """Petición válida despublica el lote y retorna HTTP 200 OK."""
+        publicar_lote_en_catalogo(lote_id=self.lote.id, productor_id=self.productor_id)
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.productor_id)
+
+        response = self.client.post(
+            self.url_despublicar,
+            {"motivo": "Retiro por ajuste de inventario"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("mensaje", data)
+        self.assertFalse(data["lote"]["publicado_en_catalogo"])
+
+        self.lote.refresh_from_db()
+        self.assertFalse(self.lote.publicado_en_catalogo)
+
+    @patch("fincas.views.Usuario")
+    def test_api_validar_publicacion_retorna_200_con_estado(self, mock_usuario_model):
+        """GET /fincas/api/lotes/<pk>/validar-publicacion/ responde 200 OK con checklist."""
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.productor_id)
+
+        response = self.client.get(
+            self.url_validar,
+            **_jwt_bearer_headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["puede_publicar"])
+        self.assertEqual(data["errores"], [])
+        self.assertEqual(data["codigo"], "LOT-API-01")
+
+
+class TestScrum242VistasWebPublicacionYCatalogo(TestCase):
+    """
+    Subtareas:
+    - SCRUM-242 / HU19-ST5: Mostrar mensajes de error cuando el lote no pueda publicarse.
+    - SCRUM-243 / HU19-ST3: Actualizar el estado del lote en el catálogo público.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.create(
+            codigo="MUN-WEB-HU19",
+            nombre="Chinácota (Web)",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca La Cabaña",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Tabi",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO_WEB",
+            nombre="Lavado",
+            activo=True,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-08-10",
+            cantidad_total=Decimal("400.00"),
+            cantidad_disponible=Decimal("400.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOT-WEB-01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("120.00"),
+            proceso_beneficio=self.proceso,
+            activo=True,
+        )
+        self.calidad = CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            puntaje_taza=Decimal("85.50"),
+            humedad=Decimal("11.00"),
+        )
+        self.url_publicar_web = reverse("lote_publicar", kwargs={"pk": self.lote.pk})
+        self.url_despublicar_web = reverse("lote_despublicar", kwargs={"pk": self.lote.pk})
+        self.url_mis_lotes = reverse("mis_lotes")
+        self.url_catalogo = reverse("catalogo")
+
+    def test_web_publicar_lote_sin_sesion_redirige_a_login(self):
+        """Petición web sin sesión iniciada redirige al login."""
+        response = self.client.post(self.url_publicar_web, {})
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+
+    def test_web_publicar_lote_exitoso_redirige_a_mis_lotes_con_mensaje_exito(self):
+        """Publicación web válida actualiza el lote y redirige a 'mis_lotes' con mensaje de éxito."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+
+        response = self.client.post(
+            self.url_publicar_web,
+            {
+                "precio_referencial": "24000.00",
+                "observaciones": "Lote seleccionado de alta cordillera",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self.url_mis_lotes)
+
+        self.lote.refresh_from_db()
+        self.assertTrue(self.lote.publicado_en_catalogo)
+        self.assertEqual(self.lote.precio_referencial, Decimal("24000.00"))
+
+    def test_web_publicar_lote_incompleto_muestra_mensaje_error(self):
+        """Publicar un lote incompleto desde la interfaz genera un mensaje flash de error detallado."""
+        self.calidad.delete()
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+
+        response = self.client.post(self.url_publicar_web, {})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self.url_mis_lotes)
+
+        self.lote.refresh_from_db()
+        self.assertFalse(self.lote.publicado_en_catalogo)
+
+    def test_web_despublicar_lote_exitoso_redirige_a_mis_lotes(self):
+        """Retirar lote desde la interfaz cambia su estado y redirige."""
+        publicar_lote_en_catalogo(lote_id=self.lote.id, productor_id=self.productor_id)
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+
+        response = self.client.post(
+            self.url_despublicar_web,
+            {"motivo": "Fin de inventario"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self.url_mis_lotes)
+
+        self.lote.refresh_from_db()
+        self.assertFalse(self.lote.publicado_en_catalogo)
+
+    def test_web_mis_lotes_renderiza_estado_y_botones_de_catalogo(self):
+        """La vista 'Mis Lotes' muestra las columnas de catálogo público y los botones de acción."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_mis_lotes)
+
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode("utf-8")
+        self.assertIn("Catálogo Público", content)
+        self.assertIn("LOT-WEB-01", content)
+        self.assertIn("Publicar", content)
+
+    def test_web_catalogo_muestra_lotes_publicados_y_excluye_no_publicados(self):
+        """El catálogo comercial solo renderiza lotes con publicado_en_catalogo=True."""
+        # Lote 1: publicado
+        publicar_lote_en_catalogo(
+            lote_id=self.lote.id,
+            productor_id=self.productor_id,
+            precio_referencial=Decimal("29000.00"),
+        )
+
+        # Lote 2: NO publicado
+        lote_no_pub = Lote.objects.create(
+            codigo="LOT-OCULTO-02",
+            cosecha=self.cosecha,
+            cantidad=Decimal("50.00"),
+            proceso_beneficio=self.proceso,
+            publicado_en_catalogo=False,
+            activo=True,
+        )
+
+        response = self.client.get(self.url_catalogo)
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode("utf-8")
+
+        self.assertIn("LOT-WEB-01", content)
+        self.assertIn("Finca La Cabaña", content)
+        self.assertIn("Chinácota (Web)", content)
+        self.assertIn("Tabi", content)
+        self.assertIn("85.5", content)
+        self.assertIn("29000.00", content)
+
+        # El lote no publicado NO debe aparecer en el catálogo público
+        self.assertNotIn("LOT-OCULTO-02", content)
+
+
+# ==============================================================================
+# PRUEBAS HU-20 / SCRUM-229: FILTRADO DEL CATÁLOGO COMERCIAL
+# Subtareas: SCRUM-246 a SCRUM-253
+# ==============================================================================
+
+class FiltradoCatalogoComercialHU20Tests(TestCase):
+    """
+    Suite integral de pruebas para el filtrado del catálogo comercial (HU-20).
+    Cubre:
+    - SCRUM-246 / HU20-ST1: Interfaz y controles de la barra de filtros.
+    - SCRUM-247 / HU20-ST2: Desplegable de municipios con lotes disponibles.
+    - SCRUM-248 / HU20-ST4: Reglas, normalización y validación de filtros.
+    - SCRUM-249 / HU20-ST5: Consultas de filtrado individual y combinadas con AND.
+    - SCRUM-250 / HU20-ST3: Endpoint REST /fincas/api/catalogo/ y respuestas 200/400.
+    - SCRUM-251 / HU20-ST6: Filtrado por calidad mínima en taza (SCA).
+    - SCRUM-252 / HU20-ST7: Manejo de estado sin resultados con mensajes y botón limpiar.
+    - SCRUM-253 / HU20-ST8: Cobertura integral de pruebas unitarias y de integración.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_catalogo_web = reverse("catalogo")
+        self.url_catalogo_api = reverse("api_catalogo")
+
+        self.productor_id = uuid.uuid4()
+
+        # Municipios (utilizar existentes de la fixture o crear si no existen)
+        self.mun_toledo = Municipio.objects.filter(nombre="Toledo", departamento="Norte de Santander").first()
+        if not self.mun_toledo:
+            self.mun_toledo = Municipio.objects.create(codigo="MUN_TOL_20", nombre="Toledo", departamento="Norte de Santander", activo=True)
+
+        self.mun_chinacota = Municipio.objects.filter(nombre="Chinácota", departamento="Norte de Santander").first()
+        if not self.mun_chinacota:
+            self.mun_chinacota = Municipio.objects.create(codigo="MUN_CHI_20", nombre="Chinácota", departamento="Norte de Santander", activo=True)
+
+        self.mun_salazar = Municipio.objects.filter(nombre="Salazar", departamento="Norte de Santander").first()
+        if not self.mun_salazar:
+            self.mun_salazar = Municipio.objects.create(codigo="MUN_SAL_20", nombre="Salazar", departamento="Norte de Santander", activo=True)
+
+        # Fincas
+        self.finca_toledo = Finca.objects.create(
+            nombre="Finca El Roble",
+            productor_id=self.productor_id,
+            municipio=self.mun_toledo,
+            vereda="El Hato",
+            activo=True,
+        )
+        self.finca_chinacota = Finca.objects.create(
+            nombre="Finca Bella Vista",
+            productor_id=self.productor_id,
+            municipio=self.mun_chinacota,
+            vereda="Iscalá",
+            activo=True,
+        )
+        self.finca_inactiva = Finca.objects.create(
+            nombre="Finca Inactiva",
+            productor_id=self.productor_id,
+            municipio=self.mun_toledo,
+            activo=False,
+        )
+
+        # Variedades
+        self.var_castillo = VariedadCafe.objects.create(nombre="Castillo HU20", especie=VariedadCafe.Especie.ARABICA, activo=True)
+        self.var_geisha = VariedadCafe.objects.create(nombre="Geisha HU20", especie=VariedadCafe.Especie.ARABICA, activo=True)
+        self.var_bourbon = VariedadCafe.objects.create(nombre="Bourbon HU20", especie=VariedadCafe.Especie.ARABICA, activo=True)
+
+        # Procesos
+        self.proc_lavado = ProcesoBeneficio.objects.create(codigo="PROC_LAV_20", nombre="Lavado HU20", orden=1, activo=True)
+        self.proc_natural = ProcesoBeneficio.objects.create(codigo="PROC_NAT_20", nombre="Natural HU20", orden=2, activo=True)
+        self.proc_honey = ProcesoBeneficio.objects.create(codigo="PROC_HON_20", nombre="Honey HU20", orden=3, activo=True)
+
+        # Cosechas
+        self.cosecha_toledo = Cosecha.objects.create(
+            finca=self.finca_toledo,
+            variedad=self.var_castillo,
+            fecha_cosecha="2026-09-01",
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("300.00"),
+            activo=True,
+        )
+        self.cosecha_chinacota = Cosecha.objects.create(
+            finca=self.finca_chinacota,
+            variedad=self.var_geisha,
+            fecha_cosecha="2026-09-15",
+            cantidad_total=Decimal("200.00"),
+            cantidad_disponible=Decimal("120.00"),
+            activo=True,
+        )
+        self.cosecha_inactiva = Cosecha.objects.create(
+            finca=self.finca_toledo,
+            variedad=self.var_castillo,
+            fecha_cosecha="2026-08-01",
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+            activo=False,
+        )
+
+        # Lotes publicados disponibles
+        # Lote A: Toledo, Castillo, Lavado, 86.5 SCA
+        self.lote_a = Lote.objects.create(
+            codigo="LOT-TOL-01",
+            cosecha=self.cosecha_toledo,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proc_lavado,
+            publicado_en_catalogo=True,
+            precio_referencial=Decimal("26000.00"),
+            activo=True,
+        )
+        self.calidad_a = CaracteristicasCalidad.objects.create(
+            lote=self.lote_a,
+            puntaje_taza=Decimal("86.50"),
+            humedad=Decimal("11.20"),
+            perfil_sensorial="Notas a chocolate y jazmín",
+        )
+
+        # Lote B: Chinácota, Geisha, Natural, 89.0 SCA
+        self.lote_b = Lote.objects.create(
+            codigo="LOT-CHI-02",
+            cosecha=self.cosecha_chinacota,
+            cantidad=Decimal("80.00"),
+            proceso_beneficio=self.proc_natural,
+            publicado_en_catalogo=True,
+            precio_referencial=Decimal("45000.00"),
+            activo=True,
+        )
+        self.calidad_b = CaracteristicasCalidad.objects.create(
+            lote=self.lote_b,
+            puntaje_taza=Decimal("89.00"),
+            humedad=Decimal("10.50"),
+            perfil_sensorial="Notas a mandarina y bergamota",
+        )
+
+        # Lote C: Toledo, Castillo, Natural, solo humedad (sin puntaje en taza)
+        self.lote_c = Lote.objects.create(
+            codigo="LOT-TOL-03",
+            cosecha=self.cosecha_toledo,
+            cantidad=Decimal("50.00"),
+            proceso_beneficio=self.proc_natural,
+            publicado_en_catalogo=True,
+            precio_referencial=Decimal("22000.00"),
+            activo=True,
+        )
+        self.calidad_c = CaracteristicasCalidad.objects.create(
+            lote=self.lote_c,
+            humedad=Decimal("11.80"),
+            perfil_sensorial="Frutos secos y panela",
+        )
+
+        # Lotes NO disponibles que deben ser SIEMPRE excluidos
+        # Lote agotado (cantidad = 0)
+        self.lote_agotado = Lote.objects.create(
+            codigo="LOT-AGOTADO",
+            cosecha=self.cosecha_toledo,
+            cantidad=Decimal("0.00"),
+            proceso_beneficio=self.proc_lavado,
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+        # Lote no publicado
+        self.lote_no_publicado = Lote.objects.create(
+            codigo="LOT-NO-PUB",
+            cosecha=self.cosecha_toledo,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proc_lavado,
+            publicado_en_catalogo=False,
+            activo=True,
+        )
+        # Lote inactivo
+        self.lote_inactivo = Lote.objects.create(
+            codigo="LOT-INACTIVO",
+            cosecha=self.cosecha_toledo,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proc_lavado,
+            publicado_en_catalogo=True,
+            activo=False,
+        )
+        # Lote con cosecha inactiva
+        self.lote_cosecha_inactiva = Lote.objects.create(
+            codigo="LOT-COS-INACT",
+            cosecha=self.cosecha_inactiva,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proc_lavado,
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-248 / HU20-ST4 (Criterios y reglas de filtrado)
+    # --------------------------------------------------------------------------
+    def test_lotes_disponibles_filtra_solo_lotes_validos(self):
+        """El queryset base solo contiene lotes publicados, activos, con stock y cosecha/finca activa."""
+        disponibles = list(lotes_disponibles_en_catalogo())
+        self.assertIn(self.lote_a, disponibles)
+        self.assertIn(self.lote_b, disponibles)
+        self.assertIn(self.lote_c, disponibles)
+
+        self.assertNotIn(self.lote_agotado, disponibles)
+        self.assertNotIn(self.lote_no_publicado, disponibles)
+        self.assertNotIn(self.lote_inactivo, disponibles)
+        self.assertNotIn(self.lote_cosecha_inactiva, disponibles)
+        self.assertEqual(len(disponibles), 3)
+
+    def test_normalizar_filtros_catalogo_valida_correctamente(self):
+        """La función normaliza parámetros válidos y captura errores con mensajes descriptivos."""
+        # Caso válido
+        params_validos = {
+            "municipio": str(self.mun_toledo.id),
+            "variedad": str(self.var_castillo.id),
+            "proceso": str(self.proc_lavado.id),
+            "puntaje_min": "85.5",
+            "q": "   café de altura   ",
+        }
+        filtros, errores = normalizar_filtros_catalogo(params_validos)
+        self.assertEqual(errores, {})
+        self.assertEqual(filtros["municipio"], self.mun_toledo.id)
+        self.assertEqual(filtros["variedad"], self.var_castillo.id)
+        self.assertEqual(filtros["proceso"], self.proc_lavado.id)
+        self.assertEqual(filtros["puntaje_min"], Decimal("85.5"))
+        self.assertEqual(filtros["q"], "café de altura")
+
+        # Caso con errores
+        params_invalidos = {
+            "municipio": "letras_en_vez_de_id",
+            "variedad": "-5",
+            "puntaje_min": "105.0",
+        }
+        filtros_inv, errores_inv = normalizar_filtros_catalogo(params_invalidos)
+        self.assertIn("municipio", errores_inv)
+        self.assertIn("variedad", errores_inv)
+        self.assertIn("puntaje_min", errores_inv)
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-247 / HU20-ST2 (Filtro por municipio)
+    # --------------------------------------------------------------------------
+    def test_filtrar_por_municipio(self):
+        """Filtrar por municipio retorna solo lotes cuya finca pertenezca a dicho municipio."""
+        lotes_toledo = list(filtrar_catalogo_lotes(municipio=self.mun_toledo.id))
+        self.assertIn(self.lote_a, lotes_toledo)
+        self.assertIn(self.lote_c, lotes_toledo)
+        self.assertNotIn(self.lote_b, lotes_toledo)
+
+        lotes_chinacota = list(filtrar_catalogo_lotes(municipio=self.mun_chinacota.id))
+        self.assertEqual(lotes_chinacota, [self.lote_b])
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-249 / HU20-ST5 (Filtro por variedad y proceso)
+    # --------------------------------------------------------------------------
+    def test_filtrar_por_variedad(self):
+        """Filtrar por variedad retorna lotes de la variedad especificada."""
+        lotes_castillo = list(filtrar_catalogo_lotes(variedad=self.var_castillo.id))
+        self.assertIn(self.lote_a, lotes_castillo)
+        self.assertIn(self.lote_c, lotes_castillo)
+        self.assertNotIn(self.lote_b, lotes_castillo)
+
+        lotes_geisha = list(filtrar_catalogo_lotes(variedad=self.var_geisha.id))
+        self.assertEqual(lotes_geisha, [self.lote_b])
+
+    def test_filtrar_por_proceso(self):
+        """Filtrar por proceso retorna lotes procesados con ese método de beneficio."""
+        lotes_lavado = list(filtrar_catalogo_lotes(proceso=self.proc_lavado.id))
+        self.assertEqual(lotes_lavado, [self.lote_a])
+
+        lotes_natural = list(filtrar_catalogo_lotes(proceso=self.proc_natural.id))
+        self.assertIn(self.lote_b, lotes_natural)
+        self.assertIn(self.lote_c, lotes_natural)
+        self.assertNotIn(self.lote_a, lotes_natural)
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-251 / HU20-ST6 (Filtro por calidad mínima SCA)
+    # --------------------------------------------------------------------------
+    def test_filtrar_por_calidad_minima_puntaje_taza(self):
+        """Filtrar por puntaje mínimo en taza excluye lotes con puntaje menor o sin evaluación."""
+        # >= 86.0 incluye Lote A (86.5) y Lote B (89.0), excluye Lote C (sin puntaje)
+        lotes_86 = list(filtrar_catalogo_lotes(puntaje_min=Decimal("86.00")))
+        self.assertIn(self.lote_a, lotes_86)
+        self.assertIn(self.lote_b, lotes_86)
+        self.assertNotIn(self.lote_c, lotes_86)
+
+        # >= 88.0 incluye solo Lote B (89.0)
+        lotes_88 = list(filtrar_catalogo_lotes(puntaje_min=Decimal("88.00")))
+        self.assertEqual(lotes_88, [self.lote_b])
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-249 / HU20-ST5 (Búsqueda por texto y filtros combinados AND)
+    # --------------------------------------------------------------------------
+    def test_filtrar_por_busqueda_libre_q(self):
+        """La búsqueda de texto coincide por código, finca, vereda, municipio y perfil sensorial."""
+        # Por código
+        self.assertEqual(list(filtrar_catalogo_lotes(q="LOT-CHI")), [self.lote_b])
+        # Por nombre de finca
+        self.assertEqual(list(filtrar_catalogo_lotes(q="Bella Vista")), [self.lote_b])
+        # Por vereda
+        self.assertEqual(list(filtrar_catalogo_lotes(q="Iscalá")), [self.lote_b])
+        # Por perfil sensorial
+        self.assertEqual(list(filtrar_catalogo_lotes(q="bergamota")), [self.lote_b])
+        self.assertEqual(list(filtrar_catalogo_lotes(q="chocolate")), [self.lote_a])
+
+    def test_filtros_combinados_con_logica_and(self):
+        """Varios filtros aplicados a la vez se combinan con AND estricto."""
+        # Toledo + Proceso Natural -> Lote C
+        res = list(filtrar_catalogo_lotes(municipio=self.mun_toledo.id, proceso=self.proc_natural.id))
+        self.assertEqual(res, [self.lote_c])
+
+        # Toledo + Proceso Natural + puntaje_min 85 -> Vacío (Lote C no tiene puntaje >= 85)
+        res_vacio = list(
+            filtrar_catalogo_lotes(
+                municipio=self.mun_toledo.id,
+                proceso=self.proc_natural.id,
+                puntaje_min=Decimal("85.00"),
+            )
+        )
+        self.assertEqual(res_vacio, [])
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-247 / HU20-ST2 (Opciones disponibles para desplegables)
+    # --------------------------------------------------------------------------
+    def test_obtener_opciones_filtro_catalogo_solo_incluye_existentes(self):
+        """Los desplegables solo ofrecen opciones que tengan al menos un lote disponible."""
+        opciones = obtener_opciones_filtro_catalogo()
+
+        # Toledo y Chinácota tienen lotes; Salazar NO tiene
+        muns = list(opciones["municipios"])
+        self.assertIn(self.mun_toledo, muns)
+        self.assertIn(self.mun_chinacota, muns)
+        self.assertNotIn(self.mun_salazar, muns)
+
+        # Castillo y Geisha tienen lotes; Bourbon NO tiene
+        vars_list = list(opciones["variedades"])
+        self.assertIn(self.var_castillo, vars_list)
+        self.assertIn(self.var_geisha, vars_list)
+        self.assertNotIn(self.var_bourbon, vars_list)
+
+        # Lavado y Natural tienen lotes; Honey NO tiene
+        procs = list(opciones["procesos"])
+        self.assertIn(self.proc_lavado, procs)
+        self.assertIn(self.proc_natural, procs)
+        self.assertNotIn(self.proc_honey, procs)
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-250 / HU20-ST3 (API REST del catálogo)
+    # --------------------------------------------------------------------------
+    def test_api_catalogo_endpoint_publico_200(self):
+        """GET /fincas/api/catalogo/ responde 200 sin autenticación con el catálogo completo."""
+        response = self.client.get(self.url_catalogo_api)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertEqual(data["total"], 3)
+        self.assertEqual(len(data["resultados"]), 3)
+        codigos = [item["codigo"] for item in data["resultados"]]
+        self.assertIn("LOT-TOL-01", codigos)
+        self.assertIn("LOT-CHI-02", codigos)
+        self.assertIn("LOT-TOL-03", codigos)
+
+    def test_api_catalogo_con_filtros_combinados(self):
+        """GET /fincas/api/catalogo/?municipio=...&puntaje_min=88 filtra y responde solo lotes coincidentes."""
+        url = f"{self.url_catalogo_api}?municipio={self.mun_chinacota.id}&puntaje_min=88.0"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["resultados"][0]["codigo"], "LOT-CHI-02")
+        self.assertEqual(data["resultados"][0]["finca"], "Finca Bella Vista")
+        self.assertEqual(data["resultados"][0]["puntaje_taza"], "89.00")
+
+    def test_api_catalogo_sin_resultados_devuelve_mensaje_amigable(self):
+        """Cuando los filtros no arrojan resultados, la API devuelve total 0 y mensaje descriptivo."""
+        url = f"{self.url_catalogo_api}?q=palabra_que_no_existe_en_ningun_lote"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertEqual(data["total"], 0)
+        self.assertEqual(data["resultados"], [])
+        self.assertEqual(data["mensaje"], MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO)
+
+    def test_api_catalogo_parametros_invalidos_responde_400(self):
+        """Parámetros no numéricos o fuera de rango en la API responden 400 Bad Request."""
+        url = f"{self.url_catalogo_api}?municipio=abc&puntaje_min=150"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("error", data)
+        self.assertIn("municipio", data["detalles"])
+        self.assertIn("puntaje_min", data["detalles"])
+
+    # --------------------------------------------------------------------------
+    # Subtarea: SCRUM-246, SCRUM-252 (Vista Web del Catálogo y Estados Vacíos)
+    # --------------------------------------------------------------------------
+    def test_web_catalogo_renderiza_barra_de_filtros_y_opciones(self):
+        """La vista web del catálogo renderiza la barra de filtros con los desplegables poblados."""
+        response = self.client.get(self.url_catalogo_web)
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode("utf-8")
+
+        self.assertIn("Filtrar Lotes Disponibles", content)
+        self.assertIn("id_filtro_municipio", content)
+        self.assertIn("id_filtro_variedad", content)
+        self.assertIn("id_filtro_proceso", content)
+        self.assertIn("id_filtro_puntaje_min", content)
+        self.assertIn("id_filtro_q", content)
+
+        # Municipios con lotes deben aparecer en el HTML
+        self.assertIn("Toledo", content)
+        self.assertIn("Chinácota", content)
+        # Salazar NO debe aparecer en el select
+        self.assertNotIn("<option value=\"\" >Salazar", content)
+
+    def test_web_catalogo_filtrado_exitoso_muestra_chips_activos(self):
+        """Al filtrar por GET, la vista web muestra los lotes filtrados y los badges de filtros activos."""
+        url = f"{self.url_catalogo_web}?municipio={self.mun_chinacota.id}&puntaje_min=88"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode("utf-8")
+
+        self.assertIn("LOT-CHI-02", content)
+        self.assertNotIn("LOT-TOL-01", content)
+        self.assertIn("Filtros activos:", content)
+        self.assertIn("≥ 88 pts SCA", content)
+
+    def test_web_catalogo_sin_resultados_muestra_mensaje_y_boton_limpiar(self):
+        """Si un filtro no arroja resultados, muestra el mensaje amigable y el botón para limpiar filtros."""
+        url = f"{self.url_catalogo_web}?q=inexistente9999"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode("utf-8")
+
+        self.assertIn("No hay lotes que coincidan con los filtros", content)
+        self.assertIn(MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO, content)
+        self.assertIn("Ver todos los lotes disponibles", content)
+
+    def test_web_catalogo_completamente_vacio_muestra_mensaje_general(self):
+        """Si no hay ningún lote publicado en el catálogo, muestra el estado general vacío."""
+        Lote.objects.all().delete()
+        response = self.client.get(self.url_catalogo_web)
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode("utf-8")
+
+        self.assertIn("No hay lotes publicados en este momento", content)
+        self.assertIn(MENSAJE_CATALOGO_VACIO, content)
+
+
+# =============================================================================
+# HU-14 / SCRUM-18: Registrar etapas de beneficio de un lote
+# =============================================================================
+class EtapasBeneficioHU14Tests(TestCase):
+    """
+    Subtareas:
+    - SCRUM-148 / HU14-ST1: Diseñar la interfaz para capturar etapas de beneficio.
+    - SCRUM-149 / HU14-ST2: Mostrar el historial de beneficio del lote.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca El Mirador",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-09-01",
+            cantidad_total=Decimal("300.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTEHU14",
+            cosecha=self.cosecha,
+            cantidad=Decimal("100.00"),
+        )
+        self.url_detalle = reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        self.url_registro = reverse("lote_etapa_registro", kwargs={"pk": self.lote.pk})
+
+    # ---------------------------- HU14-ST1 ----------------------------
+    def test_formulario_ofrece_solo_etapas_validas_de_la_lista(self):
+        form = EtapaBeneficioForm()
+        valores = [valor for valor, _ in form.fields["etapa"].choices if valor]
+        self.assertEqual(
+            valores, ["DESPULPADO", "FERMENTACION", "LAVADO", "SECADO"]
+        )
+        self.assertIsInstance(form.fields["etapa"].widget, forms_module.Select)
+
+    def test_formulario_rechaza_etapa_en_texto_libre(self):
+        form = EtapaBeneficioForm(data={"etapa": "Tostado", "fecha": "2026-09-05"})
+        self.assertFalse(form.is_valid())
+        self.assertIn("etapa", form.errors)
+
+    def test_formulario_exige_fecha(self):
+        form = EtapaBeneficioForm(data={"etapa": "LAVADO", "fecha": ""})
+        self.assertFalse(form.is_valid())
+        self.assertIn("La fecha de la etapa es obligatoria.", form.errors["fecha"])
+
+    def test_formulario_observaciones_son_opcionales(self):
+        form = EtapaBeneficioForm(data={"etapa": "SECADO", "fecha": "2026-09-05"})
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_registro_sin_sesion_redirige_a_login(self):
+        response = self.client.get(self.url_registro)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+
+    def test_pantalla_registro_muestra_contexto_del_lote_y_campos(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_registro)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "LOTEHU14")
+        self.assertContains(response, "Finca El Mirador")
+        self.assertContains(response, 'id="id_etapa"')
+        self.assertContains(response, 'type="date"')
+        self.assertContains(response, 'id="id_observaciones"')
+        # Fecha marcada visualmente como obligatoria
+        self.assertContains(response, 'Fecha de la etapa <span class="text-danger">*</span>', html=False)
+
+    def test_registro_valido_guarda_etapa_y_redirige_al_historial(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.post(
+            self.url_registro,
+            {"etapa": "DESPULPADO", "fecha": "2026-09-02", "observaciones": "  Despulpado el mismo día  "},
+        )
+        self.assertRedirects(response, self.url_detalle)
+        etapa = EtapaBeneficio.objects.get(lote=self.lote)
+        self.assertEqual(etapa.etapa, EtapaBeneficio.TipoEtapa.DESPULPADO)
+        self.assertEqual(str(etapa.fecha), "2026-09-02")
+        self.assertEqual(etapa.observaciones, "Despulpado el mismo día")
+
+    def test_registro_invalido_no_guarda_y_muestra_errores(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.post(self.url_registro, {"etapa": "", "fecha": ""})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+        self.assertContains(response, "Debe seleccionar la etapa de beneficio.")
+        self.assertContains(response, "La fecha de la etapa es obligatoria.")
+
+    def test_no_permite_registrar_etapa_en_lote_de_otro_productor(self):
+        _iniciar_sesion_productor(self.client)
+        response = self.client.post(
+            self.url_registro, {"etapa": "LAVADO", "fecha": "2026-09-03"}
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_mis_lotes_enlaza_historial_y_nueva_etapa(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(reverse("mis_lotes"))
+        self.assertContains(response, self.url_detalle)
+        self.assertContains(response, self.url_registro)
+
+    # ---------------------------- HU14-ST2 ----------------------------
+    def test_historial_vacio_muestra_estado_claro(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_detalle)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "todavía no tiene etapas de beneficio registradas")
+
+    def test_historial_muestra_etapas_en_orden_cronologico(self):
+        # Se registran desordenadas a propósito
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="SECADO", fecha="2026-09-10", observaciones="Secado en marquesina")
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="DESPULPADO", fecha="2026-09-02")
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="FERMENTACION", fecha="2026-09-03", observaciones="18 horas")
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_detalle)
+        self.assertEqual(response.status_code, 200)
+        etapas = list(response.context["etapas"])
+        self.assertEqual(
+            [e.etapa for e in etapas], ["DESPULPADO", "FERMENTACION", "SECADO"]
+        )
+        contenido = response.content.decode()
+        self.assertLess(contenido.index("Despulpado"), contenido.index("Fermentación"))
+        self.assertLess(contenido.index("Fermentación"), contenido.index("Secado</span>"))
+        self.assertContains(response, "10/09/2026")
+        self.assertContains(response, "Secado en marquesina")
+        self.assertContains(response, "18 horas")
+        self.assertNotContains(response, "todavía no tiene etapas de beneficio registradas")
+
+    def test_historial_misma_fecha_respeta_orden_de_registro(self):
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="FERMENTACION", fecha="2026-09-03")
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="LAVADO", fecha="2026-09-03")
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_detalle)
+        self.assertEqual(
+            [e.etapa for e in response.context["etapas"]], ["FERMENTACION", "LAVADO"]
+        )
+
+    def test_historial_solo_muestra_etapas_del_lote_consultado(self):
+        otro_lote = Lote.objects.create(codigo="LOTEOTRO", cosecha=self.cosecha, cantidad=Decimal("50.00"))
+        EtapaBeneficio.objects.create(lote=otro_lote, etapa="LAVADO", fecha="2026-09-04", observaciones="De otro lote")
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_detalle)
+        self.assertNotContains(response, "De otro lote")
+        self.assertContains(response, "todavía no tiene etapas de beneficio registradas")
+
+    def test_historial_de_lote_ajeno_responde_404(self):
+        _iniciar_sesion_productor(self.client)
+        response = self.client.get(self.url_detalle)
+        self.assertEqual(response.status_code, 404)
+
+
+class ReglasRegistroEtapasHU14ST3ST4Tests(TestCase):
+    """
+    Subtareas:
+    - SCRUM-152 / HU14-ST3: Validar reglas de registro de etapas.
+    - SCRUM-150 / HU14-ST4: Implementar la lógica de negocio para registrar etapas.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca La Loma", productor_id=self.productor_id, municipio=self.municipio
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca, fecha_cosecha="2026-09-01", cantidad_total=Decimal("300.00")
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTEST34", cosecha=self.cosecha, cantidad=Decimal("100.00")
+        )
+        self.url_registro = reverse("lote_etapa_registro", kwargs={"pk": self.lote.pk})
+        self.url_detalle = reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+
+    def _datos(self, **extra):
+        datos = {"lote_o_id": self.lote, "etapa": "LAVADO", "fecha": "2026-09-05", "observaciones": "ok"}
+        datos.update(extra)
+        return datos
+
+    # ------------------------------ ST3 ------------------------------
+    def test_rechaza_etapa_sin_fecha(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(fecha=None))
+        self.assertIn("fecha", ctx.exception.message_dict)
+        self.assertEqual(
+            ctx.exception.message_dict["fecha"], ["La fecha de la etapa es obligatoria."]
+        )
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_rechaza_etapa_fuera_de_la_lista(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(etapa="TOSTADO"))
+        self.assertIn("etapa", ctx.exception.message_dict)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_rechaza_etapa_vacia(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(etapa=""))
+        self.assertIn("etapa", ctx.exception.message_dict)
+
+    def test_rechaza_observaciones_demasiado_largas(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(observaciones="x" * 501))
+        self.assertIn("observaciones", ctx.exception.message_dict)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_acepta_observaciones_en_el_limite(self):
+        etapa = registrar_etapa_beneficio(**self._datos(observaciones="x" * 500))
+        self.assertEqual(len(etapa.observaciones), 500)
+
+    def test_rechaza_observaciones_con_caracteres_de_control(self):
+        for texto in ["hola\x00mundo", "texto\x07", "otro\x1b[31m"]:
+            with self.subTest(texto=texto):
+                with self.assertRaises(ValidationError) as ctx:
+                    registrar_etapa_beneficio(**self._datos(observaciones=texto))
+                self.assertIn("observaciones", ctx.exception.message_dict)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_acepta_saltos_de_linea_y_tabulaciones_en_observaciones(self):
+        etapa = registrar_etapa_beneficio(**self._datos(observaciones="Línea 1\nLínea 2\tfin"))
+        self.assertEqual(etapa.observaciones, "Línea 1\nLínea 2\tfin")
+
+    def test_formulario_web_aplica_las_mismas_reglas_de_observaciones(self):
+        form = EtapaBeneficioForm(data={"etapa": "LAVADO", "fecha": "2026-09-05", "observaciones": "x" * 501})
+        self.assertFalse(form.is_valid())
+        self.assertIn("observaciones", form.errors)
+        form = EtapaBeneficioForm(data={"etapa": "LAVADO", "fecha": "2026-09-05", "observaciones": "a\x00b"})
+        self.assertFalse(form.is_valid())
+
+    def test_formulario_web_limita_longitud_en_el_navegador(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_registro)
+        self.assertContains(response, 'maxlength="500"')
+
+    def test_pantalla_muestra_error_de_observaciones_largas(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.post(
+            self.url_registro, {"etapa": "LAVADO", "fecha": "2026-09-05", "observaciones": "x" * 501}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "no pueden superar 500 caracteres")
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    # ------------------------------ ST4 ------------------------------
+    def test_registro_valido_queda_guardado_y_asociado_al_lote(self):
+        etapa = registrar_etapa_beneficio(**self._datos(observaciones="  Lavado completo  "))
+        self.assertEqual(etapa.lote, self.lote)
+        self.assertEqual(etapa.etapa, "LAVADO")
+        self.assertEqual(str(etapa.fecha), "2026-09-05")
+        self.assertEqual(etapa.observaciones, "Lavado completo")
+        self.assertTrue(etapa.activo)
+        self.assertEqual(self.lote.etapas_beneficio.count(), 1)
+
+    def test_acepta_id_del_lote_en_lugar_del_objeto(self):
+        etapa = registrar_etapa_beneficio(**self._datos(lote_o_id=self.lote.pk))
+        self.assertEqual(etapa.lote_id, self.lote.pk)
+
+    def test_lote_inexistente_se_rechaza(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(lote_o_id=999999))
+        self.assertIn("lote", ctx.exception.message_dict)
+
+    def test_lote_inactivo_se_rechaza(self):
+        Lote.objects.filter(pk=self.lote.pk).update(activo=False)
+        lote = Lote.objects.get(pk=self.lote.pk)
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(lote_o_id=lote))
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_lote_de_otro_productor_se_rechaza(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_etapa_beneficio(**self._datos(productor_id=uuid.uuid4()))
+        self.assertIn("permiso", ctx.exception.message_dict)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    def test_productor_dueno_puede_registrar(self):
+        etapa = registrar_etapa_beneficio(**self._datos(productor_id=self.productor_id))
+        self.assertEqual(etapa.lote, self.lote)
+
+    def test_operacion_atomica_no_guarda_nada_si_falla(self):
+        EtapaBeneficio.objects.create(lote=self.lote, etapa="DESPULPADO", fecha="2026-09-02")
+        antes = EtapaBeneficio.objects.count()
+        with self.assertRaises(ValidationError):
+            registrar_etapa_beneficio(**self._datos(fecha="no-es-fecha"))
+        with self.assertRaises(ValidationError):
+            registrar_etapa_beneficio(**self._datos(observaciones="x" * 501))
+        self.assertEqual(EtapaBeneficio.objects.count(), antes)
+
+    def test_si_el_guardado_falla_no_queda_informacion_parcial(self):
+        antes = EtapaBeneficio.objects.count()
+        with patch.object(EtapaBeneficio, "save", side_effect=IntegrityError("fallo simulado")):
+            with self.assertRaises(IntegrityError):
+                registrar_etapa_beneficio(**self._datos())
+        self.assertEqual(EtapaBeneficio.objects.count(), antes)
+
+    def test_etapa_registrada_aparece_de_inmediato_en_el_historial(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.post(
+            self.url_registro,
+            {"etapa": "FERMENTACION", "fecha": "2026-09-03", "observaciones": "18 horas en tanque"},
+            follow=True,
+        )
+        self.assertEqual(response.redirect_chain[-1][0], self.url_detalle)
+        self.assertContains(response, "Fermentación")
+        self.assertContains(response, "18 horas en tanque")
+        self.assertContains(response, "03/09/2026")
+        self.assertNotContains(response, "todavía no tiene etapas de beneficio registradas")
+
+    def test_vista_web_usa_validacion_de_backend_aunque_el_formulario_pase(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        Lote.objects.filter(pk=self.lote.pk).update(activo=False)
+        response = self.client.post(self.url_registro, {"etapa": "LAVADO", "fecha": "2026-09-05"})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(EtapaBeneficio.objects.exists())
+
+    # ------------------- RNF-14: sin eliminación física -------------------
+    def test_eliminar_una_etapa_solo_la_inactiva(self):
+        etapa = registrar_etapa_beneficio(**self._datos())
+        etapa.delete()
+        self.assertTrue(EtapaBeneficio.objects.filter(pk=etapa.pk).exists())
+        etapa.refresh_from_db()
+        self.assertFalse(etapa.activo)
+
+    def test_eliminar_un_queryset_de_etapas_solo_las_inactiva(self):
+        registrar_etapa_beneficio(**self._datos())
+        registrar_etapa_beneficio(**self._datos(etapa="SECADO", fecha="2026-09-09"))
+        self.lote.etapas_beneficio.all().delete()
+        self.assertEqual(EtapaBeneficio.objects.count(), 2)
+        self.assertEqual(EtapaBeneficio.objects.filter(activo=True).count(), 0)
+
+    def test_historial_oculta_etapas_inactivas(self):
+        etapa = registrar_etapa_beneficio(**self._datos(observaciones="Observación inactiva"))
+        etapa.delete()
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(self.url_detalle)
+        self.assertNotContains(response, "Observación inactiva")
+        self.assertContains(response, "todavía no tiene etapas de beneficio registradas")
+
+    def test_no_se_puede_borrar_un_lote_con_etapas(self):
+        registrar_etapa_beneficio(**self._datos())
+        with self.assertRaises(ProtectedError):
+            self.lote.delete()
+        self.assertTrue(Lote.objects.filter(pk=self.lote.pk).exists())
+        self.assertEqual(EtapaBeneficio.objects.count(), 1)
 
 
 # =============================================================================

@@ -5,6 +5,7 @@ from django.http import HttpRequest, HttpResponse
 from django.shortcuts import redirect, render
 
 from .forms import ActorCadenaForm
+from .models import ActorCadena
 from usuarios.permissions import permiso_requerido_sesion
 
 
@@ -31,4 +32,9 @@ def registro_actor_view(request: HttpRequest) -> HttpResponse:
     else:
         form = ActorCadenaForm()
 
-    return render(request, "actores/registro_actor.html", {"form": form})
+    actores = ActorCadena.objects.all().order_by("-creado_en", "razon_social")
+    return render(
+        request,
+        "actores/registro_actor.html",
+        {"form": form, "actores": actores},
+    )

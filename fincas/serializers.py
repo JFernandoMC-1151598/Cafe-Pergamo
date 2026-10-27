@@ -2,11 +2,21 @@
 Serializadores DRF para Fincas y Georreferenciación - CAFÉ PÉRGAMO
 Subtarea: SCRUM-96: Guardar georreferenciación en backend.
 Subtarea: SCRUM-142 / HU13-ST2: Implementar servicio/API para registrar lotes.
+Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
+físicas y de calidad del lote.
 """
 
 from decimal import Decimal
+from django.core.validators import MaxValueValidator, MinValueValidator
 from rest_framework import serializers
-from .models import Cosecha, Finca, Lote, Municipio
+from .models import (
+    BitacoraPublicacionLote,
+    CaracteristicasCalidad,
+    Cosecha,
+    Finca,
+    Lote,
+    Municipio,
+)
 from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
 
 
@@ -238,12 +248,107 @@ class LoteSerializer(serializers.ModelSerializer):
             "finca",
             "cantidad",
             "cantidad_disponible_cosecha",
+            "publicado_en_catalogo",
+            "fecha_publicacion",
+            "precio_referencial",
             "activo",
             "proceso_beneficio",
             "estado_lote",
             "creado_en",
         ]
         read_only_fields = fields
+
+
+class CaracteristicasCalidadSerializer(serializers.ModelSerializer):
+    """
+    Serializador para crear, actualizar y consultar la calidad de un lote.
+    """
+
+    lote_id = serializers.IntegerField(source="lote.id", read_only=True)
+    lote_codigo = serializers.CharField(source="lote.codigo", read_only=True)
+    humedad = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+    )
+    merma = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+    )
+    puntaje_taza = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        validators=[
+            MinValueValidator(Decimal("0.00")),
+            MaxValueValidator(Decimal("100.00")),
+        ],
+    )
+
+    class Meta:
+        model = CaracteristicasCalidad
+        fields = [
+            "id",
+            "lote_id",
+            "lote_codigo",
+            "humedad",
+            "merma",
+            "puntaje_taza",
+            "perfil_sensorial",
+            "observaciones",
+            "creado_en",
+            "actualizado_en",
+        ]
+        read_only_fields = [
+            "id",
+            "lote_id",
+            "lote_codigo",
+            "creado_en",
+            "actualizado_en",
+        ]
+
+    def validate(self, attrs):
+        for campo in ("perfil_sensorial", "observaciones"):
+            if campo in attrs and attrs[campo] is not None:
+                attrs[campo] = attrs[campo].strip()
+        return attrs
+
+    def create(self, validated_data):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .services import crear_caracteristicas_calidad
+
+        try:
+            return crear_caracteristicas_calidad(
+                lote_o_id=self.context["lote"],
+                **validated_data,
+            )
+        except DjangoValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                raise serializers.ValidationError(exc.message_dict)
+            raise serializers.ValidationError(exc.messages)
+
+    def update(self, instance, validated_data):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from .services import editar_caracteristicas_calidad
+
+        try:
+            return editar_caracteristicas_calidad(instance, **validated_data)
+        except DjangoValidationError as exc:
+            if hasattr(exc, "message_dict"):
+                raise serializers.ValidationError(exc.message_dict)
+            raise serializers.ValidationError(exc.messages)
 
 
 class CosechaSerializer(serializers.ModelSerializer):
@@ -383,3 +488,126 @@ class FichaDigitalSerializer(serializers.Serializer):
     advertencias = serializers.ListField(child=serializers.CharField(), required=False, default=list)
     campos_completos = serializers.ListField(child=serializers.CharField(), required=False, default=list)
     campos_faltantes = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+
+
+class LotePublicarInputSerializer(serializers.Serializer):
+    """
+    Serializador de entrada para publicar un lote en el catálogo comercial (HU19-ST1 / SCRUM-239).
+    """
+
+    precio_referencial = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal("0.01"),
+        required=False,
+        allow_null=True,
+        help_text="Precio orientativo por kg en COP (opcional pero debe ser > 0 si se define).",
+    )
+    observaciones = serializers.CharField(
+        max_length=500,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Observaciones o notas para la bitácora de publicación.",
+    )
+
+
+class LoteDespublicarInputSerializer(serializers.Serializer):
+    """
+    Serializador de entrada para retirar un lote del catálogo comercial (HU19-ST1 / SCRUM-239).
+    """
+
+    motivo = serializers.CharField(
+        max_length=500,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Motivo por el cual se retira el lote del catálogo público.",
+    )
+
+
+class BitacoraPublicacionLoteSerializer(serializers.ModelSerializer):
+    """
+    Serializador de consulta para la bitácora de publicación de lotes (HU19-ST6 / SCRUM-244).
+    """
+
+    lote_id = serializers.IntegerField(source="lote.id", read_only=True)
+    lote_codigo = serializers.CharField(source="lote.codigo", read_only=True)
+
+    class Meta:
+        model = BitacoraPublicacionLote
+        fields = [
+            "id",
+            "lote_id",
+            "lote_codigo",
+            "accion",
+            "realizado_por_id",
+            "realizado_por_correo",
+            "detalles_trazabilidad",
+            "observaciones",
+            "creado_en",
+        ]
+        read_only_fields = fields
+
+
+class CatalogoLoteSerializer(serializers.ModelSerializer):
+    """
+    Representación pública de un lote del catálogo comercial
+    (SCRUM-250 / HU20-ST3). Expone nombres legibles para que un comprador o
+    un cliente externo pueda mostrar el lote sin consultas adicionales. No
+    incluye datos del productor (identificación ni correo).
+    """
+
+    finca = serializers.CharField(source="cosecha.finca.nombre", read_only=True)
+    vereda = serializers.CharField(source="cosecha.finca.vereda", read_only=True)
+    municipio_id = serializers.IntegerField(source="cosecha.finca.municipio_id", read_only=True)
+    municipio = serializers.CharField(source="cosecha.finca.municipio.nombre", read_only=True)
+    variedad_id = serializers.IntegerField(source="cosecha.variedad_id", read_only=True, allow_null=True)
+    variedad = serializers.CharField(source="cosecha.variedad.nombre", read_only=True, allow_null=True)
+    proceso_id = serializers.IntegerField(source="proceso_beneficio_id", read_only=True, allow_null=True)
+    proceso = serializers.CharField(source="proceso_beneficio.nombre", read_only=True, allow_null=True)
+    puntaje_taza = serializers.SerializerMethodField()
+    humedad = serializers.SerializerMethodField()
+    perfil_sensorial = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Lote
+        fields = [
+            "id",
+            "codigo",
+            "cantidad",
+            "precio_referencial",
+            "fecha_publicacion",
+            "finca",
+            "vereda",
+            "municipio_id",
+            "municipio",
+            "variedad_id",
+            "variedad",
+            "proceso_id",
+            "proceso",
+            "puntaje_taza",
+            "humedad",
+            "perfil_sensorial",
+        ]
+        read_only_fields = fields
+
+    @staticmethod
+    def _calidad(obj):
+        try:
+            return obj.caracteristicas_calidad
+        except CaracteristicasCalidad.DoesNotExist:
+            return None
+
+    def get_puntaje_taza(self, obj):
+        calidad = self._calidad(obj)
+        return str(calidad.puntaje_taza) if calidad and calidad.puntaje_taza is not None else None
+
+    def get_humedad(self, obj):
+        calidad = self._calidad(obj)
+        return str(calidad.humedad) if calidad and calidad.humedad is not None else None
+
+    def get_perfil_sensorial(self, obj):
+        calidad = self._calidad(obj)
+        return calidad.perfil_sensorial if calidad else ""
+

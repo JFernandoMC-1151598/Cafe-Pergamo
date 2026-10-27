@@ -4,13 +4,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.messages.storage.fallback import FallbackStorage
-from django.test import RequestFactory, SimpleTestCase
+from django.test import RequestFactory, TestCase
 from django.urls import reverse
 
+from actores.models import ActorCadena
 from actores.views import registro_actor_view
 
 
-class RegistroActorPermisosTests(SimpleTestCase):
+class RegistroActorPermisosTests(TestCase):
     """Comprueba autorización, validación y creación de actores."""
 
     def _request(self, authenticated: bool, role: str = "", data=None):
@@ -64,6 +65,27 @@ class RegistroActorPermisosTests(SimpleTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Registrar actor de la cadena", response.content.decode())
+
+    @patch("usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True)
+    @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
+    def test_formulario_muestra_actores_registrados(
+        self, _mock_permission, _mock_template_permission
+    ):
+        ActorCadena.objects.create(
+            tipo=ActorCadena.TipoActor.ASOCIACION,
+            razon_social="Asociación Cafetera del Norte",
+            nit="900123456-7",
+            contacto="Carlos Pérez",
+            correo="contacto@asociacion.test",
+        )
+
+        response = registro_actor_view(self._request(True, role="ADMINISTRADOR"))
+
+        contenido = response.content.decode()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Actores registrados", contenido)
+        self.assertIn("Asociación Cafetera del Norte", contenido)
+        self.assertIn("900123456-7", contenido)
 
     @patch("usuarios.permissions.usuario_tiene_permiso", return_value=True)
     @patch("actores.views.ActorCadenaForm")

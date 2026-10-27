@@ -5,7 +5,15 @@ Subtarea: SCRUM-98 / HU07-ST5 (Georreferenciación).
 """
 
 from django.contrib import admin
-from .models import BitacoraFichaDigital, Cosecha, Finca, Lote, Municipio
+from .models import (
+    BitacoraFichaDigital,
+    BitacoraPublicacionLote,
+    CaracteristicasCalidad,
+    Cosecha,
+    Finca,
+    Lote,
+    Municipio,
+)
 
 
 @admin.register(Municipio)
@@ -57,9 +65,34 @@ class CosechaAdmin(admin.ModelAdmin):
 
 @admin.register(Lote)
 class LoteAdmin(admin.ModelAdmin):
-    list_display = ("codigo", "cosecha", "cantidad", "activo", "creado_en")
-    list_filter = ("activo", "creado_en")
+    list_display = (
+        "codigo",
+        "cosecha",
+        "cantidad",
+        "publicado_en_catalogo",
+        "precio_referencial",
+        "activo",
+        "creado_en",
+    )
+    list_filter = ("publicado_en_catalogo", "activo", "creado_en")
     search_fields = ("codigo", "cosecha__finca__nombre")
+    ordering = ("-creado_en",)
+    readonly_fields = ("creado_en", "fecha_publicacion")
+
+
+@admin.register(CaracteristicasCalidad)
+class CaracteristicasCalidadAdmin(admin.ModelAdmin):
+    list_display = ("lote", "humedad", "merma", "puntaje_taza", "actualizado_en")
+    search_fields = ("lote__codigo",)
+    ordering = ("-actualizado_en",)
+    readonly_fields = ("creado_en", "actualizado_en")
+
+
+@admin.register(BitacoraPublicacionLote)
+class BitacoraPublicacionLoteAdmin(admin.ModelAdmin):
+    list_display = ("lote", "accion", "realizado_por_correo", "creado_en")
+    list_filter = ("accion", "creado_en")
+    search_fields = ("lote__codigo", "realizado_por_correo")
     ordering = ("-creado_en",)
     readonly_fields = ("creado_en",)
 

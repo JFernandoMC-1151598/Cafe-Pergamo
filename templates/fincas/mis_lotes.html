@@ -3,6 +3,8 @@
 
 {% block title %}Mis Lotes — Café Pérgamo{% endblock %}
 
+{% block messages %}{% endblock %}
+
 {% block content %}
 <div class="container py-5">
     <!-- Encabezado -->
@@ -52,41 +54,270 @@
     </div>
     {% endif %}
 
-    {% if lotes %}
+    {% if lotes_info %}
     <div class="table-responsive">
         <table class="table table-hover align-middle border rounded-4 overflow-hidden bg-white shadow-sm">
             <thead class="table-light">
                 <tr class="small text-muted">
                     <th>Código</th>
-                    <th>Finca</th>
-                    <th>Cosecha</th>
-                    <th>Cantidad del lote</th>
-                    <th>Saldo restante de la cosecha</th>
-                    <th>Registrado el</th>
+                    <th>Finca y Variedad</th>
+                    <th>Proceso y Calidad</th>
+                    <th>Cantidad</th>
+                    <th>Catálogo Público</th>
                     <th class="text-end">Acciones</th>
                 </tr>
             </thead>
             <tbody>
-                {% for lote in lotes %}
+                {% for item in lotes_info %}
+                {% with lote=item.lote %}
                 <tr>
-                    <td class="fw-semibold text-dark">{{ lote.codigo }}</td>
-                    <td class="text-secondary small">{{ lote.cosecha.finca.nombre }}</td>
-                    <td class="text-secondary small">{{ lote.cosecha.fecha_cosecha|date:"d/m/Y" }}</td>
+                    <td class="fw-semibold text-dark">
+                        <span class="d-block">{{ lote.codigo }}</span>
+                        <small class="text-muted">{{ lote.creado_en|date:"d/m/Y" }}</small>
+                    </td>
                     <td class="small">
-                        <span class="badge bg-success-subtle text-success border border-success-subtle">
+                        <div class="fw-semibold text-dark">{{ lote.cosecha.finca.nombre }}</div>
+                        <div class="text-secondary">
+                            {% if lote.cosecha.finca.municipio %}
+                                <i class="bi bi-geo-alt text-danger me-1"></i>{{ lote.cosecha.finca.municipio.nombre }}
+                            {% else %}
+                                <span class="text-warning"><i class="bi bi-exclamation-triangle me-1"></i>Sin municipio</span>
+                            {% endif %}
+                            • 
+                            {% if lote.cosecha.variedad %}
+                                <span class="badge bg-light text-dark border">{{ lote.cosecha.variedad.nombre }}</span>
+                            {% else %}
+                                <span class="badge bg-warning-subtle text-warning">Sin variedad</span>
+                            {% endif %}
+                        </div>
+                    </td>
+                    <td class="small">
+                        <div class="mb-1">
+                            {% if lote.proceso_beneficio %}
+                                <span class="badge bg-info-subtle text-info border border-info-subtle">
+                                    {{ lote.proceso_beneficio.nombre }}
+                                </span>
+                            {% else %}
+                                <span class="badge bg-secondary-subtle text-muted">Sin proceso</span>
+                            {% endif %}
+                        </div>
+                        <div>
+                            {% if lote.caracteristicas_calidad %}
+                                {% if lote.caracteristicas_calidad.puntaje_taza %}
+                                    <span class="badge bg-warning-subtle text-dark border border-warning-subtle" title="Puntaje SCA en taza">
+                                        <i class="bi bi-award me-1 text-warning"></i>{{ lote.caracteristicas_calidad.puntaje_taza }} pts
+                                    </span>
+                                {% endif %}
+                                {% if lote.caracteristicas_calidad.humedad %}
+                                    <span class="badge bg-light text-secondary border" title="Humedad">
+                                        <i class="bi bi-droplet me-1 text-info"></i>{{ lote.caracteristicas_calidad.humedad }}% hum.
+                                    </span>
+                                {% endif %}
+                            {% else %}
+                                <span class="text-muted fst-italic">Sin calidad registrada</span>
+                            {% endif %}
+                        </div>
+                    </td>
+                    <td class="small">
+                        <span class="badge bg-success-subtle text-success border border-success-subtle fw-semibold">
                             {{ lote.cantidad }} kg
                         </span>
+                        <div class="text-muted small mt-1">
+                            Saldo cosecha: {{ lote.cosecha.cantidad_disponible }} kg
+                        </div>
                     </td>
-                    <td class="small text-secondary">
-                        {{ lote.cosecha.cantidad_disponible }} / {{ lote.cosecha.cantidad_total }} kg
+                    <td class="small">
+                        {% if lote.publicado_en_catalogo %}
+                            <span class="badge bg-success text-white px-2 py-1">
+                                <i class="bi bi-check-circle me-1"></i>Publicado
+                            </span>
+                            {% if lote.precio_referencial %}
+                                <div class="text-success small fw-semibold mt-1">
+                                    ${{ lote.precio_referencial }} / kg
+                                </div>
+                            {% endif %}
+                            {% if lote.fecha_publicacion %}
+                                <div class="text-muted small">{{ lote.fecha_publicacion|date:"d/m/Y" }}</div>
+                            {% endif %}
+                        {% else %}
+                            <span class="badge bg-secondary-subtle text-secondary px-2 py-1">
+                                <i class="bi bi-eye-slash me-1"></i>No publicado
+                            </span>
+                        {% endif %}
                     </td>
-                    <td class="text-secondary small">{{ lote.creado_en|date:"d/m/Y" }}</td>
                     <td class="text-end">
-                        <a href="{% url 'lote_ficha_digital_web' lote.codigo %}" class="btn btn-outline-pergamo btn-sm rounded-pill px-3 py-1">
-                            <i class="bi bi-file-earmark-text me-1"></i> Ficha Digital
-                        </a>
+                        <!-- HU-17: Ficha Digital Consolidada -->
+                        <div class="btn-group mb-1">
+                            <a href="{% url 'lote_ficha_digital_web' lote.codigo %}" class="btn btn-outline-pergamo btn-sm" target="_blank" title="Ver Ficha Digital Consolidada">
+                                <i class="bi bi-file-earmark-text me-1"></i>Ficha
+                            </a>
+                            <!-- HU-14: historial y registro de etapas de beneficio del lote -->
+                            <a href="{% url 'lote_detalle' lote.id %}" class="btn btn-outline-secondary btn-sm" title="Ver historial de beneficio">
+                                <i class="bi bi-clock-history me-1"></i>Historial
+                            </a>
+                            <a href="{% url 'lote_etapa_registro' lote.id %}" class="btn btn-outline-success btn-sm" title="Registrar nueva etapa de beneficio">
+                                <i class="bi bi-plus-circle me-1"></i>Etapa
+                            </a>
+                        </div>
+                        {% if lote.publicado_en_catalogo %}
+                            <div class="btn-group">
+                                <a href="{% url 'catalogo' %}" class="btn btn-outline-success btn-sm" title="Ver en vitrina comercial">
+                                    <i class="bi bi-shop"></i>
+                                </a>
+                                <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#modalDespublicar{{ lote.id }}" title="Retirar del catálogo público">
+                                    <i class="bi bi-x-circle me-1"></i>Retirar
+                                </button>
+                            </div>
+                        {% else %}
+                            {% if item.puede_publicar %}
+                                <button type="button" class="btn btn-primary btn-sm bg-primary fw-semibold" data-bs-toggle="modal" data-bs-target="#modalPublicar{{ lote.id }}">
+                                    <i class="bi bi-cloud-upload me-1"></i>Publicar
+                                </button>
+                            {% else %}
+                                <button type="button" class="btn btn-outline-warning btn-sm text-dark" data-bs-toggle="modal" data-bs-target="#modalRequisitos{{ lote.id }}" title="Información mínima incompleta">
+                                    <i class="bi bi-exclamation-triangle me-1 text-warning"></i>Incompleto
+                                </button>
+                            {% endif %}
+                        {% endif %}
                     </td>
                 </tr>
+
+                <!-- Modal Publicar Lote -->
+                {% if not lote.publicado_en_catalogo and item.puede_publicar %}
+                <div class="modal fade" id="modalPublicar{{ lote.id }}" tabindex="-1" aria-labelledby="modalPublicarLabel{{ lote.id }}" aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content rounded-4 border-0 shadow">
+                            <form method="POST" action="{% url 'lote_publicar' lote.id %}">
+                                {% csrf_token %}
+                                <div class="modal-header border-0 pb-0">
+                                    <h5 class="modal-title fw-bold text-dark" id="modalPublicarLabel{{ lote.id }}">
+                                        <i class="bi bi-cloud-upload text-primary me-2"></i>Publicar Lote {{ lote.codigo }}
+                                    </h5>
+                                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                </div>
+                                <div class="modal-body py-3">
+                                    <p class="text-muted small">
+                                        Este lote cumple con todos los requisitos de trazabilidad y calidad para exhibirse en el catálogo público comercial de Café Pérgamo.
+                                    </p>
+                                    <div class="card bg-light border-0 rounded-3 p-3 mb-3 small">
+                                        <div class="row g-2">
+                                            <div class="col-6"><strong>Finca:</strong> {{ lote.cosecha.finca.nombre }}</div>
+                                            <div class="col-6"><strong>Municipio:</strong> {{ lote.cosecha.finca.municipio.nombre }}</div>
+                                            <div class="col-6"><strong>Variedad:</strong> {{ lote.cosecha.variedad.nombre }}</div>
+                                            <div class="col-6"><strong>Proceso:</strong> {{ lote.proceso_beneficio.nombre }}</div>
+                                            <div class="col-6"><strong>Cantidad:</strong> {{ lote.cantidad }} kg</div>
+                                            <div class="col-6">
+                                                <strong>Calidad:</strong>
+                                                {% if lote.caracteristicas_calidad.puntaje_taza %}
+                                                    {{ lote.caracteristicas_calidad.puntaje_taza }} pts SCA
+                                                {% elif lote.caracteristicas_calidad.humedad %}
+                                                    {{ lote.caracteristicas_calidad.humedad }}% hum.
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="precio_{{ lote.id }}" class="form-label fw-semibold small text-dark">
+                                            Precio referencial por kg en COP (Opcional)
+                                        </label>
+                                        <div class="input-group input-group-sm">
+                                            <span class="input-group-text">$</span>
+                                            <input type="number" step="0.01" min="0.01" class="form-control" id="precio_{{ lote.id }}" name="precio_referencial" placeholder="Ej: 25000.00" value="{{ lote.precio_referencial|default:'' }}">
+                                            <span class="input-group-text">COP / kg</span>
+                                        </div>
+                                        <div class="form-text small">Precio orientativo para compradores interesados en el catálogo.</div>
+                                    </div>
+                                    <div class="mb-2">
+                                        <label for="obs_{{ lote.id }}" class="form-label fw-semibold small text-dark">
+                                            Observaciones de publicación (Opcional)
+                                        </label>
+                                        <textarea class="form-control form-control-sm" id="obs_{{ lote.id }}" name="observaciones" rows="2" placeholder="Notas sobre disponibilidad, entrega o tostión..."></textarea>
+                                    </div>
+                                </div>
+                                <div class="modal-footer border-0 pt-0">
+                                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
+                                    <button type="submit" class="btn btn-primary btn-sm bg-primary fw-semibold px-3">
+                                        <i class="bi bi-check2-circle me-1"></i>Confirmar Publicación
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Modal Requisitos Pendientes -->
+                {% if not lote.publicado_en_catalogo and not item.puede_publicar %}
+                <div class="modal fade" id="modalRequisitos{{ lote.id }}" tabindex="-1" aria-labelledby="modalRequisitosLabel{{ lote.id }}" aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content rounded-4 border-0 shadow">
+                            <div class="modal-header border-0 pb-0">
+                                <h5 class="modal-title fw-bold text-dark" id="modalRequisitosLabel{{ lote.id }}">
+                                    <i class="bi bi-shield-exclamation text-warning me-2"></i>Requisitos para Publicar Lote {{ lote.codigo }}
+                                </h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body py-3">
+                                <div class="alert alert-warning py-2 px-3 small border-0 rounded-3 mb-3">
+                                    El catálogo público comercial de Café Pérgamo exige información mínima completa de trazabilidad y calidad para proteger la reputación del café de Norte de Santander.
+                                </div>
+                                <h6 class="fw-bold small text-dark mb-2">Información pendiente por completar:</h6>
+                                <ul class="list-group list-group-flush small mb-3">
+                                    {% for err in item.errores_publicacion %}
+                                    <li class="list-group-item px-0 py-2 text-danger">
+                                        <i class="bi bi-x-circle-fill me-2"></i>{{ err }}
+                                    </li>
+                                    {% endfor %}
+                                </ul>
+                                <p class="text-muted small mb-0">
+                                    Una vez completada la evaluación de calidad o los datos de cosecha/finca, este botón se habilitará automáticamente.
+                                </p>
+                            </div>
+                            <div class="modal-footer border-0 pt-0">
+                                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Entendido</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Modal Despublicar Lote -->
+                {% if lote.publicado_en_catalogo %}
+                <div class="modal fade" id="modalDespublicar{{ lote.id }}" tabindex="-1" aria-labelledby="modalDespublicarLabel{{ lote.id }}" aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content rounded-4 border-0 shadow">
+                            <form method="POST" action="{% url 'lote_despublicar' lote.id %}">
+                                {% csrf_token %}
+                                <div class="modal-header border-0 pb-0">
+                                    <h5 class="modal-title fw-bold text-dark" id="modalDespublicarLabel{{ lote.id }}">
+                                        <i class="bi bi-eye-slash text-danger me-2"></i>Retirar Lote {{ lote.codigo }} del Catálogo
+                                    </h5>
+                                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                </div>
+                                <div class="modal-body py-3">
+                                    <p class="text-muted small">
+                                        Al retirar el lote, dejará de ser visible para los compradores en el catálogo público comercial. Quedará registrado en la bitácora de trazabilidad.
+                                    </p>
+                                    <div class="mb-3">
+                                        <label for="motivo_{{ lote.id }}" class="form-label fw-semibold small text-dark">
+                                            Motivo del retiro (Opcional)
+                                        </label>
+                                        <input type="text" class="form-control form-control-sm" id="motivo_{{ lote.id }}" name="motivo" placeholder="Ej: Lote vendido por canal directo / En ajuste de muestra">
+                                    </div>
+                                </div>
+                                <div class="modal-footer border-0 pt-0">
+                                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
+                                    <button type="submit" class="btn btn-danger btn-sm fw-semibold px-3">
+                                        <i class="bi bi-x-circle me-1"></i>Confirmar Retiro
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% endwith %}
                 {% endfor %}
             </tbody>
         </table>
