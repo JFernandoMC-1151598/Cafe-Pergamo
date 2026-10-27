@@ -16,6 +16,7 @@ Integración de:
 """
 
 import uuid
+from datetime import date
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -42,6 +43,7 @@ from fincas.forms import (
     MunicipioForm,
 )
 from fincas.models import (
+    BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
     Cosecha,
@@ -56,6 +58,9 @@ from fincas.services import (
     crear_lote,
     despublicar_lote_de_catalogo,
     editar_caracteristicas_calidad,
+    evaluar_consistencia_y_completitud_lote,
+    obtener_ficha_consolidada_lote,
+    registrar_auditoria_ficha_digital,
     filtrar_catalogo_lotes,
     generar_codigo_lote,
     generar_snapshot_trazabilidad,
@@ -66,6 +71,7 @@ from fincas.services import (
     registrar_etapa_beneficio,
     validar_lote_para_publicacion,
 )
+from fincas.serializers import FichaDigitalSerializer
 from fincas.views import (
     MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO,
     MENSAJE_CATALOGO_VACIO,
@@ -5557,3 +5563,1313 @@ class ReglasRegistroEtapasHU14ST3ST4Tests(TestCase):
             self.lote.delete()
         self.assertTrue(Lote.objects.filter(pk=self.lote.pk).exists())
         self.assertEqual(EtapaBeneficio.objects.count(), 1)
+
+
+# =============================================================================
+# SUITE HU-17 (SCRUM-169 / SCRUM-170): ESTRUCTURA Y CONSOLIDACIÓN DE FICHA DIGITAL
+# =============================================================================
+
+
+class FichaDigitalStructureTests(TestCase):
+    """
+    Pruebas unitarias para HU17-ST4 (SCRUM-169): Definir la estructura y campos de la ficha digital.
+    Verifica el contrato de datos formal, la lógica de consolidación y el criterio de aceptación
+    de actualización automática en tiempo real.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-ARB-TEST",
+                nombre="Arboledas",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca La Esperanza",
+            vereda="El Helechal",
+            municipio=self.municipio,
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.865432"),
+            longitud=Decimal("-72.765432"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Castillo Típico",
+            defaults={
+                "especie": "Arábica",
+                "descripcion": "Variedad de alta resistencia y perfil cítrico.",
+                "activo": True,
+            },
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-15",
+            cantidad_total=Decimal("800.00"),
+            cantidad_disponible=Decimal("600.00"),
+            activo=True,
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={
+                "nombre": "Lavado Tradicional",
+                "descripcion": "Fermentación en tanque y lavado con agua de manantial.",
+                "activo": True,
+            },
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={
+                "nombre": "Disponible para Venta",
+                "descripcion": "Lote apto para comercialización.",
+                "activo": True,
+            },
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-ESP-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("200.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_estructura_campos_ficha_digital_completa(self):
+        """
+        SCRUM-169: Verifica que la ficha digital generada contenga todas las secciones,
+        campos y estructuras esperadas por el contrato de datos FichaDigitalSerializer.
+        """
+        ficha = obtener_ficha_consolidada_lote(self.lote)
+
+        # 1. Campos del Lote
+        self.assertEqual(ficha["id"], self.lote.id)
+        self.assertEqual(ficha["codigo"], "LOTE-ESP-001")
+        self.assertEqual(ficha["cantidad_kg"], Decimal("200.00"))
+        self.assertTrue(ficha["activo"])
+        self.assertIsNotNone(ficha["creado_en"])
+
+        # 2. Sección Productor
+        self.assertIn("productor", ficha)
+        self.assertEqual(ficha["productor"]["id"], str(self.productor_uuid))
+        self.assertIn("nombre_completo", ficha["productor"])
+
+        # 3. Sección Finca y Georreferenciación
+        self.assertIn("finca", ficha)
+        self.assertEqual(ficha["finca"]["nombre"], "Finca La Esperanza")
+        self.assertEqual(ficha["finca"]["municipio"], "Arboledas")
+        self.assertEqual(ficha["finca"]["departamento"], "Norte de Santander")
+        self.assertEqual(ficha["finca"]["latitud"], Decimal("7.865432"))
+        self.assertEqual(ficha["finca"]["longitud"], Decimal("-72.765432"))
+        self.assertTrue(ficha["finca"]["tiene_georreferenciacion"])
+
+        # 4. Sección Cosecha
+        self.assertIn("cosecha", ficha)
+        self.assertEqual(ficha["cosecha"]["cantidad_total_cosecha"], Decimal("800.00"))
+
+        # 5. Sección Variedad Botánica
+        self.assertIn("variedad", ficha)
+        self.assertEqual(ficha["variedad"]["nombre"], "Castillo Típico")
+        self.assertEqual(ficha["variedad"]["especie"], "Arábica")
+
+        # 6. Sección Proceso de Beneficio
+        self.assertIn("proceso_beneficio", ficha)
+        self.assertEqual(ficha["proceso_beneficio"]["codigo"], "LAVADO")
+        self.assertEqual(ficha["proceso_beneficio"]["nombre"], "Lavado Tradicional")
+
+        # 7. Sección Estado de Trazabilidad y Comercial
+        self.assertIn("estado_lote", ficha)
+        self.assertEqual(ficha["estado_lote"]["codigo"], "DISPONIBLE")
+        self.assertEqual(ficha["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha["disponible_para_venta"])
+
+        # 8. Metadatos de URL pública y porcentaje de completitud
+        self.assertEqual(ficha["url_publica"], "/trazabilidad/lote/LOTE-ESP-001/")
+        self.assertGreaterEqual(ficha["completitud_porcentaje"], 65)
+
+        # 9. Validación formal con FichaDigitalSerializer
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(
+            serializer.is_valid(),
+            f"El serializador de la ficha digital falló la validación: {serializer.errors}",
+        )
+
+    def test_obtener_ficha_por_codigo_y_por_pk(self):
+        """Verifica que el servicio resuelva el lote indistintamente por instancia, código o PK."""
+        ficha_por_instancia = obtener_ficha_consolidada_lote(self.lote)
+        ficha_por_codigo = obtener_ficha_consolidada_lote("LOTE-ESP-001")
+        ficha_por_pk = obtener_ficha_consolidada_lote(self.lote.pk)
+
+        self.assertEqual(ficha_por_instancia["codigo"], ficha_por_codigo["codigo"])
+        self.assertEqual(ficha_por_codigo["codigo"], ficha_por_pk["codigo"])
+
+    def test_actualizacion_automatica_en_tiempo_real(self):
+        """
+        Criterio de aceptación HU-17:
+        'La ficha se actualiza automáticamente al registrarse nueva información del lote'.
+        Al mutar datos del lote o cosecha en la BD, la siguiente consulta refleja los cambios al instante.
+        """
+        # Consulta inicial
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_inicial["cantidad_kg"], Decimal("200.00"))
+
+        # Mutación de información
+        self.lote.cantidad = Decimal("350.00")
+        self.lote.save(update_fields=["cantidad"])
+
+        # Consulta inmediata posterior
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_actualizada["cantidad_kg"], Decimal("350.00"))
+
+    def test_ficha_lote_con_datos_parciales(self):
+        """Verifica que un lote sin georreferenciación ni proceso asignado genere una ficha válida."""
+        finca_sin_coords = Finca.objects.create(
+            nombre="Finca Sin GPS",
+            municipio=self.municipio,
+            productor_id=uuid.uuid4(),
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        cosecha_sin_var = Cosecha.objects.create(
+            finca=finca_sin_coords,
+            fecha_cosecha="2026-10-01",
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+            activo=True,
+        )
+        lote_basico = Lote.objects.create(
+            codigo="LOTE-BASICO-99",
+            cosecha=cosecha_sin_var,
+            cantidad=Decimal("50.00"),
+            proceso_beneficio=None,
+            estado_lote=None,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote_basico)
+        self.assertFalse(ficha["finca"]["tiene_georreferenciacion"])
+        self.assertIsNone(ficha["finca"]["latitud"])
+        self.assertIsNone(ficha["proceso_beneficio"]["id"])
+
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(serializer.is_valid(), f"Errores en ficha parcial: {serializer.errors}")
+
+    def test_lote_inexistente_lanza_validation_error(self):
+        """Verifica que solicitar un lote inexistente arroje ValidationError amigable."""
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote("LOTE-NO-EXISTE-XYZ")
+
+
+# =============================================================================
+# SUITE HU-17 (SCRUM-167): ENDPOINT API REST DE FICHA DIGITAL CONSOLIDADA
+# =============================================================================
+
+
+class FichaDigitalAPITests(TestCase):
+    """
+    Pruebas de integración para el endpoint REST GET /fincas/api/lotes/<codigo>/ficha/ (HU-17 / SCRUM-167).
+    Verifica el acceso público (AllowAny), la estructura del JSON devuelto y el manejo de errores 404/400.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-ARB-API",
+                nombre="Arboledas",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca API Test",
+            vereda="La Cima",
+            municipio=self.municipio,
+            productor_id=uuid.uuid4(),
+            latitud=Decimal("7.123456"),
+            longitud=Decimal("-72.654321"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Caturra",
+            defaults={
+                "especie": "Arábica",
+                "descripcion": "Variedad tradicional.",
+                "activo": True,
+            },
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-20",
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("500.00"),
+            activo=True,
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="HONEY",
+            defaults={
+                "nombre": "Honey / Enmielado",
+                "descripcion": "Secado con mucílago.",
+                "activo": True,
+            },
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={
+                "nombre": "Disponible",
+                "descripcion": "Lote listo.",
+                "activo": True,
+            },
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-API-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("150.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_consulta_exitosa_ficha_digital_api_200_ok(self):
+        """GET /fincas/api/lotes/<codigo>/ficha/ responde 200 OK sin autenticación obligatoria."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["codigo"], "LOTE-API-001")
+        self.assertEqual(data["cantidad_kg"], "150.00")
+        self.assertTrue(data["activo"])
+
+        # Verificación de secciones anidadas
+        self.assertEqual(data["finca"]["nombre"], "Finca API Test")
+        self.assertEqual(data["finca"]["municipio"], "Arboledas")
+        self.assertEqual(data["proceso_beneficio"]["codigo"], "HONEY")
+        self.assertEqual(data["estado_lote"]["codigo"], "DISPONIBLE")
+        self.assertIn("url_publica", data)
+        self.assertIn("completitud_porcentaje", data)
+
+    def test_consulta_exitosa_por_ruta_v1_alternativa(self):
+        """GET /fincas/api/v1/lotes/<codigo>/ficha/ responde igualmente 200 OK."""
+        url = reverse("api_v1_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["codigo"], "LOTE-API-001")
+
+    def test_consulta_lote_inexistente_retorna_404(self):
+        """GET /fincas/api/lotes/<codigo_no_existe>/ficha/ responde 404 NOT FOUND con mensaje JSON."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": "LOTE-FANTASMA-999"})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("error", response.json())
+
+    def test_actualizacion_automatica_reflejada_en_la_api(self):
+        """Verifica que mutaciones previas en la BD se reflejen inmediatamente en la respuesta de la API."""
+        # 1. Primera consulta
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        resp1 = self.client.get(url)
+        self.assertEqual(resp1.json()["cantidad_kg"], "150.00")
+
+        # 2. Modificación de datos en base de datos
+        self.lote.cantidad = Decimal("275.50")
+        self.lote.save(update_fields=["cantidad"])
+
+        # 3. Segunda consulta inmediata
+        resp2 = self.client.get(url)
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.json()["cantidad_kg"], "275.50")
+
+
+# =============================================================================
+# SUITE HU-17 (SCRUM-168): VISTA Y PLANTILLA WEB DE FICHA DIGITAL CONSOLIDADA
+# =============================================================================
+
+
+class FichaDigitalWebTests(TestCase):
+    """
+    Pruebas de la interfaz web para la Ficha Digital Consolidada por Lote (HU-17 / SCRUM-168).
+    Verifica el renderizado de la plantilla HTML5, contenido de secciones y manejo de errores 404 amigable.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-ARB-WEB",
+                nombre="Arboledas",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca Web Test",
+            vereda="El Roble",
+            municipio=self.municipio,
+            productor_id=uuid.uuid4(),
+            latitud=Decimal("7.654321"),
+            longitud=Decimal("-72.123456"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Geisha Especial",
+            defaults={
+                "especie": "Arábica",
+                "descripcion": "Variedad de perfil floral.",
+                "activo": True,
+            },
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-25",
+            cantidad_total=Decimal("400.00"),
+            cantidad_disponible=Decimal("400.00"),
+            activo=True,
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="NATURAL",
+            defaults={
+                "nombre": "Natural / Seco",
+                "descripcion": "Secado en cereza completa.",
+                "activo": True,
+            },
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={
+                "nombre": "Disponible",
+                "descripcion": "Apto para venta.",
+                "activo": True,
+            },
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-WEB-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("120.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_vista_web_ficha_digital_200_ok_y_template(self):
+        """GET /fincas/lotes/<codigo>/ficha/ responde 200 OK y usa templates/fincas/ficha_digital.html."""
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+        self.assertIn("ficha", response.context)
+        self.assertEqual(response.context["ficha"]["codigo"], "LOTE-WEB-001")
+
+        # Contenido renderizado en HTML
+        content = response.content.decode("utf-8")
+        self.assertIn("LOTE-WEB-001", content)
+        self.assertIn("Finca Web Test", content)
+        self.assertIn("Arboledas", content)
+        self.assertIn("Geisha Especial", content)
+
+    def test_vista_web_por_ruta_raiz_trazabilidad(self):
+        """GET /trazabilidad/lote/<codigo>/ responde igualmente 200 OK."""
+        url = reverse("trazabilidad_lote_publica_root", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+
+    def test_vista_web_lote_inexistente_retorna_404_con_template_error(self):
+        """GET /fincas/lotes/<codigo_no_existe>/ficha/ responde 404 y muestra ficha_digital_error.html."""
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": "NO-EXISTE-LOTE-404"})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTemplateUsed(response, "fincas/ficha_digital_error.html")
+        self.assertIn("NO-EXISTE-LOTE-404", response.content.decode("utf-8"))
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-171): VALIDACIÓN DE CONSISTENCIA Y COMPLETITUD DE DATOS
+# ==============================================================================
+
+class FichaDigitalConsistenciaCompletitudTests(TestCase):
+    """
+    Pruebas automatizadas para HU17-ST6 (SCRUM-171): Validar la consistencia y
+    completitud de los datos en la Ficha Digital Consolidada.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+
+        self.finca_completa = Finca.objects.create(
+            nombre="Finca Consistencia",
+            municipio=self.municipio,
+            vereda="Siravita",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.865432"),
+            longitud=Decimal("-72.765432"),
+        )
+        self.finca_sin_gps = Finca.objects.create(
+            nombre="Finca Sin Coordenadas",
+            municipio=self.municipio,
+            vereda="Centro",
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+        )
+
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Caturra",
+            defaults={"especie": "Arábica", "descripcion": "Variedad clásica"},
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="HONEY",
+            defaults={"nombre": "Honey Amarillo", "descripcion": "Secado con mucílago"},
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Lote en venta"},
+        )
+
+        self.cosecha_normal = Cosecha.objects.create(
+            finca=self.finca_completa,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("800.00"),
+        )
+        self.lote_normal = Lote.objects.create(
+            codigo="LOTE-CONSIST-01",
+            cosecha=self.cosecha_normal,
+            cantidad=Decimal("200.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_diagnostico_completitud_lote_base_sin_gps_ni_proceso(self):
+        """Un lote con solo datos base y sin georreferenciación debe tener 40% (Básica) y campos faltantes."""
+        cosecha_base = Cosecha.objects.create(
+            finca=self.finca_sin_gps,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 5),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("500.00"),
+        )
+        lote_base = Lote.objects.create(
+            codigo="LOTE-BASE-01",
+            cosecha=cosecha_base,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=None,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote_base)
+
+        self.assertEqual(ficha["completitud_porcentaje"], 40)
+        self.assertEqual(ficha["nivel_completitud"], "Básica")
+        self.assertEqual(ficha["color_nivel"], "secondary")
+        self.assertTrue(ficha["es_consistente"])
+        self.assertIn("Coordenadas GPS (WGS84) del predio", ficha["campos_faltantes"])
+        self.assertIn("Asignación de proceso de beneficio (Lavado, Honey, Natural)", ficha["campos_faltantes"])
+
+    def test_diagnostico_completitud_lote_con_geo_y_proceso(self):
+        """Un lote con GPS y proceso de beneficio alcanza 65% y Nivel Media."""
+        ficha = obtener_ficha_consolidada_lote(self.lote_normal)
+
+        self.assertEqual(ficha["completitud_porcentaje"], 65)
+        self.assertEqual(ficha["nivel_completitud"], "Media")
+        self.assertEqual(ficha["color_nivel"], "warning")
+        self.assertTrue(ficha["es_consistente"])
+        self.assertIn("Georreferenciación WGS84", ficha["campos_completos"])
+        self.assertIn("Proceso de Beneficio (Honey Amarillo)", ficha["campos_completos"])
+        self.assertIn("Registro de etapas operativas de beneficio (fermentación, secado)", ficha["campos_faltantes"])
+        self.assertIn("Análisis físico y sensorial de calidad SCA", ficha["campos_faltantes"])
+
+    def test_evaluacion_completitud_100_por_ciento(self):
+        """Prueba unitaria de evaluar_consistencia_y_completitud_lote con etapas y calidad simuladas."""
+        etapas_simuladas = [
+            {"etapa": "Despulpado", "duracion_horas": 2},
+            {"etapa": "Fermentación Honey", "duracion_horas": 24},
+        ]
+        calidad_simulada = {
+            "humedad_pct": Decimal("11.5"),
+            "puntaje_sca": Decimal("86.5"),
+            "notas_cata": "Panela, jazmín y frutas amarillas",
+        }
+
+        evaluacion = evaluar_consistencia_y_completitud_lote(
+            lote=self.lote_normal,
+            finca=self.finca_completa,
+            cosecha=self.cosecha_normal,
+            proceso=self.proceso,
+            etapas_beneficio=etapas_simuladas,
+            calidad_info=calidad_simulada,
+        )
+
+        self.assertEqual(evaluacion["porcentaje"], 100)
+        self.assertEqual(evaluacion["nivel"], "Completa")
+        self.assertEqual(evaluacion["color_nivel"], "success")
+        self.assertTrue(evaluacion["es_consistente"])
+        self.assertEqual(len(evaluacion["campos_faltantes"]), 0)
+        self.assertEqual(len(evaluacion["advertencias"]), 0)
+
+    def test_deteccion_inconsistencia_volumenes_cosecha(self):
+        """Detecta inconsistencia cuando cantidad_disponible supera la cantidad_total o el lote tiene volumen <= 0."""
+        # 1. Validación de lote con cantidad <= 0
+        lote_cero = Lote(
+            codigo="LOTE-CERO",
+            cosecha=self.cosecha_normal,
+            cantidad=Decimal("0.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+        )
+        evaluacion_cero = evaluar_consistencia_y_completitud_lote(
+            lote=lote_cero,
+            finca=self.finca_completa,
+            cosecha=self.cosecha_normal,
+            proceso=self.proceso,
+        )
+        self.assertFalse(evaluacion_cero["es_consistente"])
+        self.assertTrue(any("debe ser mayor a cero" in adv for adv in evaluacion_cero["advertencias"]))
+
+        # 2. Validación de cosecha con saldo superior al total
+        cosecha_desfasada = Cosecha(
+            finca=self.finca_completa,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("600.00"),
+        )
+        evaluacion_cosecha = evaluar_consistencia_y_completitud_lote(
+            lote=self.lote_normal,
+            finca=self.finca_completa,
+            cosecha=cosecha_desfasada,
+            proceso=self.proceso,
+        )
+        self.assertFalse(evaluacion_cosecha["es_consistente"])
+        self.assertTrue(any("supera la cantidad total" in adv for adv in evaluacion_cosecha["advertencias"]))
+
+    def test_deteccion_inconsistencia_coordenadas_fuera_de_colombia(self):
+        """Detecta inconsistencia cuando las coordenadas decimales están fuera del territorio nacional."""
+        finca_fuera_pais = Finca.objects.create(
+            nombre="Finca Fuera de Rango",
+            municipio=self.municipio,
+            productor_id=self.productor_uuid,
+            latitud=Decimal("45.000000"),   # Latitud europea/norteamericana
+            longitud=Decimal("10.000000"),  # Fuera de Colombia (-79 a -66.5)
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca_fuera_pais,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("500.00"),
+        )
+        lote = Lote.objects.create(
+            codigo="LOTE-INV-GPS",
+            cosecha=cosecha,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote)
+
+        self.assertFalse(ficha["es_consistente"])
+        self.assertTrue(any("fuera del territorio colombiano" in adv for adv in ficha["advertencias"]))
+
+    def test_diagnostico_consistencia_y_completitud_en_api_rest(self):
+        """Verifica que el endpoint REST exponga el diagnóstico de completitud y consistencia."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote_normal.codigo})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertIn("nivel_completitud", data)
+        self.assertEqual(data["nivel_completitud"], "Media")
+        self.assertIn("color_nivel", data)
+        self.assertEqual(data["color_nivel"], "warning")
+        self.assertIn("es_consistente", data)
+        self.assertTrue(data["es_consistente"])
+        self.assertIn("advertencias", data)
+        self.assertIn("campos_faltantes", data)
+        self.assertIn("campos_completos", data)
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-172): AUDITORÍA Y BITÁCORA DE LA FICHA DIGITAL
+# ==============================================================================
+
+class FichaDigitalAuditoriaTests(TestCase):
+    """
+    Pruebas automatizadas para HU17-ST7 (SCRUM-172): Registrar auditoría de
+    consultas y cambios en la Ficha Digital Consolidada.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+
+        self.finca = Finca.objects.create(
+            nombre="Finca Auditoria",
+            municipio=self.municipio,
+            vereda="Siravita",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.865432"),
+            longitud=Decimal("-72.765432"),
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Caturra",
+            defaults={"especie": "Arábica", "descripcion": "Variedad clásica"},
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={"nombre": "Lavado Tradicional", "descripcion": "Beneficio húmedo"},
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Lote en venta"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("800.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-AUDIT-01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("200.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_auditoria_registrada_al_consultar_vista_web(self):
+        """Al visitar la ficha digital en la web, se registra una entrada de CONSULTA_WEB en la bitácora."""
+        conteo_inicial = BitacoraFichaDigital.objects.filter(lote=self.lote).count()
+
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+
+        conteo_final = BitacoraFichaDigital.objects.filter(lote=self.lote).count()
+        self.assertEqual(conteo_final, conteo_inicial + 1)
+
+        auditoria = BitacoraFichaDigital.objects.filter(lote=self.lote).latest("creado_en")
+        self.assertEqual(auditoria.tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_WEB)
+        self.assertEqual(auditoria.usuario_identificador, "Público / Escaneo QR")
+        self.assertGreaterEqual(auditoria.completitud_porcentaje, 65)
+        self.assertTrue(auditoria.es_consistente)
+        self.assertEqual(auditoria.detalles.get("canal"), "web")
+
+    def test_auditoria_registrada_al_consultar_api_rest(self):
+        """Al consultar la ficha vía API REST (ej. app móvil / QR), se registra CONSULTA_API."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+
+        auditoria = BitacoraFichaDigital.objects.filter(
+            lote=self.lote,
+            tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API,
+        ).latest("creado_en")
+        self.assertIsNotNone(auditoria)
+        self.assertEqual(auditoria.detalles.get("canal"), "api_rest")
+
+    def test_auditoria_captura_usuario_en_sesion(self):
+        """Si un usuario autenticado consulta la ficha, se captura su identidad en la bitácora."""
+        _iniciar_sesion_productor(self.client, self.productor_uuid)
+
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+
+        auditoria = BitacoraFichaDigital.objects.filter(lote=self.lote).latest("creado_en")
+        self.assertIn(str(self.productor_uuid), auditoria.usuario_identificador)
+
+    def test_auditoria_captura_ip_y_user_agent(self):
+        """Verifica la persistencia de dirección IP y User-Agent en la auditoría."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(
+            url,
+            HTTP_X_FORWARDED_FOR="190.84.120.33",
+            HTTP_USER_AGENT="CaficultoresApp/1.0 (Mobile QR Reader)",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        auditoria = BitacoraFichaDigital.objects.filter(lote=self.lote).latest("creado_en")
+        self.assertEqual(auditoria.ip_address, "190.84.120.33")
+        self.assertEqual(auditoria.user_agent, "CaficultoresApp/1.0 (Mobile QR Reader)")
+
+    def test_servicio_registrar_auditoria_evento_actualizacion(self):
+        """Verifica el registro programático de eventos de actualización de trazabilidad."""
+        registro = registrar_auditoria_ficha_digital(
+            lote=self.lote,
+            tipo_evento=BitacoraFichaDigital.TIPO_ACTUALIZACION,
+            completitud_porcentaje=80,
+            es_consistente=True,
+            detalles={"cambio": "Asignación de etapa de secado"},
+            usuario_identificador="operario_beneficio@pergamo.com",
+        )
+
+        self.assertEqual(registro.tipo_evento, BitacoraFichaDigital.TIPO_ACTUALIZACION)
+        self.assertEqual(registro.usuario_identificador, "operario_beneficio@pergamo.com")
+        self.assertEqual(registro.completitud_porcentaje, 80)
+        self.assertEqual(registro.detalles.get("cambio"), "Asignación de etapa de secado")
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-173): PRUEBAS INTEGRALES DE GENERACIÓN Y ACTUALIZACIÓN (E2E)
+# ==============================================================================
+
+class FichaDigitalGeneracionActualizacionE2ETests(TestCase):
+    """
+    Pruebas integrales de punta a punta (E2E) para HU17-ST8 (SCRUM-173):
+    Validar la generación y actualización automática de la Ficha Digital
+    consolidada ante eventos de ciclo de vida del lote.
+
+    Criterio de Aceptación HU-17 (SCRUM-21):
+    'La ficha se actualiza automáticamente al registrarse nueva información del lote.'
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+
+        self.finca = Finca.objects.create(
+            nombre="Finca Trazabilidad E2E",
+            municipio=self.municipio,
+            vereda="El Porvenir",
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Borbón Rosado",
+            defaults={"especie": "Arábica", "descripcion": "Variedad exótica"},
+        )
+        self.proceso_lavado, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={"nombre": "Lavado Tradicional", "descripcion": "Fermentación estándar"},
+        )
+        self.proceso_natural, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="NATURAL",
+            defaults={"nombre": "Natural Clásico", "descripcion": "Secado en cereza entera"},
+        )
+        self.estado_disponible, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Listo para venta"},
+        )
+        self.estado_vendido, _ = EstadoLote.objects.get_or_create(
+            codigo="VENDIDO",
+            defaults={"nombre": "Vendido", "descripcion": "Lote adjudicado"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 10),
+            cantidad_total=Decimal("1500.00"),
+            cantidad_disponible=Decimal("1500.00"),
+            activo=True,
+        )
+
+    def test_generacion_automatica_inmediata_al_crear_lote_con_servicio(self):
+        """
+        Al registrar un nuevo lote mediante el servicio de negocio, la ficha digital
+        se genera de forma inmediata y automática, estando disponible tanto en API como en Web.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("350.00"),
+            codigo="LOTEE2EAUTO01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        # 1. Consulta directa al servicio de dominio
+        ficha = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha["codigo"], "LOTEE2EAUTO01")
+        self.assertEqual(ficha["cantidad_kg"], Decimal("350.00"))
+        self.assertEqual(ficha["proceso_beneficio"]["codigo"], "LAVADO")
+        self.assertEqual(ficha["url_publica"], "/trazabilidad/lote/LOTEE2EAUTO01/")
+
+        # 2. Consulta inmediata por API REST
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        self.assertEqual(resp_api.status_code, 200)
+        data_api = resp_api.json()
+        self.assertEqual(data_api["codigo"], "LOTEE2EAUTO01")
+        self.assertEqual(data_api["cantidad_kg"], "350.00")
+
+        # 3. Consulta inmediata por interfaz Web HTML
+        url_web = reverse("trazabilidad_lote_publica_root", kwargs={"codigo": lote.codigo})
+        resp_web = self.client.get(url_web)
+        self.assertEqual(resp_web.status_code, 200)
+        self.assertIn("LOTEE2EAUTO01", resp_web.content.decode("utf-8"))
+        self.assertIn("Finca Trazabilidad E2E", resp_web.content.decode("utf-8"))
+
+    def test_actualizacion_automatica_en_tiempo_real_por_mutacion_en_finca(self):
+        """
+        Criterio de Aceptación HU-17:
+        Al mutar datos del predio (georreferenciación GPS), la siguiente consulta
+        a la ficha digital refleja las nuevas coordenadas y eleva el porcentaje de completitud.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("200.00"),
+            codigo="LOTEE2EMUT01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        # Estado inicial: finca sin GPS (completitud base 40 + proceso 15 = 55%)
+        ficha_inicial = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertFalse(ficha_inicial["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(ficha_inicial["completitud_porcentaje"], 55)
+
+        # Mutación en la BD: Se agregan coordenadas GPS WGS84
+        self.finca.latitud = Decimal("7.865432")
+        self.finca.longitud = Decimal("-72.765432")
+        self.finca.save()
+
+        # Consulta inmediata: Reflejo en tiempo real (+10% georreferenciación = 65%)
+        ficha_actualizada = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertTrue(ficha_actualizada["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(ficha_actualizada["finca"]["latitud"], Decimal("7.865432"))
+        self.assertEqual(ficha_actualizada["finca"]["longitud"], Decimal("-72.765432"))
+        self.assertEqual(ficha_actualizada["completitud_porcentaje"], 65)
+
+        # Reflejo inmediato en la API REST pública
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        data_api = resp_api.json()
+        self.assertTrue(data_api["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(data_api["completitud_porcentaje"], 65)
+
+    def test_actualizacion_automatica_en_tiempo_real_por_cambio_de_estado_comercial(self):
+        """
+        Al cambiar el estado del lote de DISPONIBLE a VENDIDO, la ficha digital
+        actualiza automáticamente su estado comercial y disponibilidad para venta.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("300.00"),
+            codigo="LOTEE2EEST01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        ficha_inicial = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha_inicial["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha_inicial["disponible_para_venta"])
+
+        # Mutación de negocio: Lote vendido
+        lote.estado_lote = self.estado_vendido
+        lote.save()
+
+        # Consulta inmediata a la vista web pública
+        url_web = reverse("trazabilidad_lote_publica_root", kwargs={"codigo": lote.codigo})
+        resp_web = self.client.get(url_web)
+        self.assertEqual(resp_web.status_code, 200)
+        self.assertIn("Vendido", resp_web.content.decode("utf-8"))
+
+        # Consulta inmediata a la API
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        data_api = resp_api.json()
+        self.assertEqual(data_api["estado_comercial"], "VENDIDO")
+        self.assertFalse(data_api["disponible_para_venta"])
+
+    def test_actualizacion_automatica_por_reasignacion_de_proceso(self):
+        """
+        Al reasignar el proceso de beneficio del lote (ej. de Lavado a Natural),
+        la ficha digital refleja el nuevo proceso al instante.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("180.00"),
+            codigo="LOTEE2EPROC01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        ficha_lavado = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha_lavado["proceso_beneficio"]["codigo"], "LAVADO")
+
+        # Mutación de proceso a Natural
+        lote.proceso_beneficio = self.proceso_natural
+        lote.save()
+
+        ficha_natural = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha_natural["proceso_beneficio"]["codigo"], "NATURAL")
+        self.assertEqual(ficha_natural["proceso_beneficio"]["nombre"], "Natural Clásico")
+
+    def test_ciclo_completo_con_auditoria_y_consistencia(self):
+        """
+        Prueba el ciclo de vida completo: Creación de lote -> Consulta inicial ->
+        Actualización de datos -> Consulta posterior -> Verificación de bitácora cronológica.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("500.00"),
+            codigo="LOTEE2EAUD01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        # 1. Primera consulta por Web
+        url_web = reverse("lote_ficha_digital_web", kwargs={"codigo": lote.codigo})
+        self.client.get(url_web)
+
+        # 2. Mutación en el lote
+        lote.cantidad = Decimal("480.00")
+        lote.save()
+
+        # 3. Segunda consulta por API
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        self.assertEqual(resp_api.json()["cantidad_kg"], "480.00")
+
+        # 4. Verificación de bitácora
+        auditorias = list(BitacoraFichaDigital.objects.filter(lote=lote).order_by("creado_en"))
+        self.assertEqual(len(auditorias), 2)
+        self.assertEqual(auditorias[0].tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_WEB)
+        self.assertEqual(auditorias[1].tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_API)
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-170): CONSOLIDACIÓN DE DATOS DEL LOTE (ST5)
+# ==============================================================================
+
+class FichaDigitalConsolidacionDatosTests(TestCase):
+    """
+    Pruebas unitarias y de integración para HU17-ST5 (SCRUM-170):
+    Implementar la lógica de consolidación de datos del lote.
+
+    Verifica la orquestación multientidad en `obtener_ficha_consolidada_lote()`:
+    resolución polimórfica (instancia, código, PK), integración de datos de
+    finca, productor, cosecha, variedad, beneficio, estado y diagnóstico.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca La Consolidación",
+            municipio=self.municipio,
+            vereda="Siravita",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.812345"),
+            longitud=Decimal("-72.712345"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Geisha Dorado",
+            defaults={"especie": "Arábica", "descripcion": "Perfil floral y cítrico"},
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="HONEY",
+            defaults={"nombre": "Honey Amarillo", "descripcion": "Despulpado con mucílago"},
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible para Venta", "descripcion": "Lote apto"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 5),
+            cantidad_total=Decimal("1200.00"),
+            cantidad_disponible=Decimal("1200.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTECONSOLIDADO01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("400.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_consolidacion_multientidad_datos_completos(self):
+        """
+        SCRUM-170: Verifica que la función de dominio consolide correctamente
+        la información proveniente de Lote, Finca, Productor, Cosecha,
+        Variedad y Proceso en una sola estructura unificada.
+        """
+        ficha = obtener_ficha_consolidada_lote(self.lote)
+
+        # 1. Validación de campos del lote
+        self.assertEqual(ficha["id"], self.lote.id)
+        self.assertEqual(ficha["codigo"], "LOTECONSOLIDADO01")
+        self.assertEqual(ficha["cantidad_kg"], Decimal("400.00"))
+        self.assertTrue(ficha["activo"])
+
+        # 2. Validación de datos de finca y municipio
+        self.assertEqual(ficha["finca"]["id"], self.finca.id)
+        self.assertEqual(ficha["finca"]["nombre"], "Finca La Consolidación")
+        self.assertEqual(ficha["finca"]["municipio"], "Arboledas")
+        self.assertEqual(ficha["finca"]["departamento"], "Norte de Santander")
+        self.assertTrue(ficha["finca"]["tiene_georreferenciacion"])
+
+        # 3. Validación de cosecha y variedad botánica
+        self.assertEqual(ficha["cosecha"]["id"], self.cosecha.id)
+        self.assertEqual(ficha["cosecha"]["fecha_cosecha"], date(2026, 10, 5))
+        self.assertEqual(ficha["variedad"]["nombre"], "Geisha Dorado")
+        self.assertEqual(ficha["variedad"]["especie"], "Arábica")
+
+        # 4. Validación de proceso de beneficio
+        self.assertEqual(ficha["proceso_beneficio"]["codigo"], "HONEY")
+        self.assertEqual(ficha["proceso_beneficio"]["nombre"], "Honey Amarillo")
+
+        # 5. Validación de disponibilidad comercial y URL pública
+        self.assertEqual(ficha["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha["disponible_para_venta"])
+        self.assertEqual(ficha["url_publica"], "/trazabilidad/lote/LOTECONSOLIDADO01/")
+
+        # 6. Serialización formal con FichaDigitalSerializer
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(serializer.is_valid(), f"Errores en serializador: {serializer.errors}")
+
+    def test_resolucion_polimorfica_por_instancia_codigo_y_pk(self):
+        """
+        SCRUM-170: Comprueba que obtener_ficha_consolidada_lote resuelva
+        el lote indistintamente por instancia de modelo, código alfanumérico o ID numérico.
+        """
+        ficha_por_instancia = obtener_ficha_consolidada_lote(self.lote)
+        ficha_por_codigo = obtener_ficha_consolidada_lote("LOTECONSOLIDADO01")
+        ficha_por_pk_int = obtener_ficha_consolidada_lote(self.lote.pk)
+        ficha_por_pk_str = obtener_ficha_consolidada_lote(str(self.lote.pk))
+
+        self.assertEqual(ficha_por_instancia["id"], self.lote.id)
+        self.assertEqual(ficha_por_codigo["id"], self.lote.id)
+        self.assertEqual(ficha_por_pk_int["id"], self.lote.id)
+        self.assertEqual(ficha_por_pk_str["id"], self.lote.id)
+        self.assertEqual(ficha_por_codigo["codigo"], "LOTECONSOLIDADO01")
+
+    def test_consolidacion_con_lote_parcial(self):
+        """
+        SCRUM-170: Comprueba la consolidación resiliente cuando el lote carece
+        de proceso de beneficio o la finca carece de coordenadas GPS.
+        """
+        finca_sin_gps = Finca.objects.create(
+            nombre="Finca Sin Coordenadas",
+            municipio=self.municipio,
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        cosecha_parcial = Cosecha.objects.create(
+            finca=finca_sin_gps,
+            variedad=None,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("300.00"),
+            cantidad_disponible=Decimal("300.00"),
+            activo=True,
+        )
+        lote_parcial = Lote.objects.create(
+            codigo="LOTEPARCIAL01",
+            cosecha=cosecha_parcial,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=None,
+            estado_lote=None,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote_parcial)
+        self.assertFalse(ficha["finca"]["tiene_georreferenciacion"])
+        self.assertIsNone(ficha["finca"]["latitud"])
+        self.assertIsNone(ficha["proceso_beneficio"]["id"])
+        self.assertEqual(ficha["variedad"]["nombre"], "Mezcla tradicional / No especificada")
+
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(serializer.is_valid(), f"Errores en serialización parcial: {serializer.errors}")
+
+    def test_consolidacion_lote_inexistente_lanza_validation_error(self):
+        """
+        SCRUM-170: Comprueba que intentar consolidar un lote inexistente o
+        con identificador no válido dispare una excepción ValidationError amigable.
+        """
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote("LOTEINEXISTENTE999")
+
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote(99999999)
+
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote([])
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-166): MECANISMO DE ACTUALIZACIÓN EN TIEMPO REAL (ST1)
+# ==============================================================================
+
+class FichaDigitalActualizacionTiempoRealTests(TestCase):
+    """
+    Pruebas unitarias y de integración para HU17-ST1 (SCRUM-166):
+    Crear mecanismo de actualización automática en tiempo real.
+
+    Criterio de Aceptación HU-17 (SCRUM-21):
+    'La ficha se actualiza automáticamente al registrarse nueva información del lote.'
+
+    Verifica que la consolidación en tiempo de ejecución garantice cero persistencias
+    desfasadas ante mutaciones de volumen, estado comercial, proceso o finca.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca Tiempo Real",
+            municipio=self.municipio,
+            vereda="El Suspiro",
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Borbón Amarillo",
+            defaults={"especie": "Arábica", "descripcion": "Variedad dulce"},
+        )
+        self.proceso_lavado, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={"nombre": "Lavado Tradicional", "descripcion": "Fermentación estándar"},
+        )
+        self.proceso_natural, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="NATURAL",
+            defaults={"nombre": "Natural Clásico", "descripcion": "Secado en cereza"},
+        )
+        self.estado_disponible, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Apto para venta"},
+        )
+        self.estado_vendido, _ = EstadoLote.objects.get_or_create(
+            codigo="VENDIDO",
+            defaults={"nombre": "Vendido", "descripcion": "Lote adjudicado"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 12),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("1000.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTEREALTIME01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("250.00"),
+            proceso_beneficio=self.proceso_lavado,
+            estado_lote=self.estado_disponible,
+            activo=True,
+        )
+
+    def test_actualizacion_tiempo_real_mutacion_volumen_lote(self):
+        """
+        SCRUM-166: Al actualizar el volumen del lote, la siguiente consulta
+        a la ficha digital refleja el nuevo peso inmediatamente sin desfase temporal.
+        """
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_inicial["cantidad_kg"], Decimal("250.00"))
+
+        # Mutación directa de base de datos
+        self.lote.cantidad = Decimal("310.50")
+        self.lote.save(update_fields=["cantidad"])
+
+        # Reflejo inmediato en la siguiente consulta
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_actualizada["cantidad_kg"], Decimal("310.50"))
+
+    def test_actualizacion_tiempo_real_cambio_estado_disponible_a_vendido(self):
+        """
+        SCRUM-166: Al cambiar el estado de DISPONIBLE a VENDIDO, la ficha digital
+        actualiza automáticamente la disponibilidad comercial y la bandera disponible_para_venta.
+        """
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_inicial["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha_inicial["disponible_para_venta"])
+
+        # Transición de estado comercial
+        self.lote.estado_lote = self.estado_vendido
+        self.lote.save(update_fields=["estado_lote"])
+
+        # Reflejo inmediato
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_actualizada["estado_comercial"], "VENDIDO")
+        self.assertFalse(ficha_actualizada["disponible_para_venta"])
+
+    def test_actualizacion_tiempo_real_mutacion_datos_finca(self):
+        """
+        SCRUM-166: Al agregar coordenadas GPS a la finca asociada, la ficha digital
+        refleja al instante la georreferenciación y eleva la completitud.
+        """
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertFalse(ficha_inicial["finca"]["tiene_georreferenciacion"])
+
+        # Mutación en la finca
+        self.finca.latitud = Decimal("7.889900")
+        self.finca.longitud = Decimal("-72.778899")
+        self.finca.save(update_fields=["latitud", "longitud"])
+
+        # Reflejo instantáneo
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertTrue(ficha_actualizada["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(ficha_actualizada["finca"]["latitud"], Decimal("7.889900"))
+        self.assertEqual(ficha_actualizada["finca"]["longitud"], Decimal("-72.778899"))
+
+    def test_actualizacion_tiempo_real_reasignacion_proceso_beneficio(self):
+        """
+        SCRUM-166: Al reasignar el proceso de beneficio (Lavado -> Natural),
+        la ficha digital refleja el nuevo proceso al instante.
+        """
+        ficha_lavado = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_lavado["proceso_beneficio"]["codigo"], "LAVADO")
+
+        # Reasignación de proceso
+        self.lote.proceso_beneficio = self.proceso_natural
+        self.lote.save(update_fields=["proceso_beneficio"])
+
+        ficha_natural = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_natural["proceso_beneficio"]["codigo"], "NATURAL")
+        self.assertEqual(ficha_natural["proceso_beneficio"]["nombre"], "Natural Clásico")
+
+
+
+
+

@@ -20,7 +20,7 @@ urlpatterns = [
     path('registro/', views.registrar_finca_view, name='finca_registro'),
     path('mis-fincas/', views.mis_fincas_view, name='mis_fincas'),
 
-    # Interfaz Web de Cosechas y Lotes (HU-13 / HU-19)
+    # Interfaz Web de Cosechas y Lotes (HU-13 / HU-14 / HU-17 / HU-19)
     path('cosechas/registro/', views.registrar_cosecha_view, name='cosecha_registro'),
     path('lotes/registro/', views.registrar_lote_view, name='lote_registro'),
     path('mis-lotes/', views.mis_lotes_view, name='mis_lotes'),
@@ -28,6 +28,8 @@ urlpatterns = [
     path('lotes/<int:pk>/etapas/nueva/', views.registrar_etapa_beneficio_view, name='lote_etapa_registro'),
     path('lotes/<int:pk>/publicar/', views.publicar_lote_web_view, name='lote_publicar'),
     path('lotes/<int:pk>/despublicar/', views.despublicar_lote_web_view, name='lote_despublicar'),
+    path('lotes/<str:codigo>/ficha/', views.ficha_digital_web_view, name='lote_ficha_digital_web'),
+    path('trazabilidad/lote/<str:codigo>/', views.ficha_digital_web_view, name='trazabilidad_lote_publica'),
 
     # Interfaz Web de Catálogo de Municipios (HU-09 / SCRUM-111)
     path('municipios/', views.admin_municipios_view, name='admin_municipios'),
@@ -70,6 +72,10 @@ urlpatterns = [
         views.api_validar_publicacion_lote_view,
         name='api_lote_validar_publicacion',
     ),
+
+    # API REST de Ficha Digital Consolidada por Lote (HU-17 / SCRUM-167)
+    path('api/lotes/<str:codigo>/ficha/', views.api_consultar_ficha_digital_view, name='api_lote_ficha_digital'),
+    path('api/v1/lotes/<str:codigo>/ficha/', views.api_consultar_ficha_digital_view, name='api_v1_lote_ficha_digital'),
 
     # API REST pública del catálogo con filtros combinados (HU-20 / SCRUM-250)
     path('api/catalogo/', views.api_catalogo_view, name='api_catalogo'),

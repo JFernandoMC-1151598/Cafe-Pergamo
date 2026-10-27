@@ -45,6 +45,7 @@ from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
 from .forms import CosechaRegistroForm, EtapaBeneficioForm, FincaRegistroForm, FincaModelForm, LoteRegistroForm, MunicipioForm
 from .models import (
+    BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
     Cosecha,
@@ -56,10 +57,11 @@ from .models import (
 from .permissions import rol_puede_administrar_catalogos
 from .serializers import (
     BitacoraPublicacionLoteSerializer,
+    CaracteristicasCalidadSerializer,
     CatalogoLoteSerializer,
     CosechaCreateSerializer,
     CosechaSerializer,
-    CaracteristicasCalidadSerializer,
+    FichaDigitalSerializer,
     FincaGeorreferenciacionSerializer,
     LoteDespublicarInputSerializer,
     LotePublicarInputSerializer,
@@ -77,8 +79,10 @@ from .services import (
     generar_snapshot_trazabilidad,
     inactivar_municipio,
     normalizar_filtros_catalogo,
+    obtener_ficha_consolidada_lote,
     publicar_lote_en_catalogo,
     reactivar_municipio,
+    registrar_auditoria_ficha_digital,
     registrar_etapa_beneficio,
     toggle_estado_municipio,
     validar_lote_para_publicacion,
@@ -1086,6 +1090,116 @@ def mis_lotes_view(request):
     )
 
 
+# =============================================================================
+# API REST FICHA DIGITAL CONSOLIDADA POR LOTE (HU-17 / SCRUM-167)
+# =============================================================================
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_consultar_ficha_digital_view(request, codigo=None):
+    """
+    Endpoint REST para consultar la ficha digital consolidada de un lote (HU-17 / SCRUM-167).
+    GET /fincas/api/lotes/<str:codigo>/ficha/
+    GET /fincas/api/v1/lotes/<str:codigo>/ficha/
+
+    Permite consulta pública/semipública sin requerir token obligatorio,
+    habilitando el escaneo directo vía Código QR (HU-18) o catálogo público (HU-19).
+    """
+    if not codigo or not str(codigo).strip():
+        return Response(
+            {"error": "Debe especificar un código o identificador de lote válido."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    codigo_limpio = str(codigo).strip()
+    try:
+        ficha_data = obtener_ficha_consolidada_lote(codigo_limpio)
+    except ValidationError as exc:
+        msg = (
+            exc.message_dict.get("lote", ["Lote no encontrado"])[0]
+            if hasattr(exc, "message_dict") and "lote" in exc.message_dict
+            else str(exc)
+        )
+        return Response({"error": msg}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as exc:
+        return Response(
+            {"error": f"Error al procesar la ficha digital: {str(exc)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    serializer = FichaDigitalSerializer(data=ficha_data)
+    if not serializer.is_valid():
+        return Response(
+            {
+                "error": "Inconsistencia interna en los datos de la ficha consolidada.",
+                "detalles": serializer.errors,
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # Registrar auditoría de consulta API / QR (HU-17 / ST7 - SCRUM-172)
+    try:
+        lote_obj = Lote.objects.filter(id=ficha_data["id"]).first()
+        if lote_obj:
+            registrar_auditoria_ficha_digital(
+                lote=lote_obj,
+                tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API,
+                request=request,
+                completitud_porcentaje=ficha_data.get("completitud_porcentaje", 0),
+                es_consistente=ficha_data.get("es_consistente", True),
+                detalles={"canal": "api_rest", "ruta": request.path},
+            )
+    except Exception:
+        pass
+
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# =============================================================================
+# VISTA WEB FICHA DIGITAL CONSOLIDADA POR LOTE (HU-17 / SCRUM-168)
+# =============================================================================
+
+def ficha_digital_web_view(request, codigo=None):
+    """
+    Vista web pública / interactiva para visualizar la Ficha Digital Consolidada por Lote
+    (HU-17 / SCRUM-168).
+    Permite acceso abierto a cualquier interesado (con o sin sesión) que consulte
+    mediante enlace directo, navegación de catálogo (HU-19) o escaneo de Código QR (HU-18).
+    """
+    if not codigo or not str(codigo).strip():
+        return render(request, "fincas/ficha_digital_error.html", {"codigo": ""}, status=400)
+
+    codigo_limpio = str(codigo).strip()
+    try:
+        ficha = obtener_ficha_consolidada_lote(codigo_limpio)
+    except ValidationError:
+        return render(request, "fincas/ficha_digital_error.html", {"codigo": codigo_limpio}, status=404)
+    except Exception as exc:
+        return render(
+            request,
+            "fincas/ficha_digital_error.html",
+            {"codigo": codigo_limpio, "error_detalle": str(exc)},
+            status=500,
+        )
+
+    # Registrar auditoría de consulta Web / QR (HU-17 / ST7 - SCRUM-172)
+    try:
+        lote_obj = Lote.objects.filter(id=ficha["id"]).first()
+        if lote_obj:
+            registrar_auditoria_ficha_digital(
+                lote=lote_obj,
+                tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_WEB,
+                request=request,
+                completitud_porcentaje=ficha.get("completitud_porcentaje", 0),
+                es_consistente=ficha.get("es_consistente", True),
+                detalles={"canal": "web", "ruta": request.path},
+            )
+    except Exception:
+        pass
+
+    return render(request, "fincas/ficha_digital.html", {"ficha": ficha})
+
+
 def _resolver_usuario_correo(request) -> Optional[str]:
     """Resuelve el correo del usuario autenticado vía sesión o JWT."""
     correo_sesion = request.session.get("correo") or request.session.get("usuario_email")
@@ -1517,3 +1631,4 @@ def api_catalogo_view(request):
             MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO if filtros else MENSAJE_CATALOGO_VACIO
         )
     return Response(respuesta, status=status.HTTP_200_OK)
+
