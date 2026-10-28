@@ -16,6 +16,7 @@ Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
 físicas y de calidad del lote.
 Subtarea: SCRUM-148 / HU14-ST1: Diseñar la interfaz para capturar etapas de beneficio.
 Subtarea: SCRUM-149 / HU14-ST2: Mostrar el historial de beneficio del lote.
+Subtarea: SCRUM-150 / HU14-ST4: la vista usa services.registrar_etapa_beneficio.
 Nota: incluye también una vista de registro de cosechas, complemento necesario para
 poder usar el formulario de lotes de principio a fin (ver nota en fincas/forms.py).
 Nota: incluye además una vista de listado "Mis Lotes" con filtro por finca -- pedida
@@ -44,6 +45,7 @@ from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
 from .forms import CosechaRegistroForm, EtapaBeneficioForm, FincaRegistroForm, FincaModelForm, LoteRegistroForm, MunicipioForm
 from .models import (
+    BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
     Cosecha,
@@ -55,10 +57,11 @@ from .models import (
 from .permissions import rol_puede_administrar_catalogos
 from .serializers import (
     BitacoraPublicacionLoteSerializer,
+    CaracteristicasCalidadSerializer,
     CatalogoLoteSerializer,
     CosechaCreateSerializer,
     CosechaSerializer,
-    CaracteristicasCalidadSerializer,
+    FichaDigitalSerializer,
     FincaGeorreferenciacionSerializer,
     LoteDespublicarInputSerializer,
     LotePublicarInputSerializer,
@@ -76,8 +79,11 @@ from .services import (
     generar_snapshot_trazabilidad,
     inactivar_municipio,
     normalizar_filtros_catalogo,
+    obtener_ficha_consolidada_lote,
     publicar_lote_en_catalogo,
     reactivar_municipio,
+    registrar_auditoria_ficha_digital,
+    registrar_etapa_beneficio,
     toggle_estado_municipio,
     validar_lote_para_publicacion,
 )
@@ -1120,6 +1126,116 @@ def mis_lotes_view(request):
     )
 
 
+# =============================================================================
+# API REST FICHA DIGITAL CONSOLIDADA POR LOTE (HU-17 / SCRUM-167)
+# =============================================================================
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_consultar_ficha_digital_view(request, codigo=None):
+    """
+    Endpoint REST para consultar la ficha digital consolidada de un lote (HU-17 / SCRUM-167).
+    GET /fincas/api/lotes/<str:codigo>/ficha/
+    GET /fincas/api/v1/lotes/<str:codigo>/ficha/
+
+    Permite consulta pública/semipública sin requerir token obligatorio,
+    habilitando el escaneo directo vía Código QR (HU-18) o catálogo público (HU-19).
+    """
+    if not codigo or not str(codigo).strip():
+        return Response(
+            {"error": "Debe especificar un código o identificador de lote válido."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    codigo_limpio = str(codigo).strip()
+    try:
+        ficha_data = obtener_ficha_consolidada_lote(codigo_limpio)
+    except ValidationError as exc:
+        msg = (
+            exc.message_dict.get("lote", ["Lote no encontrado"])[0]
+            if hasattr(exc, "message_dict") and "lote" in exc.message_dict
+            else str(exc)
+        )
+        return Response({"error": msg}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as exc:
+        return Response(
+            {"error": f"Error al procesar la ficha digital: {str(exc)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    serializer = FichaDigitalSerializer(data=ficha_data)
+    if not serializer.is_valid():
+        return Response(
+            {
+                "error": "Inconsistencia interna en los datos de la ficha consolidada.",
+                "detalles": serializer.errors,
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # Registrar auditoría de consulta API / QR (HU-17 / ST7 - SCRUM-172)
+    try:
+        lote_obj = Lote.objects.filter(id=ficha_data["id"]).first()
+        if lote_obj:
+            registrar_auditoria_ficha_digital(
+                lote=lote_obj,
+                tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API,
+                request=request,
+                completitud_porcentaje=ficha_data.get("completitud_porcentaje", 0),
+                es_consistente=ficha_data.get("es_consistente", True),
+                detalles={"canal": "api_rest", "ruta": request.path},
+            )
+    except Exception:
+        pass
+
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# =============================================================================
+# VISTA WEB FICHA DIGITAL CONSOLIDADA POR LOTE (HU-17 / SCRUM-168)
+# =============================================================================
+
+def ficha_digital_web_view(request, codigo=None):
+    """
+    Vista web pública / interactiva para visualizar la Ficha Digital Consolidada por Lote
+    (HU-17 / SCRUM-168).
+    Permite acceso abierto a cualquier interesado (con o sin sesión) que consulte
+    mediante enlace directo, navegación de catálogo (HU-19) o escaneo de Código QR (HU-18).
+    """
+    if not codigo or not str(codigo).strip():
+        return render(request, "fincas/ficha_digital_error.html", {"codigo": ""}, status=400)
+
+    codigo_limpio = str(codigo).strip()
+    try:
+        ficha = obtener_ficha_consolidada_lote(codigo_limpio)
+    except ValidationError:
+        return render(request, "fincas/ficha_digital_error.html", {"codigo": codigo_limpio}, status=404)
+    except Exception as exc:
+        return render(
+            request,
+            "fincas/ficha_digital_error.html",
+            {"codigo": codigo_limpio, "error_detalle": str(exc)},
+            status=500,
+        )
+
+    # Registrar auditoría de consulta Web / QR (HU-17 / ST7 - SCRUM-172)
+    try:
+        lote_obj = Lote.objects.filter(id=ficha["id"]).first()
+        if lote_obj:
+            registrar_auditoria_ficha_digital(
+                lote=lote_obj,
+                tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_WEB,
+                request=request,
+                completitud_porcentaje=ficha.get("completitud_porcentaje", 0),
+                es_consistente=ficha.get("es_consistente", True),
+                detalles={"canal": "web", "ruta": request.path},
+            )
+    except Exception:
+        pass
+
+    return render(request, "fincas/ficha_digital.html", {"ficha": ficha})
+
+
 def _resolver_usuario_correo(request) -> Optional[str]:
     """Resuelve el correo del usuario autenticado vía sesión o JWT."""
     correo_sesion = request.session.get("correo") or request.session.get("usuario_email")
@@ -1341,7 +1457,7 @@ def detalle_lote_view(request, pk):
     lote = _obtener_lote_del_productor(productor_id, pk)
     # El orden cronológico lo define EtapaBeneficio.Meta.ordering; se
     # repite aquí para que el historial no dependa de un cambio en Meta.
-    etapas = lote.etapas_beneficio.order_by("fecha", "creado_en", "id")
+    etapas = lote.etapas_beneficio.filter(activo=True).order_by("fecha", "creado_en", "id")
 
     return render(
         request,
@@ -1370,19 +1486,38 @@ def registrar_etapa_beneficio_view(request, pk):
     if request.method == "POST":
         form = EtapaBeneficioForm(request.POST)
         if form.is_valid():
-            etapa = form.save(commit=False)
-            etapa.lote = lote
-            etapa.save()
-            messages.success(
+            try:
+                etapa = registrar_etapa_beneficio(
+                    lote_o_id=lote,
+                    etapa=form.cleaned_data["etapa"],
+                    fecha=form.cleaned_data["fecha"],
+                    observaciones=form.cleaned_data.get("observaciones", ""),
+                    productor_id=productor_id,
+                )
+            except ValidationError as exc:
+                # Igual que en registrar_lote_view: los errores de negocio
+                # del servicio se muestran como errores del formulario.
+                errores = exc.message_dict if hasattr(exc, "message_dict") else {"__all__": exc.messages}
+                for campo, lista_errores in errores.items():
+                    destino = campo if campo in form.fields else None
+                    for error in lista_errores:
+                        form.add_error(destino, error)
+                messages.error(
+                    request,
+                    "Por favor revise los errores señalados en el formulario antes de continuar."
+                )
+            else:
+                messages.success(
+                    request,
+                    f"Etapa '{etapa.get_etapa_display()}' registrada exitosamente "
+                    f"para el lote '{lote.codigo}'."
+                )
+                return redirect("lote_detalle", pk=lote.pk)
+        else:
+            messages.error(
                 request,
-                f"Etapa '{etapa.get_etapa_display()}' registrada exitosamente "
-                f"para el lote '{lote.codigo}'."
+                "Por favor revise los errores señalados en el formulario antes de continuar."
             )
-            return redirect("lote_detalle", pk=lote.pk)
-        messages.error(
-            request,
-            "Por favor revise los errores señalados en el formulario antes de continuar."
-        )
     else:
         form = EtapaBeneficioForm()
 
@@ -1532,3 +1667,4 @@ def api_catalogo_view(request):
             MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO if filtros else MENSAJE_CATALOGO_VACIO
         )
     return Response(respuesta, status=status.HTTP_200_OK)
+

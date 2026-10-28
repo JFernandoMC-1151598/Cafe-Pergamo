@@ -7,6 +7,7 @@ Subtarea: SCRUM-91 / HU06-ST3: Crear formulario de registro de finca(s) en la in
 Subtarea: SCRUM-89 / HU06-ST4: Validar campos obligatorios y consistencia de datos del registro.
 Subtarea: SCRUM-144 / HU13: Crear formulario o pantalla de registro de lotes.
 Subtarea: SCRUM-148 / HU14-ST1: Diseñar la interfaz para capturar etapas de beneficio.
+Subtarea: SCRUM-152 / HU14-ST3: Validar reglas de registro de etapas.
 Nota: para que ese formulario tenga cosechas entre las cuales elegir, también se agrega
 aquí un formulario de registro de cosechas (complemento necesario: ninguna subtarea de
 Jira lo pedía todavía, pero sin él el formulario de lotes no se puede usar de principio
@@ -20,6 +21,8 @@ from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from .models import Cosecha, EtapaBeneficio, Finca, Lote, Municipio
 
 from .validators import (
+    OBSERVACIONES_ETAPA_MAX,
+    validar_observaciones_etapa,
     validar_latitud,
     validar_longitud,
     validar_par_coordenadas,
@@ -646,9 +649,15 @@ class EtapaBeneficioForm(forms.ModelForm):
     observaciones = forms.CharField(
         required=False,
         label="Observaciones",
+        max_length=OBSERVACIONES_ETAPA_MAX,
+        validators=[validar_observaciones_etapa],
+        error_messages={
+            "max_length": f"Las observaciones no pueden superar {OBSERVACIONES_ETAPA_MAX} caracteres.",
+        },
         widget=forms.Textarea(attrs={
             "class": "form-control",
             "id": "id_observaciones",
+            "maxlength": str(OBSERVACIONES_ETAPA_MAX),
             "rows": 4,
             "placeholder": "Ej: Fermentación de 18 horas en tanque, temperatura ambiente 22 °C...",
         }),

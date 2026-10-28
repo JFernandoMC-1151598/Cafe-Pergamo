@@ -392,6 +392,104 @@ class CosechaCreateSerializer(serializers.Serializer):
     )
 
 
+# =============================================================================
+# SERIALIZADORES PARA FICHA DIGITAL CONSOLIDADA POR LOTE (HU-17 / SCRUM-169)
+# =============================================================================
+
+class FichaDigitalProductorSerializer(serializers.Serializer):
+    """Estructura serializada del productor de la finca en la ficha digital."""
+    id = serializers.CharField(allow_null=True, required=False)
+    nombre_completo = serializers.CharField()
+    correo = serializers.CharField(allow_null=True, required=False, allow_blank=True)
+    telefono = serializers.CharField(allow_null=True, required=False, allow_blank=True)
+    tipo_documento = serializers.CharField(allow_null=True, required=False, allow_blank=True)
+    numero_documento = serializers.CharField(allow_null=True, required=False, allow_blank=True)
+
+
+class FichaDigitalFincaSerializer(serializers.Serializer):
+    """Estructura serializada de la finca y georreferenciación en la ficha digital."""
+    id = serializers.IntegerField()
+    nombre = serializers.CharField()
+    vereda = serializers.CharField(allow_null=True, required=False, allow_blank=True)
+    municipio = serializers.CharField()
+    departamento = serializers.CharField()
+    latitud = serializers.DecimalField(max_digits=9, decimal_places=6, allow_null=True, required=False)
+    longitud = serializers.DecimalField(max_digits=9, decimal_places=6, allow_null=True, required=False)
+    tiene_georreferenciacion = serializers.BooleanField()
+
+
+class FichaDigitalCosechaSerializer(serializers.Serializer):
+    """Estructura serializada del origen agronómico y cosecha."""
+    id = serializers.IntegerField()
+    fecha_cosecha = serializers.DateField()
+    cantidad_total_cosecha = serializers.DecimalField(max_digits=10, decimal_places=2)
+    cantidad_disponible_cosecha = serializers.DecimalField(max_digits=10, decimal_places=2)
+
+
+class FichaDigitalVariedadSerializer(serializers.Serializer):
+    """Estructura serializada de la variedad botánica de café."""
+    id = serializers.IntegerField(allow_null=True, required=False)
+    nombre = serializers.CharField(allow_null=True, required=False)
+    especie = serializers.CharField(allow_null=True, required=False)
+    descripcion = serializers.CharField(allow_null=True, required=False, allow_blank=True)
+
+
+class FichaDigitalProcesoSerializer(serializers.Serializer):
+    """Estructura serializada del proceso de beneficio del café."""
+    id = serializers.IntegerField(allow_null=True, required=False)
+    codigo = serializers.CharField(allow_null=True, required=False)
+    nombre = serializers.CharField(allow_null=True, required=False)
+    descripcion = serializers.CharField(allow_null=True, required=False, allow_blank=True)
+
+
+class FichaDigitalEstadoSerializer(serializers.Serializer):
+    """Estructura serializada del estado de trazabilidad del lote."""
+    id = serializers.IntegerField(allow_null=True, required=False)
+    codigo = serializers.CharField(allow_null=True, required=False)
+    nombre = serializers.CharField(allow_null=True, required=False)
+    descripcion = serializers.CharField(allow_null=True, required=False, allow_blank=True)
+
+
+class FichaDigitalSerializer(serializers.Serializer):
+    """
+    Estructura consolidada de la Ficha Digital por Lote (HU-17 / SCRUM-169).
+    Define el contrato formal de datos para la visualización pública, consumo vía API
+    y enlace con el generador de Códigos QR (HU-18).
+    """
+    # Identificación del Lote
+    id = serializers.IntegerField()
+    codigo = serializers.CharField()
+    cantidad_kg = serializers.DecimalField(max_digits=10, decimal_places=2)
+    activo = serializers.BooleanField()
+    creado_en = serializers.DateTimeField()
+
+    # Módulos relacionales consolidados
+    productor = FichaDigitalProductorSerializer()
+    finca = FichaDigitalFincaSerializer()
+    cosecha = FichaDigitalCosechaSerializer()
+    variedad = FichaDigitalVariedadSerializer()
+    proceso_beneficio = FichaDigitalProcesoSerializer()
+    estado_lote = FichaDigitalEstadoSerializer()
+
+    # Secciones modulares y extensibles para HU-14 (Beneficio) y HU-15 (Calidad)
+    etapas_beneficio = serializers.ListField(child=serializers.DictField(), required=False, default=list)
+    calidad = serializers.DictField(allow_null=True, required=False, default=None)
+    estado_comercial = serializers.CharField(default="DISPONIBLE", required=False)
+    disponible_para_venta = serializers.BooleanField(default=True, required=False)
+
+    # Metadatos de navegación y trazabilidad
+    url_publica = serializers.CharField(required=False)
+    completitud_porcentaje = serializers.IntegerField(required=False, default=50)
+
+    # Diagnóstico de consistencia y completitud (HU-17 / ST6 - SCRUM-171)
+    nivel_completitud = serializers.CharField(required=False, default="Media")
+    color_nivel = serializers.CharField(required=False, default="warning")
+    es_consistente = serializers.BooleanField(required=False, default=True)
+    advertencias = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    campos_completos = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    campos_faltantes = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+
+
 class LotePublicarInputSerializer(serializers.Serializer):
     """
     Serializador de entrada para publicar un lote en el catálogo comercial (HU19-ST1 / SCRUM-239).

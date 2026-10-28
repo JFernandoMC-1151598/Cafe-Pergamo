@@ -146,8 +146,12 @@
                         {% endif %}
                     </td>
                     <td class="text-end">
-                        <!-- HU-14: historial y registro de etapas de beneficio del lote -->
+                        <!-- HU-17: Ficha Digital Consolidada -->
                         <div class="btn-group mb-1">
+                            <a href="{% url 'lote_ficha_digital_web' lote.codigo %}" class="btn btn-outline-pergamo btn-sm" target="_blank" title="Ver Ficha Digital Consolidada">
+                                <i class="bi bi-file-earmark-text me-1"></i>Ficha
+                            </a>
+                            <!-- HU-14: historial y registro de etapas de beneficio del lote -->
                             <a href="{% url 'lote_detalle' lote.id %}" class="btn btn-outline-secondary btn-sm" title="Ver historial de beneficio">
                                 <i class="bi bi-clock-history me-1"></i>Historial
                             </a>
