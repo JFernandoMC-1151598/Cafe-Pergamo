@@ -35,6 +35,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 
 from fincas.forms import (
+    CaracteristicasCalidadForm,
     CosechaRegistroForm,
     EtapaBeneficioForm,
     FincaModelForm,
@@ -3355,6 +3356,15 @@ class CaracteristicasCalidadApiTests(TestCase):
         )
         self.assertEqual(respuesta.status_code, 201, respuesta.content)
 
+    def test_administrador_puede_modificar_calidad(self):
+        respuesta = self.client.post(
+            self.url,
+            {"humedad": "12.00"},
+            content_type="application/json",
+            **self._quality_headers("ADMINISTRADOR"),
+        )
+        self.assertEqual(respuesta.status_code, 201, respuesta.content)
+
     def test_productor_ajeno_y_otro_rol_no_pueden_modificar(self):
         _iniciar_sesion_productor(self.client, uuid.uuid4())
         for role_code in ("PRODUCTOR", "COMPRADOR"):
@@ -3365,6 +3375,41 @@ class CaracteristicasCalidadApiTests(TestCase):
                 **self._quality_headers(role_code),
             )
             self.assertEqual(respuesta.status_code, 403)
+
+    def test_formulario_web_guarda_calidad_del_lote(self):
+        productor_id = self.lote.cosecha.finca.productor_id
+        _iniciar_sesion_productor(self.client, productor_id)
+        session = self.client.session
+        session["rol"] = "PRODUCTOR"
+        session.save()
+
+        respuesta = self.client.post(
+            reverse("lote_calidad", kwargs={"pk": self.lote.pk}),
+            {
+                "humedad": "12.25",
+                "merma": "1.50",
+                "puntaje_taza": "85.00",
+                "perfil_sensorial": "  Chocolate  ",
+                "observaciones": "  Registro web  ",
+            },
+        )
+        self.assertEqual(respuesta.status_code, 302)
+        calidad = CaracteristicasCalidad.objects.get(lote=self.lote)
+        self.assertEqual(calidad.humedad, Decimal("12.25"))
+        self.assertEqual(calidad.perfil_sensorial, "Chocolate")
+
+    def test_formulario_web_rechaza_usuario_sin_permiso(self):
+        _iniciar_sesion_productor(self.client, uuid.uuid4())
+        session = self.client.session
+        session["rol"] = "COMPRADOR"
+        session.save()
+        respuesta = self.client.get(reverse("lote_calidad", kwargs={"pk": self.lote.pk}))
+        self.assertEqual(respuesta.status_code, 403)
+
+    def test_formulario_expone_campos_de_calidad(self):
+        form = CaracteristicasCalidadForm()
+        for campo in ("humedad", "merma", "puntaje_taza", "perfil_sensorial", "observaciones"):
+            self.assertIn(campo, form.fields)
 
     def test_servicio_actualiza_y_puede_limpiar_un_campo_de_texto(self):
         registro = crear_caracteristicas_calidad(
@@ -6898,8 +6943,6 @@ class FichaDigitalActualizacionTiempoRealTests(TestCase):
         ficha_natural = obtener_ficha_consolidada_lote(self.lote.codigo)
         self.assertEqual(ficha_natural["proceso_beneficio"]["codigo"], "NATURAL")
         self.assertEqual(ficha_natural["proceso_beneficio"]["nombre"], "Natural Clásico")
-
-
 
 
 
