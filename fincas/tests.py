@@ -49,6 +49,7 @@ from fincas.models import (
     BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
+    CodigoQRLote,
     Cosecha,
     EtapaBeneficio,
     Finca,
@@ -73,12 +74,15 @@ from fincas.services import (
     publicar_lote_en_catalogo,
     registrar_etapa_beneficio,
     validar_lote_para_publicacion,
+    actualizar_visibilidad_codigo_qr,
+    asociar_codigo_qr_a_lote,
     construir_payload_qr_lote,
     extraer_codigo_lote_desde_qr,
     extraer_codigo_lote_normalizado,
     generar_identificador_qr_lote,
     generar_matriz_qr_lote,
     generar_qr_base64_lote,
+    obtener_codigo_qr_lote,
     obtener_estructura_qr_lote,
     validar_estructura_identificador_qr,
     PREFIJO_IDENTIFICADOR_QR,
@@ -7148,6 +7152,163 @@ class CodigoQREstructuraTests(TestCase):
 
         with self.assertRaises(ValidationError):
             generar_identificador_qr_lote(999999)  # ID inexistente
+
+
+# ==============================================================================
+# SUITE HU-18 / SCRUM-176: PERSISTIR ASOCIACIÓN ENTRE LOTE Y CÓDIGO QR
+# ==============================================================================
+
+class CodigoQRPersistenciaTests(TestCase):
+    """
+    Pruebas unitarias y de persistencia para HU18-ST5 (SCRUM-176):
+    Persistir la asociación entre lote y código QR.
+
+    Criterios de Aceptación HU-18:
+    1. El QR debe ser único por lote.
+    2. El QR debe respetar el nivel de visibilidad de la información (pública / privada).
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.first()
+
+        self.productor_uuid = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Hacienda El Cedral",
+            municipio=self.municipio,
+            vereda="La Esmeralda",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.315000"),
+            longitud=Decimal("-72.485000"),
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Geisha Especial", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="HONEY", nombre="Honey Dorado", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 9, 10),
+            cantidad_total=Decimal("3000.00"),
+            cantidad_disponible=Decimal("2500.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOT-QR-P01",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("800.00"),
+            activo=True,
+        )
+
+    def test_persistencia_asociacion_exitosa_uno_a_uno(self):
+        """Verifica que asociar_codigo_qr_a_lote persista correctamente en fincas_codigo_qr_lote."""
+        qr = asociar_codigo_qr_a_lote(
+            lote_o_id=self.lote,
+            nivel_visibilidad=VISIBILIDAD_QR_PUBLICA,
+        )
+
+        self.assertIsNotNone(qr.id)
+        self.assertEqual(qr.lote, self.lote)
+        self.assertEqual(qr.identificador, "QR-LOT-QR-P01")
+        self.assertEqual(qr.nivel_visibilidad, VISIBILIDAD_QR_PUBLICA)
+        self.assertEqual(qr.payload_url, f"/trazabilidad/lote/{self.lote.codigo}/")
+        self.assertTrue(qr.imagen_base64.startswith("data:image/png;base64,"))
+        self.assertTrue(qr.activo)
+
+        # Propiedades del modelo Lote
+        self.assertTrue(self.lote.tiene_codigo_qr)
+        self.assertEqual(self.lote.identificador_qr, "QR-LOT-QR-P01")
+        self.assertEqual(self.lote.codigo_qr, qr)
+
+    def test_unicidad_estricta_un_solo_qr_por_lote(self):
+        """Criterio de Aceptación 1: Unicidad estricta 1:1 en BD. Intentar crear un segundo QR para el mismo lote es rechazado."""
+        asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+
+        with self.assertRaises((IntegrityError, ValidationError)):
+            CodigoQRLote.objects.create(
+                lote=self.lote,
+                identificador="QR-LOT-OTRO-ID",
+                nivel_visibilidad=VISIBILIDAD_QR_PUBLICA,
+                payload_url=f"/trazabilidad/lote/{self.lote.codigo}/",
+            )
+
+    def test_unicidad_estricta_identificador_no_repetido_en_otros_lotes(self):
+        """Criterio de Aceptación 1: Dos lotes distintos no pueden tener el mismo identificador QR."""
+        asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+
+        lote2 = Lote.objects.create(
+            codigo="LOT-QR-P02",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("300.00"),
+            activo=True,
+        )
+
+        with self.assertRaises((IntegrityError, ValidationError)):
+            CodigoQRLote.objects.create(
+                lote=lote2,
+                identificador="QR-LOT-QR-P01",  # Identificador ya en uso por self.lote
+                nivel_visibilidad=VISIBILIDAD_QR_PUBLICA,
+                payload_url=f"/trazabilidad/lote/{lote2.codigo}/",
+            )
+
+    def test_idempotencia_asociar_codigo_qr(self):
+        """Verifica que invocar asociar_codigo_qr_a_lote múltiples veces no duplica filas y actualiza metadatos."""
+        qr1 = asociar_codigo_qr_a_lote(lote_o_id=self.lote, nivel_visibilidad=VISIBILIDAD_QR_PUBLICA)
+        self.assertEqual(CodigoQRLote.objects.filter(lote=self.lote).count(), 1)
+
+        # Segunda llamada cambiando visibilidad
+        qr2 = asociar_codigo_qr_a_lote(lote_o_id=self.lote, nivel_visibilidad=VISIBILIDAD_QR_PRIVADA)
+        self.assertEqual(CodigoQRLote.objects.filter(lote=self.lote).count(), 1)
+        self.assertEqual(qr1.id, qr2.id)
+        self.assertEqual(qr2.nivel_visibilidad, VISIBILIDAD_QR_PRIVADA)
+
+    def test_actualizar_visibilidad_codigo_qr(self):
+        """Criterio de Aceptación 2: Control de visibilidad pública/privada persistida en BD."""
+        qr = asociar_codigo_qr_a_lote(lote_o_id=self.lote, nivel_visibilidad=VISIBILIDAD_QR_PUBLICA)
+        self.assertEqual(qr.nivel_visibilidad, VISIBILIDAD_QR_PUBLICA)
+
+        # Actualizar a PRIVADA
+        actualizado = actualizar_visibilidad_codigo_qr(lote_o_id=self.lote, nuevo_nivel=VISIBILIDAD_QR_PRIVADA)
+        self.assertEqual(actualizado.nivel_visibilidad, VISIBILIDAD_QR_PRIVADA)
+
+        qr.refresh_from_db()
+        self.assertEqual(qr.nivel_visibilidad, VISIBILIDAD_QR_PRIVADA)
+
+        # Rechazar nivel desconocido
+        with self.assertRaises(ValidationError):
+            actualizar_visibilidad_codigo_qr(lote_o_id=self.lote, nuevo_nivel="SECRETO")
+
+    def test_obtener_codigo_qr_lote_servicio(self):
+        """Verifica la recuperación segura del objeto persistido CodigoQRLote."""
+        self.assertIsNone(obtener_codigo_qr_lote(self.lote))
+
+        qr_creado = asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+        qr_recuperado = obtener_codigo_qr_lote(self.lote)
+
+        self.assertIsNotNone(qr_recuperado)
+        self.assertEqual(qr_recuperado.id, qr_creado.id)
+        self.assertEqual(qr_recuperado.identificador, "QR-LOT-QR-P01")
+
+    def test_eliminacion_en_cascada_al_eliminar_lote(self):
+        """Verifica integridad referencial: al eliminarse el Lote, se elimina en cascada su CodigoQRLote."""
+        qr = asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+        qr_id = qr.id
+        self.assertTrue(CodigoQRLote.objects.filter(id=qr_id).exists())
+
+        self.lote.delete()
+        self.assertFalse(CodigoQRLote.objects.filter(id=qr_id).exists())
+
 
 
 

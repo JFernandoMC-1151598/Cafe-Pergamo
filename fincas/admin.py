@@ -9,6 +9,7 @@ from .models import (
     BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
+    CodigoQRLote,
     Cosecha,
     Finca,
     Lote,
@@ -122,4 +123,21 @@ class BitacoraFichaDigitalAdmin(admin.ModelAdmin):
         "detalles",
         "creado_en",
     )
+
+
+@admin.register(CodigoQRLote)
+class CodigoQRLoteAdmin(admin.ModelAdmin):
+    list_display = (
+        "identificador",
+        "lote",
+        "nivel_visibilidad",
+        "activo",
+        "creado_en",
+        "actualizado_en",
+    )
+    list_filter = ("nivel_visibilidad", "activo", "creado_en")
+    search_fields = ("identificador", "lote__codigo")
+    ordering = ("-creado_en",)
+    readonly_fields = ("identificador", "payload_url", "creado_en", "actualizado_en")
+
 

@@ -35,6 +35,7 @@ from .models import (
     BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
+    CodigoQRLote,
     Cosecha,
     EtapaBeneficio,
     Finca,
@@ -1563,4 +1564,87 @@ def obtener_estructura_qr_lote(
         "imagen_base64": imagen_base64,
         "creado_en": timezone.now(),
     }
+
+
+def asociar_codigo_qr_a_lote(
+    *,
+    lote_o_id: Union[Lote, int, str],
+    nivel_visibilidad: str = VISIBILIDAD_QR_PUBLICA,
+    regenerar_imagen: bool = False,
+    base_url: Optional[str] = None,
+) -> CodigoQRLote:
+    """
+    Persiste y asocia de forma única el código QR con el lote (HU18-ST5 / SCRUM-176).
+    - Unicidad: Cada lote posee como máximo un registro asociado (OneToOne).
+    - Nivel de visibilidad: Permite configurar si el acceso es público o privado.
+    - Idempotencia: Si ya existe un registro para el lote, actualiza sus metadatos sin duplicar.
+    """
+    with transaction.atomic():
+        lote = _resolver_lote(lote_o_id)
+
+        nivel_normalizado = (nivel_visibilidad or VISIBILIDAD_QR_PUBLICA).strip().upper()
+        if nivel_normalizado not in [VISIBILIDAD_QR_PUBLICA, VISIBILIDAD_QR_PRIVADA]:
+            raise ValidationError({
+                "nivel_visibilidad": f"Nivel de visibilidad '{nivel_visibilidad}' no válido. Opciones: {VISIBILIDAD_QR_PUBLICA}, {VISIBILIDAD_QR_PRIVADA}."
+            })
+
+        identificador = generar_identificador_qr_lote(lote)
+        payload_url = construir_payload_qr_lote(lote, base_url=base_url)
+
+        qr_existente = CodigoQRLote.objects.select_for_update().filter(lote=lote).first()
+        if qr_existente:
+            qr_existente.identificador = identificador
+            qr_existente.payload_url = payload_url
+            qr_existente.nivel_visibilidad = nivel_normalizado
+            if regenerar_imagen or not qr_existente.imagen_base64:
+                qr_existente.imagen_base64 = generar_qr_base64_lote(lote, base_url=base_url)
+            qr_existente.save()
+            return qr_existente
+
+        imagen_base64 = generar_qr_base64_lote(lote, base_url=base_url)
+        nuevo_qr = CodigoQRLote(
+            lote=lote,
+            identificador=identificador,
+            nivel_visibilidad=nivel_normalizado,
+            payload_url=payload_url,
+            imagen_base64=imagen_base64,
+            activo=True,
+        )
+        nuevo_qr.full_clean()
+        nuevo_qr.save()
+        return nuevo_qr
+
+
+def obtener_codigo_qr_lote(lote_o_id: Union[Lote, int, str]) -> Optional[CodigoQRLote]:
+    """
+    Recupera la entidad persistida de código QR asociada al lote, o None si aún no se ha generado.
+    """
+    lote = _resolver_lote(lote_o_id)
+    return CodigoQRLote.objects.filter(lote=lote).first()
+
+
+def actualizar_visibilidad_codigo_qr(
+    *,
+    lote_o_id: Union[Lote, int, str],
+    nuevo_nivel: str,
+) -> CodigoQRLote:
+    """
+    Actualiza el nivel de visibilidad (PUBLICA / PRIVADA) del código QR asociado al lote (HU18-ST4/ST5).
+    """
+    with transaction.atomic():
+        lote = _resolver_lote(lote_o_id)
+        nivel_normalizado = (nuevo_nivel or "").strip().upper()
+        if nivel_normalizado not in [VISIBILIDAD_QR_PUBLICA, VISIBILIDAD_QR_PRIVADA]:
+            raise ValidationError({
+                "nivel_visibilidad": f"Nivel de visibilidad '{nuevo_nivel}' no válido. Opciones permitidas: {VISIBILIDAD_QR_PUBLICA}, {VISIBILIDAD_QR_PRIVADA}."
+            })
+
+        qr_obj = CodigoQRLote.objects.select_for_update().filter(lote=lote).first()
+        if not qr_obj:
+            qr_obj = asociar_codigo_qr_a_lote(lote_o_id=lote, nivel_visibilidad=nivel_normalizado)
+        else:
+            qr_obj.nivel_visibilidad = nivel_normalizado
+            qr_obj.save(update_fields=["nivel_visibilidad", "actualizado_en"])
+        return qr_obj
+
 
