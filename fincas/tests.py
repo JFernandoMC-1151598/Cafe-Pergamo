@@ -16,6 +16,7 @@ Integración de:
 - HU-15-ST6 (SCRUM-159): Autorización de edición para productor dueño o catador.
 """
 
+import base64
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -72,8 +73,22 @@ from fincas.services import (
     publicar_lote_en_catalogo,
     registrar_etapa_beneficio,
     validar_lote_para_publicacion,
+    construir_payload_qr_lote,
+    extraer_codigo_lote_desde_qr,
+    extraer_codigo_lote_normalizado,
+    generar_identificador_qr_lote,
+    generar_matriz_qr_lote,
+    generar_qr_base64_lote,
+    obtener_estructura_qr_lote,
+    validar_estructura_identificador_qr,
+    PREFIJO_IDENTIFICADOR_QR,
+    VISIBILIDAD_QR_PUBLICA,
+    VISIBILIDAD_QR_PRIVADA,
 )
-from fincas.serializers import FichaDigitalSerializer
+from fincas.serializers import (
+    EstructuraCodigoQRSerializer,
+    FichaDigitalSerializer,
+)
 from fincas.views import (
     MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO,
     MENSAJE_CATALOGO_VACIO,
@@ -6968,5 +6983,171 @@ class FichaDigitalActualizacionTiempoRealTests(TestCase):
         ficha_natural = obtener_ficha_consolidada_lote(self.lote.codigo)
         self.assertEqual(ficha_natural["proceso_beneficio"]["codigo"], "NATURAL")
         self.assertEqual(ficha_natural["proceso_beneficio"]["nombre"], "Natural Clásico")
+
+
+# ==============================================================================
+# SUITE HU-18 / SCRUM-175: ESTRUCTURA Y GENERACIÓN DEL IDENTIFICADOR QR POR LOTE
+# ==============================================================================
+
+class CodigoQREstructuraTests(TestCase):
+    """
+    Pruebas unitarias para HU18-ST2 (SCRUM-175):
+    Definir la estructura y generación del identificador QR por lote.
+    """
+
+    def setUp(self):
+        # Usar Municipio precargado respetando los estándares de Café Pérgamo
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.first()
+
+        self.productor_uuid = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Hacienda Santa Bárbara",
+            municipio=self.municipio,
+            vereda="El Suspiro",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.310123"),
+            longitud=Decimal("-72.483120"),
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo Típico", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO", nombre="Lavado Tradicional", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 8, 15),
+            cantidad_total=Decimal("2000.00"),
+            cantidad_disponible=Decimal("1500.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOT-QR-001",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("500.00"),
+            activo=True,
+        )
+
+    def test_generar_identificador_qr_formato_canonico(self):
+        """Verifica que el identificador siga la estructura 'QR-<CODIGO>' y sea único y determinista."""
+        identificador = generar_identificador_qr_lote(self.lote)
+        self.assertEqual(identificador, "QR-LOT-QR-001")
+        self.assertTrue(identificador.startswith(PREFIJO_IDENTIFICADOR_QR))
+        self.assertTrue(validar_estructura_identificador_qr(identificador))
+
+    def test_resolucion_polimorfica_identificador_qr(self):
+        """Verifica que generar_identificador_qr_lote resuelva por instancia Lote, por ID numérico y por código string."""
+        id_por_instancia = generar_identificador_qr_lote(self.lote)
+        id_por_pk = generar_identificador_qr_lote(self.lote.pk)
+        id_por_codigo = generar_identificador_qr_lote("LOT-QR-001")
+        id_por_identificador_previo = generar_identificador_qr_lote("QR-LOT-QR-001")
+
+        self.assertEqual(id_por_instancia, "QR-LOT-QR-001")
+        self.assertEqual(id_por_pk, "QR-LOT-QR-001")
+        self.assertEqual(id_por_codigo, "QR-LOT-QR-001")
+        self.assertEqual(id_por_identificador_previo, "QR-LOT-QR-001")
+
+    def test_validar_estructura_identificador_qr_y_extraccion(self):
+        """Comprueba validación sintáctica de identificadores QR y extracción limpia del código."""
+        self.assertTrue(validar_estructura_identificador_qr("QR-LOT-2026-001"))
+        self.assertTrue(validar_estructura_identificador_qr("QR-ABC_123"))
+        self.assertFalse(validar_estructura_identificador_qr("LOT-2026-001"))  # Falta prefijo
+        self.assertFalse(validar_estructura_identificador_qr("QR-"))  # Vacío
+        self.assertFalse(validar_estructura_identificador_qr("QR-LOT 001"))  # Espacio inválido
+        self.assertFalse(validar_estructura_identificador_qr(""))  # Vacío total
+        self.assertFalse(validar_estructura_identificador_qr(None))
+
+        # Extracción
+        codigo = extraer_codigo_lote_desde_qr("QR-LOT-QR-001")
+        self.assertEqual(codigo, "LOT-QR-001")
+
+        with self.assertRaises(ValidationError):
+            extraer_codigo_lote_desde_qr("INVALID-FORMAT")
+
+    def test_construir_payload_qr_relativo_y_absoluto(self):
+        """Verifica que el payload codificado corresponda a la URL de consulta de la ficha digital."""
+        payload_relativo = construir_payload_qr_lote(self.lote)
+        self.assertEqual(payload_relativo, f"/trazabilidad/lote/{self.lote.codigo}/")
+
+        payload_absoluto = construir_payload_qr_lote(self.lote, base_url="https://cafepergamo.com")
+        self.assertEqual(payload_absoluto, f"https://cafepergamo.com/trazabilidad/lote/{self.lote.codigo}/")
+
+    def test_generar_matriz_qr_png_valido(self):
+        """Comprueba que la generación retorne bytes binarios válidos de una imagen PNG con encabezado mágico."""
+        png_bytes = generar_matriz_qr_lote(self.lote)
+        self.assertIsInstance(png_bytes, bytes)
+        self.assertGreater(len(png_bytes), 100)
+        # Encabezado mágico PNG: 0x89 'P' 'N' 'G' '\r' '\n' 0x1A '\n'
+        self.assertTrue(png_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_generar_qr_base64_data_uri(self):
+        """Verifica que el generador base64 retorne un Data URI válido utilizable en HTML."""
+        data_uri = generar_qr_base64_lote(self.lote)
+        self.assertIsInstance(data_uri, str)
+        self.assertTrue(data_uri.startswith("data:image/png;base64,"))
+
+        # Decodificar y verificar consistencia de bytes
+        b64_content = data_uri.split("data:image/png;base64,")[1]
+        decoded = base64.b64decode(b64_content)
+        self.assertTrue(decoded.startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_obtener_estructura_qr_lote_y_serializador_dto(self):
+        """Verifica que la función orquestadora entregue el DTO completo y pase la validación del serializador DRF."""
+        estructura = obtener_estructura_qr_lote(
+            self.lote,
+            base_url="https://cafepergamo.com",
+            nivel_visibilidad="PUBLICA",
+            incluir_imagen_base64=True,
+        )
+
+        self.assertEqual(estructura["identificador_qr"], "QR-LOT-QR-001")
+        self.assertEqual(estructura["lote_codigo"], "LOT-QR-001")
+        self.assertEqual(estructura["lote_id"], self.lote.id)
+        self.assertEqual(estructura["payload_url"], f"/trazabilidad/lote/{self.lote.codigo}/")
+        self.assertEqual(estructura["url_absoluta"], f"https://cafepergamo.com/trazabilidad/lote/{self.lote.codigo}/")
+        self.assertEqual(estructura["nivel_visibilidad"], "PUBLICA")
+        self.assertEqual(estructura["version_qr"], "1.0")
+        self.assertEqual(estructura["formato"], "PNG")
+        self.assertTrue(estructura["imagen_base64"].startswith("data:image/png;base64,"))
+
+        # Validación formal del serializador DRF
+        serializer = EstructuraCodigoQRSerializer(data=estructura)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        datos_validados = serializer.validated_data
+        self.assertEqual(datos_validados["identificador_qr"], "QR-LOT-QR-001")
+        self.assertEqual(datos_validados["nivel_visibilidad"], "PUBLICA")
+
+    def test_control_visibilidad_opciones_permitidas_y_rechazo_invalidas(self):
+        """Verifica el soporte para niveles PUBLICA y PRIVADA y el rechazo de valores desconocidos."""
+        est_pub = obtener_estructura_qr_lote(self.lote, nivel_visibilidad="PUBLICA", incluir_imagen_base64=False)
+        self.assertEqual(est_pub["nivel_visibilidad"], "PUBLICA")
+
+        est_priv = obtener_estructura_qr_lote(self.lote, nivel_visibilidad="PRIVADA", incluir_imagen_base64=False)
+        self.assertEqual(est_priv["nivel_visibilidad"], "PRIVADA")
+
+        with self.assertRaises(ValidationError) as ctx:
+            obtener_estructura_qr_lote(self.lote, nivel_visibilidad="CONFIDENCIAL")
+        self.assertIn("nivel_visibilidad", ctx.exception.message_dict)
+
+    def test_error_al_solicitar_qr_de_lote_inexistente_o_codigo_vacio(self):
+        """Comprueba captura adecuada de excepciones ante lotes inexistentes o códigos vacíos."""
+        with self.assertRaises(ValidationError):
+            generar_identificador_qr_lote("")
+
+        with self.assertRaises(ValidationError):
+            generar_identificador_qr_lote("   ")
+
+        with self.assertRaises(ValidationError):
+            generar_identificador_qr_lote(999999)  # ID inexistente
+
 
 
