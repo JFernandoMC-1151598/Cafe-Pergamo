@@ -5780,6 +5780,31 @@ class FichaDigitalStructureTests(TestCase):
         self.assertEqual(ficha_por_instancia["codigo"], ficha_por_codigo["codigo"])
         self.assertEqual(ficha_por_codigo["codigo"], ficha_por_pk["codigo"])
 
+    def test_ficha_digital_muestra_caracteristicas_de_calidad_hu15(self):
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            humedad=Decimal("11.50"),
+            merma=Decimal("2.00"),
+            puntaje_taza=Decimal("86.50"),
+            perfil_sensorial="Chocolate y frutos rojos",
+            observaciones="Evaluación de laboratorio",
+        )
+
+        ficha = obtener_ficha_consolidada_lote(self.lote)
+
+        self.assertEqual(ficha["calidad"]["humedad"], Decimal("11.50"))
+        self.assertEqual(ficha["calidad"]["merma"], Decimal("2.00"))
+        self.assertEqual(ficha["calidad"]["puntaje_taza"], Decimal("86.50"))
+        self.assertEqual(ficha["calidad"]["perfil_sensorial"], "Chocolate y frutos rojos")
+
+        respuesta = self.client.get(
+            reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        contenido = respuesta.content.decode()
+        self.assertIn("86.50", contenido)
+        self.assertIn("Chocolate y frutos rojos", contenido)
+
     def test_actualizacion_automatica_en_tiempo_real(self):
         """
         Criterio de aceptación HU-17:
@@ -6943,6 +6968,5 @@ class FichaDigitalActualizacionTiempoRealTests(TestCase):
         ficha_natural = obtener_ficha_consolidada_lote(self.lote.codigo)
         self.assertEqual(ficha_natural["proceso_beneficio"]["codigo"], "NATURAL")
         self.assertEqual(ficha_natural["proceso_beneficio"]["nombre"], "Natural Clásico")
-
 
 
