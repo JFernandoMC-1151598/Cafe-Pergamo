@@ -724,17 +724,23 @@ def obtener_ficha_consolidada_lote(lote_identificador: Union[Lote, int, str]) ->
                 "temperatura": getattr(etapa, "temperatura", None),
             })
 
-    # 8. Módulo extensible para HU-15 (Calidad Sensorial y Física - Alessandro Reyes)
+    # 8. Características físicas y sensoriales de HU-15
     calidad_info = None
-    if hasattr(lote, "calidad") and getattr(lote, "calidad", None):
-        c = lote.calidad
+    try:
+        c = lote.caracteristicas_calidad
+    except CaracteristicasCalidad.DoesNotExist:
+        c = None
+    if c:
         calidad_info = {
-            "humedad_pct": getattr(c, "humedad_pct", None),
-            "factor_rendimiento": getattr(c, "factor_rendimiento", None),
-            "defectos_totales": getattr(c, "defectos_totales", None),
-            "puntaje_sca": getattr(c, "puntaje_sca", None),
-            "notas_cata": getattr(c, "notas_cata", None),
-            "perfil_taza": getattr(c, "perfil_taza", None),
+            "humedad": c.humedad,
+            "merma": c.merma,
+            "puntaje_taza": c.puntaje_taza,
+            "perfil_sensorial": c.perfil_sensorial,
+            "observaciones": c.observaciones,
+            # Aliases conservados para consumidores anteriores de la ficha.
+            "humedad_pct": c.humedad,
+            "puntaje_sca": c.puntaje_taza,
+            "perfil_taza": c.perfil_sensorial,
         }
 
     # 9. Evaluación de Consistencia y Completitud (HU-17 / ST6 - SCRUM-171)

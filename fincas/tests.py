@@ -13,6 +13,7 @@ Integración de:
   cosechas (complemento) y de lotes (SCRUM-144); y cobertura de pruebas de código único, restricción de
   cantidad y flujo exitoso de registro (ST6 / SCRUM-147).
 - HU-15-ST1 (SCRUM-155): Persistencia API de características físicas y de calidad del lote.
+- HU-15-ST6 (SCRUM-159): Autorización de edición para productor dueño o catador.
 """
 
 import uuid
@@ -34,6 +35,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 
 from fincas.forms import (
+    CaracteristicasCalidadForm,
     CosechaRegistroForm,
     EtapaBeneficioForm,
     FincaModelForm,
@@ -3244,6 +3246,13 @@ class CaracteristicasCalidadApiTests(TestCase):
         self.url = reverse("api_lote_calidad", kwargs={"lote_id": self.lote.pk})
         self.client = Client()
 
+    def _quality_headers(self, role_code="CATADOR"):
+        user = User.objects.create_user(username=f"calidad_{uuid.uuid4().hex[:8]}")
+        token = AccessToken.for_user(user)
+        token["role_code"] = role_code
+        token["email"] = f"{user.username}@test.local"
+        return {"HTTP_AUTHORIZATION": f"Bearer {token}"}
+
     def test_crea_consulta_y_actualiza_caracteristicas(self):
         datos = {
             "humedad": "11.50",
@@ -3256,14 +3265,14 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             datos,
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 201, respuesta.content)
         self.assertIn("lote_id", respuesta.json(), respuesta.content)
         self.assertEqual(respuesta.json()["lote_id"], self.lote.pk)
         self.assertEqual(respuesta.json()["puntaje_taza"], "84.50")
 
-        consulta = self.client.get(self.url, **_jwt_bearer_headers())
+        consulta = self.client.get(self.url, **self._quality_headers("PRODUCTOR"))
         self.assertEqual(consulta.status_code, 200)
         self.assertEqual(consulta.json()["lote_codigo"], "CALIDAD01")
 
@@ -3271,7 +3280,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"puntaje_taza": "86.00"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(actualizacion.status_code, 200)
         self.assertEqual(actualizacion.json()["puntaje_taza"], "86.00")
@@ -3283,7 +3292,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"humedad": "12.00"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn("lote", respuesta.json())
@@ -3293,7 +3302,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"puntaje_taza": "101.00"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn("puntaje_taza", respuesta.json())
@@ -3304,7 +3313,7 @@ class CaracteristicasCalidadApiTests(TestCase):
                 self.url,
                 {campo: valor},
                 content_type="application/json",
-                **_jwt_bearer_headers(),
+                **self._quality_headers(),
             )
             self.assertEqual(respuesta.status_code, 400)
             self.assertIn(campo, respuesta.json())
@@ -3314,7 +3323,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"humedad": "once coma cinco"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn("humedad", respuesta.json())
@@ -3330,11 +3339,77 @@ class CaracteristicasCalidadApiTests(TestCase):
                 "observaciones": "  Muestra válida  ",
             },
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 201, respuesta.content)
         self.assertEqual(respuesta.json()["perfil_sensorial"], "Chocolate")
         self.assertEqual(respuesta.json()["observaciones"], "Muestra válida")
+
+    def test_productor_dueno_puede_modificar_con_sesion(self):
+        productor_id = self.lote.cosecha.finca.productor_id
+        _iniciar_sesion_productor(self.client, productor_id)
+        respuesta = self.client.post(
+            self.url,
+            {"humedad": "12.00"},
+            content_type="application/json",
+            **self._quality_headers("PRODUCTOR"),
+        )
+        self.assertEqual(respuesta.status_code, 201, respuesta.content)
+
+    def test_administrador_puede_modificar_calidad(self):
+        respuesta = self.client.post(
+            self.url,
+            {"humedad": "12.00"},
+            content_type="application/json",
+            **self._quality_headers("ADMINISTRADOR"),
+        )
+        self.assertEqual(respuesta.status_code, 201, respuesta.content)
+
+    def test_productor_ajeno_y_otro_rol_no_pueden_modificar(self):
+        _iniciar_sesion_productor(self.client, uuid.uuid4())
+        for role_code in ("PRODUCTOR", "COMPRADOR"):
+            respuesta = self.client.post(
+                self.url,
+                {"humedad": "12.00"},
+                content_type="application/json",
+                **self._quality_headers(role_code),
+            )
+            self.assertEqual(respuesta.status_code, 403)
+
+    def test_formulario_web_guarda_calidad_del_lote(self):
+        productor_id = self.lote.cosecha.finca.productor_id
+        _iniciar_sesion_productor(self.client, productor_id)
+        session = self.client.session
+        session["rol"] = "PRODUCTOR"
+        session.save()
+
+        respuesta = self.client.post(
+            reverse("lote_calidad", kwargs={"pk": self.lote.pk}),
+            {
+                "humedad": "12.25",
+                "merma": "1.50",
+                "puntaje_taza": "85.00",
+                "perfil_sensorial": "  Chocolate  ",
+                "observaciones": "  Registro web  ",
+            },
+        )
+        self.assertEqual(respuesta.status_code, 302)
+        calidad = CaracteristicasCalidad.objects.get(lote=self.lote)
+        self.assertEqual(calidad.humedad, Decimal("12.25"))
+        self.assertEqual(calidad.perfil_sensorial, "Chocolate")
+
+    def test_formulario_web_rechaza_usuario_sin_permiso(self):
+        _iniciar_sesion_productor(self.client, uuid.uuid4())
+        session = self.client.session
+        session["rol"] = "COMPRADOR"
+        session.save()
+        respuesta = self.client.get(reverse("lote_calidad", kwargs={"pk": self.lote.pk}))
+        self.assertEqual(respuesta.status_code, 403)
+
+    def test_formulario_expone_campos_de_calidad(self):
+        form = CaracteristicasCalidadForm()
+        for campo in ("humedad", "merma", "puntaje_taza", "perfil_sensorial", "observaciones"):
+            self.assertIn(campo, form.fields)
 
     def test_servicio_actualiza_y_puede_limpiar_un_campo_de_texto(self):
         registro = crear_caracteristicas_calidad(
@@ -5705,6 +5780,31 @@ class FichaDigitalStructureTests(TestCase):
         self.assertEqual(ficha_por_instancia["codigo"], ficha_por_codigo["codigo"])
         self.assertEqual(ficha_por_codigo["codigo"], ficha_por_pk["codigo"])
 
+    def test_ficha_digital_muestra_caracteristicas_de_calidad_hu15(self):
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            humedad=Decimal("11.50"),
+            merma=Decimal("2.00"),
+            puntaje_taza=Decimal("86.50"),
+            perfil_sensorial="Chocolate y frutos rojos",
+            observaciones="Evaluación de laboratorio",
+        )
+
+        ficha = obtener_ficha_consolidada_lote(self.lote)
+
+        self.assertEqual(ficha["calidad"]["humedad"], Decimal("11.50"))
+        self.assertEqual(ficha["calidad"]["merma"], Decimal("2.00"))
+        self.assertEqual(ficha["calidad"]["puntaje_taza"], Decimal("86.50"))
+        self.assertEqual(ficha["calidad"]["perfil_sensorial"], "Chocolate y frutos rojos")
+
+        respuesta = self.client.get(
+            reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        contenido = respuesta.content.decode()
+        self.assertIn("86.50", contenido)
+        self.assertIn("Chocolate y frutos rojos", contenido)
+
     def test_actualizacion_automatica_en_tiempo_real(self):
         """
         Criterio de aceptación HU-17:
@@ -6868,8 +6968,5 @@ class FichaDigitalActualizacionTiempoRealTests(TestCase):
         ficha_natural = obtener_ficha_consolidada_lote(self.lote.codigo)
         self.assertEqual(ficha_natural["proceso_beneficio"]["codigo"], "NATURAL")
         self.assertEqual(ficha_natural["proceso_beneficio"]["nombre"], "Natural Clásico")
-
-
-
 
 

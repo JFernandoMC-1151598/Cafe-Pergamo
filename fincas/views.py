@@ -43,7 +43,15 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
-from .forms import CosechaRegistroForm, EtapaBeneficioForm, FincaRegistroForm, FincaModelForm, LoteRegistroForm, MunicipioForm
+from .forms import (
+    CaracteristicasCalidadForm,
+    CosechaRegistroForm,
+    EtapaBeneficioForm,
+    FincaRegistroForm,
+    FincaModelForm,
+    LoteRegistroForm,
+    MunicipioForm,
+)
 from .models import (
     BitacoraFichaDigital,
     BitacoraPublicacionLote,
@@ -126,6 +134,39 @@ def _resolver_productor_id(request):
             return str(usuario.id)
 
     return None
+
+
+def _puede_modificar_calidad(request, lote) -> bool:
+    """
+    Autoriza cambios de calidad al catador, al administrador o al productor
+    dueño del lote.
+
+    El código de rol proviene del JWT; la propiedad se valida contra el
+    productor de la finca y nunca contra un identificador enviado en el body.
+    """
+    token = getattr(request, "auth", None)
+    role_code = ""
+    if token is not None:
+        role_code = (token.get("role_code", "") or "").upper()
+    if not role_code:
+        role_code = (request.session.get("rol", "") or "").upper()
+
+    if role_code in {"CATADOR", "ADMINISTRADOR", "ADMIN"}:
+        return True
+
+    if role_code != "PRODUCTOR":
+        return False
+
+    productor_id = request.session.get("usuario_id")
+    if productor_id:
+        return str(productor_id) == str(lote.cosecha.finca.productor_id)
+
+    correo = token.get("email", "") if token is not None else ""
+    if not correo:
+        return False
+
+    perfil = Usuario.objects.filter(correo__iexact=correo).first()
+    return bool(perfil and str(perfil.id) == str(lote.cosecha.finca.productor_id))
 
 
 def registrar_finca_view(request):
@@ -845,6 +886,12 @@ def api_caracteristicas_calidad_view(request, lote_id):
             )
         return Response(CaracteristicasCalidadSerializer(caracteristicas).data)
 
+    if not _puede_modificar_calidad(request, lote):
+        return Response(
+            {"detail": "Solo el productor dueño del lote o un catador puede modificar su información de calidad."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
     if request.method == "POST":
         if caracteristicas is not None:
             return Response(
@@ -1430,6 +1477,40 @@ def detalle_lote_view(request, pk):
     )
 
 
+def registrar_calidad_lote_view(request, pk):
+    """Formulario web para crear o editar la calidad de un lote (HU15-ST2)."""
+    productor_id = _resolver_productor_id(request)
+    if not productor_id and not request.session.get("rol"):
+        messages.error(request, "Debe iniciar sesión para registrar la calidad del lote.")
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    lote = get_object_or_404(
+        Lote.objects.select_related("cosecha__finca"),
+        pk=pk,
+    )
+    if not _puede_modificar_calidad(request, lote):
+        return HttpResponse("No tiene permiso para modificar la calidad de este lote.", status=403)
+
+    calidad = CaracteristicasCalidad.objects.filter(lote=lote).first()
+    if request.method == "POST":
+        form = CaracteristicasCalidadForm(request.POST, instance=calidad)
+        if form.is_valid():
+            registro = form.save(commit=False)
+            registro.lote = lote
+            registro.full_clean()
+            registro.save()
+            messages.success(request, "La información de calidad del lote fue guardada correctamente.")
+            return redirect("lote_calidad", pk=lote.pk)
+    else:
+        form = CaracteristicasCalidadForm(instance=calidad)
+
+    return render(
+        request,
+        "fincas/registro_calidad_lote.html",
+        {"form": form, "lote": lote, "calidad": calidad},
+    )
+
+
 def registrar_etapa_beneficio_view(request, pk):
     """
     Formulario web para registrar una nueva etapa de beneficio sobre un
@@ -1631,4 +1712,3 @@ def api_catalogo_view(request):
             MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO if filtros else MENSAJE_CATALOGO_VACIO
         )
     return Response(respuesta, status=status.HTTP_200_OK)
-

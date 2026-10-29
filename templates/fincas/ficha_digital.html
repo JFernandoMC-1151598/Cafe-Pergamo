@@ -422,28 +422,34 @@
                 <hr class="my-2 border-light-subtle">
                 {% if ficha.calidad %}
                     <ul class="list-unstyled mb-0 small">
-                        {% if ficha.calidad.puntaje_sca %}
+                        {% if ficha.calidad.puntaje_taza is not None %}
                         <li class="py-1 d-flex justify-content-between align-items-center">
-                            <span class="text-muted">Puntaje SCA:</span>
-                            <span class="badge bg-success fs-6 fw-bold">{{ ficha.calidad.puntaje_sca }} pts</span>
+                            <span class="text-muted">Puntaje en taza:</span>
+                            <span class="badge bg-success fs-6 fw-bold">{{ ficha.calidad.puntaje_taza }} pts</span>
                         </li>
                         {% endif %}
-                        {% if ficha.calidad.humedad_pct %}
+                        {% if ficha.calidad.humedad is not None %}
                         <li class="py-1 d-flex justify-content-between">
                             <span class="text-muted">Humedad:</span>
-                            <span>{{ ficha.calidad.humedad_pct }}%</span>
+                            <span>{{ ficha.calidad.humedad }}%</span>
                         </li>
                         {% endif %}
-                        {% if ficha.calidad.factor_rendimiento %}
+                        {% if ficha.calidad.merma is not None %}
                         <li class="py-1 d-flex justify-content-between">
-                            <span class="text-muted">Factor Rendimiento:</span>
-                            <span>{{ ficha.calidad.factor_rendimiento }}</span>
+                            <span class="text-muted">Merma:</span>
+                            <span>{{ ficha.calidad.merma }}%</span>
                         </li>
                         {% endif %}
-                        {% if ficha.calidad.perfil_taza %}
+                        {% if ficha.calidad.perfil_sensorial %}
                         <li class="py-1 mt-1 border-top">
-                            <span class="text-muted d-block">Perfil de Taza:</span>
-                            <span class="fst-italic text-dark">{{ ficha.calidad.perfil_taza }}</span>
+                            <span class="text-muted d-block">Perfil sensorial:</span>
+                            <span class="fst-italic text-dark">{{ ficha.calidad.perfil_sensorial }}</span>
+                        </li>
+                        {% endif %}
+                        {% if ficha.calidad.observaciones %}
+                        <li class="py-1 mt-1 border-top">
+                            <span class="text-muted d-block">Observaciones:</span>
+                            <span class="text-dark">{{ ficha.calidad.observaciones }}</span>
                         </li>
                         {% endif %}
                     </ul>
