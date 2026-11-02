@@ -2037,6 +2037,209 @@ class RegistroUsuarioApiTests(TestCase):
         self.assertEqual(response.status_code, 500)
 
 
+class RegistroCompradorHU21Tests(TestCase):
+    """
+    HU21-ST6 (SCRUM-259): pruebas del flujo de registro de un Comprador.
+
+    HU-21 "Registro comprador" no introduce un modelo, endpoint ni
+    formulario nuevos: el registro de un Comprador ya se apoya por
+    completo en la infraestructura genérica de HU01 (registro_api(), el
+    catálogo de Rol, y templates/usuarios/registro.html, que ya ofrece
+    "Comprador" como opción desde el formulario público). Lo que faltaba
+    -- y que estas pruebas cubren -- era verificar explícitamente que ese
+    flujo genérico funciona de punta a punta cuando el rol elegido es
+    COMPRADOR, ya que RegistroUsuarioApiTests (HU01-ST6) solo ejercitaba
+    el caso PRODUCTOR.
+
+    Cubre los criterios de aceptación de HU-21:
+      - "El registro debe ser exitoso."
+      - "Debe incluir validación de datos básicos del comprador."
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url = reverse('api_registro')
+        self.user_id = "33333333-3333-3333-3333-333333333333"
+
+    def _cuerpo_valido(self, **overrides):
+        cuerpo = {
+            "first_name": "Carlos",
+            "last_name": "Rodríguez",
+            "email": "carlos.rodriguez@example.com",
+            "phone": "3109876543",
+            "tipo_documento": "CC",
+            "numero_documento": "555444333",
+            "role": "COMPRADOR",
+            "password": "ClaveSegura123",
+        }
+        cuerpo.update(overrides)
+        return json.dumps(cuerpo)
+
+    def _mock_catalogos_validos(self, mock_tipo_doc, mock_rol, mock_usuario,
+                                 tipo_documento_codigo="CC", rol_codigo="COMPRADOR"):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(
+            codigo=tipo_documento_codigo
+        )
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo=rol_codigo)
+        mock_usuario.objects.filter.return_value.exists.return_value = False
+
+    # ------------------------------------------------------------------
+    # "El registro debe ser exitoso"
+    # ------------------------------------------------------------------
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_comprador_se_registra_exitosamente_y_queda_identificado_con_su_rol(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "carlos.rodriguez@example.com"),
+            session=MagicMock(),
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = (
+            _fake_usuario_registrado(
+                self.user_id, "carlos.rodriguez@example.com",
+                nombres="Carlos", apellidos="Rodríguez",
+                numero_documento="555444333", telefono="3109876543",
+                rol_codigo="COMPRADOR",
+            )
+        )
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["usuario"]["correo"], "carlos.rodriguez@example.com")
+        self.assertEqual(body["usuario"]["rol"], "COMPRADOR")
+        self.assertTrue(body["usuario"]["activo"])
+
+        # El catálogo de roles sí se consultó pidiendo justo COMPRADOR,
+        # no un alias ni otro código.
+        codigos_consultados = [
+            llamada.kwargs.get("codigo") for llamada in mock_rol.objects.filter.call_args_list
+        ]
+        self.assertIn("COMPRADOR", codigos_consultados)
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_comprador_requiere_verificacion_de_correo_si_supabase_no_da_sesion(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "carlos.rodriguez@example.com"),
+            session=None,
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = (
+            _fake_usuario_registrado(
+                self.user_id, "carlos.rodriguez@example.com", rol_codigo="COMPRADOR"
+            )
+        )
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.json()["requiere_verificacion_correo"])
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_comprador_no_esta_en_la_lista_de_roles_no_autorregistrables(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        """
+        Guarda estructural: si alguna vez se agrega COMPRADOR a
+        _ROLES_NO_AUTORREGISTRABLES por error, esta prueba debe fallar
+        (hoy esa lista solo excluye ADMINISTRADOR y ASOCIACION, ver CU10).
+        """
+        self._mock_catalogos_validos(mock_tipo_doc, mock_rol, mock_usuario)
+        mock_get_client.return_value.auth.sign_up.return_value = MagicMock(
+            user=_fake_auth_user(self.user_id, "carlos.rodriguez@example.com"),
+            session=MagicMock(),
+        )
+        mock_usuario.objects.select_related.return_value.get.return_value = (
+            _fake_usuario_registrado(
+                self.user_id, "carlos.rodriguez@example.com", rol_codigo="COMPRADOR"
+            )
+        )
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 201)
+
+    # ------------------------------------------------------------------
+    # "Debe incluir validación de datos básicos del comprador" -- se
+    # reutiliza el mismo motor de validación de HU01-ST3; se confirma
+    # aquí que también aplica cuando el rol elegido es COMPRADOR.
+    # ------------------------------------------------------------------
+
+    def test_comprador_con_campos_obligatorios_faltantes_retorna_400(self):
+        cuerpo = json.loads(self._cuerpo_valido())
+        del cuerpo["numero_documento"]
+
+        response = self.client.post(self.url, data=json.dumps(cuerpo), content_type="application/json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("numero_documento", response.json()["campos"])
+
+    def test_comprador_con_correo_invalido_retorna_400(self):
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(email="no-es-un-correo"), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("correo", response.json()["campos"])
+
+    def test_comprador_con_contrasena_corta_retorna_400(self):
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(password="abc12"), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("contraseña", response.json()["campos"])
+
+    def test_comprador_con_telefono_invalido_retorna_400(self):
+        response = self.client.post(
+            self.url, data=self._cuerpo_valido(phone="no-es-un-telefono"), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("telefono", response.json()["campos"])
+
+    @patch("usuarios.views.get_supabase_client")
+    @patch("usuarios.views.Usuario")
+    @patch("usuarios.views.Rol")
+    @patch("usuarios.views.TipoDocumento")
+    def test_comprador_con_correo_ya_registrado_retorna_409(
+        self, mock_tipo_doc, mock_rol, mock_usuario, mock_get_client
+    ):
+        mock_tipo_doc.objects.filter.return_value.first.return_value = MagicMock(codigo="CC")
+        mock_rol.objects.filter.return_value.first.return_value = MagicMock(codigo="COMPRADOR")
+        mock_usuario.objects.filter.return_value.exists.return_value = True
+
+        response = self.client.post(self.url, data=self._cuerpo_valido(), content_type="application/json")
+
+        self.assertEqual(response.status_code, 409)
+        mock_get_client.return_value.auth.sign_up.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # ST4 -- el formulario público ya ofrece "Comprador" como rol.
+    # ------------------------------------------------------------------
+
+    def test_formulario_de_registro_ofrece_la_opcion_comprador(self):
+        """
+        Blinda templates/usuarios/registro.html ante una futura edición
+        accidental que quite la opción de Comprador del formulario.
+        """
+        response = self.client.get(reverse('registro'))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'value="COMPRADOR"')
+        self.assertContains(response, '>Comprador<')
+
+
 # ==============================================================================
 # PRUEBAS HU02-ST6: SEGURIDAD DE SESIÓN Y PERSISTENCIA (QA)
 # ==============================================================================
