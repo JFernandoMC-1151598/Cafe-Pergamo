@@ -75,6 +75,7 @@ from fincas.services import (
     registrar_etapa_beneficio,
     validar_lote_para_publicacion,
     actualizar_visibilidad_codigo_qr,
+    actualizar_lote,
     asociar_codigo_qr_a_lote,
     construir_payload_qr_lote,
     extraer_codigo_lote_desde_qr,
@@ -84,6 +85,7 @@ from fincas.services import (
     generar_qr_base64_lote,
     obtener_codigo_qr_lote,
     obtener_estructura_qr_lote,
+    sincronizar_o_generar_qr_lote,
     validar_estructura_identificador_qr,
     PREFIJO_IDENTIFICADOR_QR,
     VISIBILIDAD_QR_PUBLICA,
@@ -6673,7 +6675,7 @@ class FichaDigitalGeneracionActualizacionE2ETests(TestCase):
         self.assertEqual(resp_api.json()["cantidad_kg"], "480.00")
 
         # 4. Verificación de bitácora
-        auditorias = list(BitacoraFichaDigital.objects.filter(lote=lote).order_by("creado_en"))
+        auditorias = list(BitacoraFichaDigital.objects.filter(lote=lote).order_by("creado_en", "id"))
         self.assertEqual(len(auditorias), 2)
         self.assertEqual(auditorias[0].tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_WEB)
         self.assertEqual(auditorias[1].tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_API)
@@ -7200,7 +7202,7 @@ class CodigoQRPersistenciaTests(TestCase):
             cantidad_total=Decimal("3000.00"),
             cantidad_disponible=Decimal("2500.00"),
         )
-        self.lote = Lote.objects.create(
+        self.lote = Lote(
             codigo="LOT-QR-P01",
             cosecha=self.cosecha,
             proceso_beneficio=self.proceso,
@@ -7208,6 +7210,8 @@ class CodigoQRPersistenciaTests(TestCase):
             cantidad=Decimal("800.00"),
             activo=True,
         )
+        self.lote._skip_auto_qr = True
+        self.lote.save()
 
     def test_persistencia_asociacion_exitosa_uno_a_uno(self):
         """Verifica que asociar_codigo_qr_a_lote persista correctamente en fincas_codigo_qr_lote."""
@@ -7245,7 +7249,7 @@ class CodigoQRPersistenciaTests(TestCase):
         """Criterio de Aceptación 1: Dos lotes distintos no pueden tener el mismo identificador QR."""
         asociar_codigo_qr_a_lote(lote_o_id=self.lote)
 
-        lote2 = Lote.objects.create(
+        lote2 = Lote(
             codigo="LOT-QR-P02",
             cosecha=self.cosecha,
             proceso_beneficio=self.proceso,
@@ -7253,6 +7257,8 @@ class CodigoQRPersistenciaTests(TestCase):
             cantidad=Decimal("300.00"),
             activo=True,
         )
+        lote2._skip_auto_qr = True
+        lote2.save()
 
         with self.assertRaises((IntegrityError, ValidationError)):
             CodigoQRLote.objects.create(
@@ -7308,6 +7314,308 @@ class CodigoQRPersistenciaTests(TestCase):
 
         self.lote.delete()
         self.assertFalse(CodigoQRLote.objects.filter(id=qr_id).exists())
+
+
+# ==============================================================================
+# SUITE HU-18 (SCRUM-174): GENERACIÓN AUTOMÁTICA DE QR AL CREAR O ACTUALIZAR (ST1)
+# ==============================================================================
+
+class CodigoQRGeneracionAutomaticaTests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST1 (SCRUM-174):
+    Implementar la generación automática del QR al crear o actualizar lote.
+
+    Criterios de Aceptación y Reglas de Negocio:
+    1. Generación automática e inmediata al crear un lote vía servicio de dominio `crear_lote()`.
+    2. Generación automática transparente en el ciclo de guardado ORM `Lote.save()`.
+    3. Sincronización automática de metadatos (identificador, payload y regeneración de imagen)
+       cuando muta el código del lote.
+    4. Idempotencia y optimización de cómputo: no regenerar la imagen QR si el código no cambió.
+    5. Servicio de actualización `actualizar_lote()` con sincronización transaccional del QR y balance de cosecha.
+    6. Servicio de sincronización `sincronizar_o_generar_qr_lote()` sobre lotes preexistentes sin QR.
+    7. Extensión de `obtener_codigo_qr_lote(..., auto_generar=True)`.
+    8. Consistencia de código generado automáticamente y su identificador QR asociado.
+    9. Exposición del estado del QR en la respuesta de la API `POST /fincas/api/lotes/`.
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca La Trazabilidad QR",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3150"),
+            longitud=Decimal("-72.4800"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo Tambo", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO_AUTO", nombre="Lavado Controlado", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 9, 20),
+            cantidad_total=Decimal("4000.00"),
+            cantidad_disponible=Decimal("3500.00"),
+            activo=True,
+        )
+
+    def test_generacion_automatica_con_servicio_crear_lote(self):
+        """Verifica que crear un lote con el servicio crear_lote genere inmediatamente su código QR."""
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("150.00"),
+            codigo="LOTAUTO01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        self.assertTrue(lote.tiene_codigo_qr)
+        self.assertEqual(lote.identificador_qr, "QR-LOTAUTO01")
+
+        qr = CodigoQRLote.objects.filter(lote=lote).first()
+        self.assertIsNotNone(qr)
+        self.assertEqual(qr.identificador, "QR-LOTAUTO01")
+        self.assertEqual(qr.payload_url, "/trazabilidad/lote/LOTAUTO01/")
+        self.assertEqual(qr.nivel_visibilidad, VISIBILIDAD_QR_PUBLICA)
+        self.assertTrue(qr.imagen_base64.startswith("data:image/png;base64,"))
+        self.assertTrue(qr.activo)
+
+    def test_generacion_automatica_en_guardado_orm(self):
+        """Verifica que Lote.objects.create genere y persista el QR automáticamente en el ciclo de guardado."""
+        lote = Lote.objects.create(
+            codigo="LOTORM02",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("80.00"),
+            activo=True,
+        )
+
+        self.assertTrue(lote.tiene_codigo_qr)
+        self.assertEqual(lote.identificador_qr, "QR-LOTORM02")
+        qr = CodigoQRLote.objects.filter(lote=lote).first()
+        self.assertIsNotNone(qr)
+        self.assertEqual(qr.payload_url, "/trazabilidad/lote/LOTORM02/")
+
+    def test_sincronizacion_automatica_al_mutar_codigo_lote(self):
+        """Verifica que al modificar el código del lote, el QR sincronice su identificador, URL y regenere la imagen."""
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("90.00"),
+            codigo="LOTMUTARA",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        qr_original = lote.codigo_qr
+        imagen_original = qr_original.imagen_base64
+
+        # Mutación del código del lote
+        lote.codigo = "LOTMUTARB"
+        lote.save()
+
+        lote.refresh_from_db()
+        qr_actualizado = CodigoQRLote.objects.get(lote=lote)
+
+        self.assertEqual(qr_actualizado.identificador, "QR-LOTMUTARB")
+        self.assertEqual(qr_actualizado.payload_url, "/trazabilidad/lote/LOTMUTARB/")
+        self.assertTrue(qr_actualizado.imagen_base64.startswith("data:image/png;base64,"))
+        # La imagen se regeneró para codificar el nuevo enlace
+        self.assertNotEqual(qr_actualizado.imagen_base64, imagen_original)
+
+    def test_idempotencia_actualizacion_lote_sin_cambio_codigo(self):
+        """Verifica que modificar atributos del lote sin cambiar el código mantenga la misma imagen y metadatos sin sobrecosto."""
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("110.00"),
+            codigo="LOTIDEMP01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        qr_original = lote.codigo_qr
+        qr_id_original = qr_original.id
+        imagen_original = qr_original.imagen_base64
+
+        # Modificación de atributos que no afectan el código ni el QR
+        lote.cantidad = Decimal("105.00")
+        lote.precio_referencial = Decimal("24500.00")
+        lote.save()
+
+        qr_despues = CodigoQRLote.objects.get(lote=lote)
+        self.assertEqual(qr_despues.id, qr_id_original)
+        self.assertEqual(qr_despues.imagen_base64, imagen_original)
+        self.assertEqual(qr_despues.identificador, "QR-LOTIDEMP01")
+
+    def test_servicio_actualizar_lote_sincroniza_qr_y_ajusta_cosecha(self):
+        """Verifica que el servicio actualizar_lote actualice datos, descuente de cosecha y sincronice el QR."""
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("100.00"),
+            codigo="LOTSRV01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        saldo_antes = Cosecha.objects.get(pk=self.cosecha.pk).cantidad_disponible
+
+        # Aumentar 50 kg y cambiar código
+        lote_actualizado = actualizar_lote(
+            lote_o_id=lote,
+            codigo="LOTSRV02",
+            cantidad=Decimal("150.00"),
+            precio_referencial=Decimal("26000.00"),
+        )
+
+        self.assertEqual(lote_actualizado.codigo, "LOTSRV02")
+        self.assertEqual(lote_actualizado.cantidad, Decimal("150.00"))
+        self.assertEqual(lote_actualizado.precio_referencial, Decimal("26000.00"))
+
+        # Descuento en cosecha
+        self.cosecha.refresh_from_db()
+        self.assertEqual(self.cosecha.cantidad_disponible, saldo_antes - Decimal("50.00"))
+
+        # QR sincronizado
+        qr = CodigoQRLote.objects.get(lote=lote_actualizado)
+        self.assertEqual(qr.identificador, "QR-LOTSRV02")
+        self.assertEqual(qr.payload_url, "/trazabilidad/lote/LOTSRV02/")
+
+    def test_actualizar_lote_validaciones_de_negocio(self):
+        """Verifica que actualizar_lote rechace códigos inválidos, duplicados o cantidades no válidas."""
+        lote1 = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("50.00"),
+            codigo="LOTEVAL01",
+        )
+        crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("50.00"),
+            codigo="LOTEVAL02",
+        )
+
+        # Código duplicado
+        with self.assertRaises(ValidationError):
+            actualizar_lote(lote_o_id=lote1, codigo="LOTEVAL02")
+
+        # Código no alfanumérico
+        with self.assertRaises(ValidationError):
+            actualizar_lote(lote_o_id=lote1, codigo="COD@INVALIDO")
+
+        # Cantidad negativa
+        with self.assertRaises(ValidationError):
+            actualizar_lote(lote_o_id=lote1, cantidad=Decimal("-10.00"))
+
+        # Incremento que supera saldo disponible de la cosecha
+        with self.assertRaises(ValidationError):
+            actualizar_lote(lote_o_id=lote1, cantidad=Decimal("99999.00"))
+
+    def test_sincronizar_o_generar_qr_en_lote_preexistente_sin_qr(self):
+        """Verifica que sincronizar_o_generar_qr_lote genere el QR para lotes existentes que carezcan de él."""
+        lote = Lote(
+            codigo="LOTLEGACY01",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("120.00"),
+            activo=True,
+        )
+        lote._skip_auto_qr = True
+        lote.save()
+
+        self.assertFalse(lote.tiene_codigo_qr)
+        self.assertIsNone(lote.identificador_qr)
+
+        qr_generado = sincronizar_o_generar_qr_lote(lote)
+        self.assertIsNotNone(qr_generado)
+        self.assertEqual(qr_generado.identificador, "QR-LOTLEGACY01")
+        self.assertTrue(lote.tiene_codigo_qr)
+
+    def test_obtener_codigo_qr_lote_con_auto_generar_true(self):
+        """Verifica que obtener_codigo_qr_lote(..., auto_generar=True) cree el QR bajo demanda si falta."""
+        lote = Lote(
+            codigo="LOTONDEMAND01",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("130.00"),
+            activo=True,
+        )
+        lote._skip_auto_qr = True
+        lote.save()
+
+        self.assertIsNone(obtener_codigo_qr_lote(lote, auto_generar=False))
+
+        qr_creado = obtener_codigo_qr_lote(lote, auto_generar=True)
+        self.assertIsNotNone(qr_creado)
+        self.assertEqual(qr_creado.identificador, "QR-LOTONDEMAND01")
+
+    def test_crear_lote_sin_codigo_genera_qr_consistente_con_codigo_automatico(self):
+        """Verifica que cuando crear_lote autogenera el código del lote, el QR se cree consistente con él."""
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("45.00"),
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        self.assertTrue(lote.codigo.startswith("L"))
+        self.assertTrue(lote.tiene_codigo_qr)
+        self.assertEqual(lote.identificador_qr, f"QR-{lote.codigo}")
+        self.assertEqual(lote.codigo_qr.payload_url, f"/trazabilidad/lote/{lote.codigo}/")
+
+    @patch("fincas.views.Usuario")
+    def test_api_crear_lote_refleja_codigo_qr_generado(self, mock_usuario_model):
+        """Verifica que el endpoint REST POST /fincas/api/lotes/ devuelva tiene_codigo_qr e identificador_qr."""
+        client = Client()
+        productor_id = uuid.uuid4()
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=productor_id)
+
+        finca = Finca.objects.create(
+            nombre="Finca API QR Test",
+            productor_id=productor_id,
+            municipio=self.municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-06-01",
+            cantidad_total=Decimal("200.00"),
+        )
+
+        url_api = reverse("api_lote_crear")
+        response = client.post(
+            url_api,
+            {"cosecha": cosecha.pk, "cantidad": "60.00", "codigo": "LOTAPIQR01"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["codigo"], "LOTAPIQR01")
+        self.assertTrue(data.get("tiene_codigo_qr"))
+        self.assertEqual(data.get("identificador_qr"), "QR-LOTAPIQR01")
+
+        lote = Lote.objects.get(codigo="LOTAPIQR01")
+        self.assertTrue(lote.tiene_codigo_qr)
+        self.assertEqual(lote.identificador_qr, "QR-LOTAPIQR01")
+
 
 
 

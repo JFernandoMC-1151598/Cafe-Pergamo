@@ -481,6 +481,9 @@ def crear_lote(
         cosecha.cantidad_disponible = cosecha.cantidad_disponible - cantidad
         cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
 
+        # HU18-ST1 (SCRUM-174): Generación y persistencia automática del código QR asociado al lote
+        sincronizar_o_generar_qr_lote(lote)
+
     return lote
 
 
@@ -1593,10 +1596,11 @@ def asociar_codigo_qr_a_lote(
 
         qr_existente = CodigoQRLote.objects.select_for_update().filter(lote=lote).first()
         if qr_existente:
+            cambio_codigo = (qr_existente.identificador != identificador or qr_existente.payload_url != payload_url)
             qr_existente.identificador = identificador
             qr_existente.payload_url = payload_url
             qr_existente.nivel_visibilidad = nivel_normalizado
-            if regenerar_imagen or not qr_existente.imagen_base64:
+            if regenerar_imagen or not qr_existente.imagen_base64 or cambio_codigo:
                 qr_existente.imagen_base64 = generar_qr_base64_lote(lote, base_url=base_url)
             qr_existente.save()
             return qr_existente
@@ -1615,12 +1619,186 @@ def asociar_codigo_qr_a_lote(
         return nuevo_qr
 
 
-def obtener_codigo_qr_lote(lote_o_id: Union[Lote, int, str]) -> Optional[CodigoQRLote]:
+def sincronizar_o_generar_qr_lote(
+    lote_o_id: Union[Lote, int, str],
+    *,
+    nivel_visibilidad: Optional[str] = None,
+    forzar_regeneracion: bool = False,
+    base_url: Optional[str] = None,
+) -> CodigoQRLote:
+    """
+    Garantiza y sincroniza la existencia del código QR asociado al lote (HU18-ST1 / SCRUM-174).
+
+    Reglas de Negocio:
+    1. Si el lote no tiene código QR, lo genera y asocia automáticamente con visibilidad por defecto (PUBLICA).
+    2. Si ya tiene código QR, valida que su identificador ('QR-<CODIGO>') y payload coincidan con el lote actual.
+    3. Si el código del lote fue modificado o forzar_regeneracion=True, regenera la matriz gráfica Base64 y actualiza los metadatos.
+    4. Mantiene idempotencia estricta: llamadas sucesivas con los mismos datos no duplican registros ni computan imágenes innecesarias.
+    """
+    with transaction.atomic():
+        lote = _resolver_lote(lote_o_id)
+        identificador_esperado = generar_identificador_qr_lote(lote)
+        payload_esperado = construir_payload_qr_lote(lote, base_url=base_url)
+
+        qr_existente = CodigoQRLote.objects.select_for_update().filter(lote=lote).first()
+
+        if not qr_existente:
+            visibilidad = nivel_visibilidad or VISIBILIDAD_QR_PUBLICA
+            return asociar_codigo_qr_a_lote(
+                lote_o_id=lote,
+                nivel_visibilidad=visibilidad,
+                regenerar_imagen=True,
+                base_url=base_url,
+            )
+
+        cambio_identificador = (qr_existente.identificador != identificador_esperado)
+        cambio_payload = (qr_existente.payload_url != payload_esperado)
+        cambio_visibilidad = bool(
+            nivel_visibilidad and qr_existente.nivel_visibilidad != nivel_visibilidad.strip().upper()
+        )
+        necesita_imagen = (
+            forzar_regeneracion
+            or not qr_existente.imagen_base64
+            or cambio_identificador
+            or cambio_payload
+        )
+
+        hubo_cambios = False
+
+        if cambio_identificador:
+            qr_existente.identificador = identificador_esperado
+            hubo_cambios = True
+
+        if cambio_payload:
+            qr_existente.payload_url = payload_esperado
+            hubo_cambios = True
+
+        if cambio_visibilidad and nivel_visibilidad:
+            nivel_norm = nivel_visibilidad.strip().upper()
+            if nivel_norm in [VISIBILIDAD_QR_PUBLICA, VISIBILIDAD_QR_PRIVADA]:
+                qr_existente.nivel_visibilidad = nivel_norm
+                hubo_cambios = True
+
+        if necesita_imagen:
+            qr_existente.imagen_base64 = generar_qr_base64_lote(lote, base_url=base_url)
+            hubo_cambios = True
+
+        if not qr_existente.activo:
+            qr_existente.activo = True
+            hubo_cambios = True
+
+        if hubo_cambios:
+            qr_existente.full_clean()
+            qr_existente.save()
+
+        return qr_existente
+
+
+def actualizar_lote(
+    *,
+    lote_o_id: Union[Lote, int, str],
+    codigo: Optional[str] = None,
+    cantidad: Optional[Union[Decimal, str, float]] = None,
+    proceso_beneficio_id: Optional[int] = None,
+    estado_lote_id: Optional[int] = None,
+    activo: Optional[bool] = None,
+    precio_referencial: Optional[Union[Decimal, str, float]] = None,
+    sincronizar_qr: bool = True,
+) -> Lote:
+    """
+    Actualiza la configuración de un lote y sincroniza su código QR (HU18-ST1 / SCRUM-174).
+    Si el código del lote cambia, actualiza su identificador y regenera la imagen QR.
+    Si la cantidad cambia, valida y descuenta/reintegra la diferencia al saldo disponible de la cosecha.
+    """
+    with transaction.atomic():
+        lote = _resolver_lote(lote_o_id)
+        campos_modificados = []
+
+        if codigo is not None:
+            codigo_limpio = str(codigo).strip().upper()
+            if not codigo_limpio:
+                raise ValidationError({"codigo": "El código del lote no puede estar vacío."})
+            if not codigo_limpio.isalnum():
+                raise ValidationError({"codigo": "El código del lote debe ser alfanumérico."})
+            if Lote.objects.filter(codigo__iexact=codigo_limpio).exclude(pk=lote.pk).exists():
+                raise ValidationError({"codigo": f"Ya existe otro lote con el código '{codigo_limpio}'."})
+            if lote.codigo != codigo_limpio:
+                lote.codigo = codigo_limpio
+                campos_modificados.append("codigo")
+
+        if cantidad is not None:
+            try:
+                nueva_cantidad = Decimal(str(cantidad))
+            except Exception:
+                raise ValidationError({"cantidad": "La cantidad del lote debe ser un valor numérico."})
+            if nueva_cantidad <= Decimal("0.00"):
+                raise ValidationError({"cantidad": "La cantidad del lote debe ser mayor a cero."})
+
+            diferencia = nueva_cantidad - lote.cantidad
+            if diferencia != Decimal("0.00"):
+                cosecha = Cosecha.objects.select_for_update().get(pk=lote.cosecha_id)
+                if diferencia > 0 and diferencia > cosecha.cantidad_disponible:
+                    raise ValidationError({
+                        "cantidad": (
+                            f"El incremento ({diferencia} kg) supera el saldo disponible "
+                            f"de la cosecha ({cosecha.cantidad_disponible} kg)."
+                        )
+                    })
+                cosecha.cantidad_disponible = cosecha.cantidad_disponible - diferencia
+                cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
+                lote.cantidad = nueva_cantidad
+                campos_modificados.append("cantidad")
+
+        if proceso_beneficio_id is not None:
+            proceso = ProcesoBeneficio.objects.filter(pk=proceso_beneficio_id, activo=True).first()
+            if proceso is None:
+                raise ValidationError({"proceso_beneficio": "El proceso seleccionado no existe o no está activo."})
+            lote.proceso_beneficio = proceso
+            campos_modificados.append("proceso_beneficio")
+
+        if estado_lote_id is not None:
+            estado = EstadoLote.objects.filter(pk=estado_lote_id, activo=True).first()
+            if estado is None:
+                raise ValidationError({"estado_lote": "El estado seleccionado no existe o no está activo."})
+            lote.estado_lote = estado
+            campos_modificados.append("estado_lote")
+
+        if activo is not None:
+            lote.activo = bool(activo)
+            campos_modificados.append("activo")
+
+        if precio_referencial is not None:
+            try:
+                lote.precio_referencial = Decimal(str(precio_referencial))
+            except Exception:
+                raise ValidationError({"precio_referencial": "El precio referencial debe ser numérico."})
+            campos_modificados.append("precio_referencial")
+
+        if campos_modificados:
+            lote.full_clean()
+            lote.save(sincronizar_qr=False)
+
+        if sincronizar_qr:
+            hubo_cambio_codigo = bool("codigo" in campos_modificados)
+            sincronizar_o_generar_qr_lote(lote, forzar_regeneracion=hubo_cambio_codigo)
+
+        return lote
+
+
+def obtener_codigo_qr_lote(
+    lote_o_id: Union[Lote, int, str],
+    *,
+    auto_generar: bool = False,
+) -> Optional[CodigoQRLote]:
     """
     Recupera la entidad persistida de código QR asociada al lote, o None si aún no se ha generado.
+    Si auto_generar=True y el lote aún no cuenta con QR, lo genera y asocia en el momento (HU18-ST1).
     """
     lote = _resolver_lote(lote_o_id)
-    return CodigoQRLote.objects.filter(lote=lote).first()
+    qr = CodigoQRLote.objects.filter(lote=lote).first()
+    if not qr and auto_generar:
+        qr = sincronizar_o_generar_qr_lote(lote)
+    return qr
 
 
 def actualizar_visibilidad_codigo_qr(

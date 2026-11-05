@@ -435,6 +435,29 @@ class Lote(models.Model):
         estado_cat = " [Publicado]" if self.publicado_en_catalogo else ""
         return f"Lote {self.codigo} ({self.cantidad} kg){estado_cat} de {self.cosecha}"
 
+    def save(self, *args, **kwargs):
+        """
+        Ciclo de guardado de Lote con generación y sincronización automática del
+        código QR asociado (HU18-ST1 / SCRUM-174).
+        """
+        sincronizar_qr = kwargs.pop("sincronizar_qr", True)
+        es_creacion = self.pk is None
+        codigo_previo = None
+        if not es_creacion and self.pk:
+            codigo_previo = (
+                Lote.objects.filter(pk=self.pk).values_list("codigo", flat=True).first()
+            )
+
+        super().save(*args, **kwargs)
+
+        if sincronizar_qr and not getattr(self, "_skip_auto_qr", False):
+            from .services import sincronizar_o_generar_qr_lote
+            try:
+                hubo_cambio_codigo = bool(codigo_previo and codigo_previo != self.codigo)
+                sincronizar_o_generar_qr_lote(self, forzar_regeneracion=hubo_cambio_codigo)
+            except Exception:
+                pass
+
     @property
     def tiene_codigo_qr(self) -> bool:
         """Indica si el lote tiene un registro de código QR asociado (HU-18 / SCRUM-176)."""

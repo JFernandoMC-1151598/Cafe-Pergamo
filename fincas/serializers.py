@@ -238,6 +238,8 @@ class LoteSerializer(serializers.ModelSerializer):
     cantidad_disponible_cosecha = serializers.DecimalField(
         source="cosecha.cantidad_disponible", max_digits=10, decimal_places=2, read_only=True
     )
+    tiene_codigo_qr = serializers.BooleanField(read_only=True)
+    identificador_qr = serializers.CharField(read_only=True)
 
     class Meta:
         model = Lote
@@ -254,6 +256,8 @@ class LoteSerializer(serializers.ModelSerializer):
             "activo",
             "proceso_beneficio",
             "estado_lote",
+            "tiene_codigo_qr",
+            "identificador_qr",
             "creado_en",
         ]
         read_only_fields = fields
