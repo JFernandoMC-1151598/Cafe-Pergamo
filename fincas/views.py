@@ -56,6 +56,7 @@ from .models import (
     BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
+    CodigoQRLote,
     Cosecha,
     EtapaBeneficio,
     Finca,
@@ -92,6 +93,7 @@ from .services import (
     reactivar_municipio,
     registrar_auditoria_ficha_digital,
     registrar_etapa_beneficio,
+    resolver_lote_desde_qr,
     toggle_estado_municipio,
     validar_lote_para_publicacion,
 )
@@ -1244,7 +1246,164 @@ def ficha_digital_web_view(request, codigo=None):
     except Exception:
         pass
 
-    return render(request, "fincas/ficha_digital.html", {"ficha": ficha})
+    codigo_qr = CodigoQRLote.objects.filter(lote_id=ficha["id"]).first()
+    return render(
+        request,
+        "fincas/ficha_digital.html",
+        {
+            "ficha": ficha,
+            "codigo_qr": codigo_qr,
+        },
+    )
+
+
+def escanear_qr_web_view(request, identificador=None):
+    """
+    Vista web de acceso directo y escaneo de código QR hacia la Ficha Digital
+    (HU18-ST3 / SCRUM-177).
+    Ruta: /trazabilidad/qr/<identificador>/ y /fincas/qr/<identificador>/
+    Resuelve el lote asociado al QR y renderiza la ficha digital consolidada,
+    registrando la auditoría de escaneo correspondiente.
+    """
+    if not identificador or not str(identificador).strip():
+        return render(
+            request,
+            "fincas/ficha_digital_error.html",
+            {"codigo": "", "error_detalle": "Identificador de código QR no especificado."},
+            status=400,
+        )
+
+    identificador_limpio = str(identificador).strip()
+    try:
+        qr_obj, lote_obj = resolver_lote_desde_qr(identificador_limpio)
+        ficha = obtener_ficha_consolidada_lote(lote_obj)
+    except ValidationError as exc:
+        msg = (
+            exc.message_dict.get("qr", exc.message_dict.get("lote", ["Código QR no encontrado"]))[0]
+            if hasattr(exc, "message_dict")
+            else str(exc)
+        )
+        return render(
+            request,
+            "fincas/ficha_digital_error.html",
+            {"codigo": identificador_limpio, "error_detalle": msg},
+            status=404,
+        )
+    except Exception as exc:
+        return render(
+            request,
+            "fincas/ficha_digital_error.html",
+            {"codigo": identificador_limpio, "error_detalle": str(exc)},
+            status=500,
+        )
+
+    # Registrar auditoría de escaneo QR Web (HU-18 / SCRUM-177)
+    try:
+        registrar_auditoria_ficha_digital(
+            lote=lote_obj,
+            tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_WEB,
+            request=request,
+            completitud_porcentaje=ficha.get("completitud_porcentaje", 0),
+            es_consistente=ficha.get("es_consistente", True),
+            usuario_identificador="Público / Escaneo QR",
+            detalles={
+                "canal": "escaneo_qr",
+                "identificador_qr": qr_obj.identificador,
+                "ruta": request.path,
+            },
+        )
+    except Exception:
+        pass
+
+    return render(
+        request,
+        "fincas/ficha_digital.html",
+        {
+            "ficha": ficha,
+            "codigo_qr": qr_obj,
+            "es_escaneo_qr": True,
+        },
+    )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_consultar_ficha_desde_qr_view(request, identificador=None):
+    """
+    Endpoint REST para consultar la ficha digital consolidada a partir del escaneo de su Código QR
+    (HU18-ST3 / SCRUM-177).
+    GET /fincas/api/qr/<identificador>/
+    GET /api/v1/qr/<identificador>/
+    GET /fincas/api/qr/<identificador>/ficha/
+    """
+    if not identificador or not str(identificador).strip():
+        return Response(
+            {"error": "El identificador del código QR es obligatorio."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    identificador_limpio = str(identificador).strip()
+    try:
+        qr_obj, lote_obj = resolver_lote_desde_qr(identificador_limpio)
+    except ValidationError as exc:
+        msg = (
+            exc.message_dict.get("qr", exc.message_dict.get("lote", ["Código QR no encontrado"]))[0]
+            if hasattr(exc, "message_dict")
+            else str(exc)
+        )
+        return Response({"error": msg}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as exc:
+        return Response(
+            {"error": f"Error al procesar el código QR: {str(exc)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    try:
+        ficha_data = obtener_ficha_consolidada_lote(lote_obj)
+    except Exception as exc:
+        return Response(
+            {"error": f"Error al consolidar la ficha digital: {str(exc)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    serializer = FichaDigitalSerializer(data=ficha_data)
+    if not serializer.is_valid():
+        return Response(
+            {
+                "error": "Inconsistencia interna en los datos de la ficha consolidada.",
+                "detalles": serializer.errors,
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # Registrar auditoría de consulta API / QR (HU-17 / SCRUM-172 & HU-18 / SCRUM-177)
+    try:
+        registrar_auditoria_ficha_digital(
+            lote=lote_obj,
+            tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API,
+            request=request,
+            completitud_porcentaje=ficha_data.get("completitud_porcentaje", 0),
+            es_consistente=ficha_data.get("es_consistente", True),
+            usuario_identificador="Consulta API / Escaneo QR",
+            detalles={
+                "canal": "api_qr",
+                "identificador_qr": qr_obj.identificador,
+                "ruta": request.path,
+            },
+        )
+    except Exception:
+        pass
+
+    resultado = serializer.data
+    resultado["codigo_qr"] = {
+        "identificador": qr_obj.identificador,
+        "nivel_visibilidad": qr_obj.nivel_visibilidad,
+        "payload_url": qr_obj.payload_url,
+        "activo": qr_obj.activo,
+        "imagen_base64": qr_obj.imagen_base64,
+    }
+
+    return Response(resultado, status=status.HTTP_200_OK)
 
 
 def _resolver_usuario_correo(request) -> Optional[str]:

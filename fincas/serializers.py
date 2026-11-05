@@ -483,6 +483,8 @@ class FichaDigitalSerializer(serializers.Serializer):
 
     # Metadatos de navegación y trazabilidad
     url_publica = serializers.CharField(required=False)
+    identificador_qr = serializers.CharField(required=False, allow_null=True)
+    tiene_codigo_qr = serializers.BooleanField(required=False, default=False)
     completitud_porcentaje = serializers.IntegerField(required=False, default=50)
 
     # Diagnóstico de consistencia y completitud (HU-17 / ST6 - SCRUM-171)

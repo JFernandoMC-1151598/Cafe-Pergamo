@@ -132,6 +132,11 @@
                     <span class="badge bg-white bg-opacity-25 text-white px-3 py-2 rounded-pill fw-semibold">
                         <i class="bi bi-patch-check-fill text-warning me-1"></i> Trazabilidad de Origen Verificada
                     </span>
+                    {% if es_escaneo_qr %}
+                        <span class="badge bg-info text-dark px-3 py-2 rounded-pill fw-bold">
+                            <i class="bi bi-qr-code-scan me-1"></i> Consulta vía Escaneo QR
+                        </span>
+                    {% endif %}
                     {% if ficha.estado_comercial == 'DISPONIBLE' %}
                         <span class="badge badge-disponible px-3 py-2 rounded-pill fw-semibold">
                             <i class="bi bi-circle-fill fs-6 me-1 text-success"></i> Disponible para Venta
@@ -477,13 +482,23 @@
                 </div>
                 <hr class="my-2 border-light-subtle">
                 <div class="qr-preview-box">
-                    <i class="bi bi-qr-code text-pergamo" style="font-size: 4rem;"></i>
-                    <p class="small text-muted mb-2 mt-1">
-                        Código QR asignado al Lote <strong>{{ ficha.codigo }}</strong>
-                    </p>
-                    <span class="badge bg-secondary-subtle text-secondary small px-3 py-1">
-                        Ruta Canónica Pública
-                    </span>
+                    {% if codigo_qr and codigo_qr.imagen_base64 %}
+                        <img src="{{ codigo_qr.imagen_base64 }}" alt="Código QR {{ codigo_qr.identificador }}" class="img-fluid rounded-3 mb-2 shadow-sm border p-1 bg-white" style="max-width: 140px;" />
+                        <p class="small text-muted mb-1 mt-1">
+                            Identificador: <strong class="text-dark font-monospace">{{ codigo_qr.identificador }}</strong>
+                        </p>
+                        <span class="badge bg-success-subtle text-success border border-success-subtle small px-3 py-1">
+                            <i class="bi bi-shield-check me-1"></i> QR Certificado Activo
+                        </span>
+                    {% else %}
+                        <i class="bi bi-qr-code text-pergamo" style="font-size: 4rem;"></i>
+                        <p class="small text-muted mb-2 mt-1">
+                            Código QR asignado al Lote <strong>{{ ficha.codigo }}</strong>
+                        </p>
+                        <span class="badge bg-secondary-subtle text-secondary small px-3 py-1">
+                            Ruta Canónica Pública
+                        </span>
+                    {% endif %}
                     <div class="small text-truncate mt-2 text-muted font-monospace" style="font-size: 0.75rem;">
                         {{ ficha.url_publica }}
                     </div>

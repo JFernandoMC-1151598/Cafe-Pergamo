@@ -638,17 +638,45 @@ def obtener_ficha_consolidada_lote(lote_identificador: Union[Lote, int, str]) ->
             raise ValidationError({"lote": f"No se encontró ningún lote con el ID '{lote_identificador}'."})
     elif isinstance(lote_identificador, str):
         codigo_limpio = lote_identificador.strip().upper()
-        try:
-            lote = (
-                Lote.objects.select_related(
-                    "cosecha__finca__municipio",
-                    "cosecha__variedad",
-                    "proceso_beneficio",
-                    "estado_lote",
-                ).get(codigo__iexact=codigo_limpio)
+        # HU18-ST3 (SCRUM-177): Resolución polimórfica si se consulta por identificador QR
+        if codigo_limpio.startswith(PREFIJO_IDENTIFICADOR_QR):
+            qr_match = (
+                CodigoQRLote.objects.select_related(
+                    "lote__cosecha__finca__municipio",
+                    "lote__cosecha__variedad",
+                    "lote__proceso_beneficio",
+                    "lote__estado_lote",
+                )
+                .filter(identificador__iexact=codigo_limpio)
+                .first()
             )
-        except Lote.DoesNotExist:
-            raise ValidationError({"lote": f"No se encontró ningún lote con el código '{codigo_limpio}'."})
+            if qr_match and qr_match.lote:
+                lote = qr_match.lote
+            else:
+                codigo_extraido = extraer_codigo_lote_desde_qr(codigo_limpio)
+                try:
+                    lote = (
+                        Lote.objects.select_related(
+                            "cosecha__finca__municipio",
+                            "cosecha__variedad",
+                            "proceso_beneficio",
+                            "estado_lote",
+                        ).get(codigo__iexact=codigo_extraido)
+                    )
+                except Lote.DoesNotExist:
+                    raise ValidationError({"lote": f"No se encontró ningún lote asociado al código QR '{codigo_limpio}'."})
+        else:
+            try:
+                lote = (
+                    Lote.objects.select_related(
+                        "cosecha__finca__municipio",
+                        "cosecha__variedad",
+                        "proceso_beneficio",
+                        "estado_lote",
+                    ).get(codigo__iexact=codigo_limpio)
+                )
+            except Lote.DoesNotExist:
+                raise ValidationError({"lote": f"No se encontró ningún lote con el código '{codigo_limpio}'."})
     else:
         raise ValidationError({"lote": "Identificador de lote no válido."})
 
@@ -793,6 +821,8 @@ def obtener_ficha_consolidada_lote(lote_identificador: Union[Lote, int, str]) ->
         "estado_comercial": codigo_estado,
         "disponible_para_venta": disponible_venta,
         "url_publica": url_publica,
+        "identificador_qr": lote.identificador_qr,
+        "tiene_codigo_qr": lote.tiene_codigo_qr,
         "completitud_porcentaje": evaluacion["porcentaje"],
         "nivel_completitud": evaluacion["nivel"],
         "color_nivel": evaluacion["color_nivel"],
@@ -1799,6 +1829,76 @@ def obtener_codigo_qr_lote(
     if not qr and auto_generar:
         qr = sincronizar_o_generar_qr_lote(lote)
     return qr
+
+
+def resolver_lote_desde_qr(identificador_qr: str) -> tuple[CodigoQRLote, Lote]:
+    """
+    Resuelve el código QR persistido y su lote asociado a partir del identificador formal
+    o código codificado en el escaneo (HU18-ST3 / SCRUM-177).
+
+    Validaciones y Reglas:
+    - Identificador no vacío ni nulo.
+    - Soporte para identificador formal ('QR-<CODIGO>') o código directo de lote.
+    - Verifica que el código QR exista y tenga activo=True.
+    - Verifica que el lote asociado exista y tenga activo=True.
+    """
+    if not identificador_qr or not str(identificador_qr).strip():
+        raise ValidationError({"qr": "El identificador del código QR no puede estar vacío."})
+
+    identificador_limpio = str(identificador_qr).strip().upper()
+
+    # 1. Búsqueda directa por identificador formal único en CodigoQRLote
+    qr_obj = CodigoQRLote.objects.select_related(
+        "lote__cosecha__finca__municipio",
+        "lote__cosecha__variedad",
+        "lote__proceso_beneficio",
+        "lote__estado_lote",
+    ).filter(identificador__iexact=identificador_limpio).first()
+
+    # 2. Si no se encontró y viene con prefijo QR-, intentar por código de lote extraído
+    if not qr_obj and identificador_limpio.startswith(PREFIJO_IDENTIFICADOR_QR):
+        codigo_lote = extraer_codigo_lote_desde_qr(identificador_limpio)
+        qr_obj = CodigoQRLote.objects.select_related(
+            "lote__cosecha__finca__municipio",
+            "lote__cosecha__variedad",
+            "lote__proceso_beneficio",
+            "lote__estado_lote",
+        ).filter(lote__codigo__iexact=codigo_lote).first()
+
+    # 3. Si no trae prefijo QR-, intentar resolver asumiendo que se ingresó el código del lote
+    if not qr_obj:
+        qr_obj = CodigoQRLote.objects.select_related(
+            "lote__cosecha__finca__municipio",
+            "lote__cosecha__variedad",
+            "lote__proceso_beneficio",
+            "lote__estado_lote",
+        ).filter(lote__codigo__iexact=identificador_limpio).first()
+
+    # 4. Si aún no existe pero el lote sí existe, auto-aprovisionar con sincronizar_o_generar_qr_lote
+    if not qr_obj:
+        try:
+            codigo_candidato = (
+                extraer_codigo_lote_desde_qr(identificador_limpio)
+                if identificador_limpio.startswith(PREFIJO_IDENTIFICADOR_QR)
+                else identificador_limpio
+            )
+            lote_existente = Lote.objects.filter(codigo__iexact=codigo_candidato).first()
+            if lote_existente:
+                qr_obj = sincronizar_o_generar_qr_lote(lote_existente)
+        except Exception:
+            pass
+
+    if not qr_obj:
+        raise ValidationError({"qr": f"No se encontró ningún código QR con el identificador '{identificador_limpio}'."})
+
+    if not qr_obj.activo:
+        raise ValidationError({"qr": f"El código QR '{qr_obj.identificador}' se encuentra inactivo para consultas."})
+
+    lote = qr_obj.lote
+    if not lote or not lote.activo:
+        raise ValidationError({"lote": f"El lote asociado al código QR '{qr_obj.identificador}' se encuentra inactivo."})
+
+    return qr_obj, lote
 
 
 def actualizar_visibilidad_codigo_qr(

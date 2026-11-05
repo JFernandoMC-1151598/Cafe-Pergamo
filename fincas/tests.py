@@ -85,6 +85,7 @@ from fincas.services import (
     generar_qr_base64_lote,
     obtener_codigo_qr_lote,
     obtener_estructura_qr_lote,
+    resolver_lote_desde_qr,
     sincronizar_o_generar_qr_lote,
     validar_estructura_identificador_qr,
     PREFIJO_IDENTIFICADOR_QR,
@@ -7615,6 +7616,217 @@ class CodigoQRGeneracionAutomaticaTests(TestCase):
         lote = Lote.objects.get(codigo="LOTAPIQR01")
         self.assertTrue(lote.tiene_codigo_qr)
         self.assertEqual(lote.identificador_qr, "QR-LOTAPIQR01")
+
+
+# ==============================================================================
+# SUITE HU-18 (SCRUM-177): CONSULTA DE FICHA DIGITAL DESDE EL QR (ST3)
+# ==============================================================================
+
+class CodigoQRConsultaFichaTests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST3 (SCRUM-177):
+    Crear la vista o endpoint de consulta de ficha digital desde el QR.
+
+    Criterios de Aceptación y Escenarios:
+    1. Resolución de lote por identificador formal 'QR-<CODIGO>'.
+    2. Resolución polimórfica por código de lote directo.
+    3. Rechazo y manejo de errores ante QR inexistente o inactivo.
+    4. Rechazo ante lote inactivo.
+    5. Soporte en el servicio de dominio `obtener_ficha_consolidada_lote()` por identificador QR.
+    6. Vista Web de Escaneo `GET /trazabilidad/qr/<identificador>/`:
+       - Respuesta 200 OK con plantilla `fincas/ficha_digital.html`.
+       - Indicadores visuales de escaneo QR y renderizado de la imagen Base64.
+       - Registro de auditoría con tipo CONSULTA_WEB y canal 'escaneo_qr'.
+       - Respuesta 404 con plantilla de error ante QR no encontrado.
+    7. Endpoint REST `GET /fincas/api/qr/<identificador>/`:
+       - Respuesta 200 OK con DTO consolidado y nodo `codigo_qr`.
+       - Registro de auditoría con tipo CONSULTA_API y canal 'api_qr'.
+       - Respuesta 404 NOT FOUND ante QR inexistente o inactivo.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Hacienda San Isidro QR",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3120"),
+            longitud=Decimal("-72.4810"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Geisha", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="HONEY_QR", nombre="Honey Amarillo", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 9, 25),
+            cantidad_total=Decimal("5000.00"),
+            cantidad_disponible=Decimal("4800.00"),
+            activo=True,
+        )
+        self.lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("200.00"),
+            codigo="LOTCONSULTA01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        self.qr = self.lote.codigo_qr
+
+    def test_resolver_lote_desde_qr_por_identificador_formal(self):
+        """Verifica que resolver_lote_desde_qr resuelva correctamente por 'QR-<CODIGO>'."""
+        qr_obj, lote_obj = resolver_lote_desde_qr("QR-LOTCONSULTA01")
+        self.assertEqual(qr_obj.pk, self.qr.pk)
+        self.assertEqual(lote_obj.pk, self.lote.pk)
+        self.assertEqual(lote_obj.codigo, "LOTCONSULTA01")
+
+    def test_resolver_lote_desde_qr_por_codigo_directo(self):
+        """Verifica resolución polimórfica si se suministra el código de lote directamente."""
+        qr_obj, lote_obj = resolver_lote_desde_qr("LOTCONSULTA01")
+        self.assertEqual(qr_obj.pk, self.qr.pk)
+        self.assertEqual(lote_obj.pk, self.lote.pk)
+
+    def test_resolver_lote_desde_qr_inexistente_lanza_validation_error(self):
+        """Verifica que resolver_lote_desde_qr lance ValidationError ante QR desconocido."""
+        with self.assertRaises(ValidationError):
+            resolver_lote_desde_qr("QR-INEXISTENTE999")
+
+    def test_resolver_lote_desde_qr_inactivo_lanza_validation_error(self):
+        """Verifica que un código QR inactivo sea rechazado para consulta."""
+        self.qr.activo = False
+        self.qr.save()
+
+        with self.assertRaises(ValidationError):
+            resolver_lote_desde_qr("QR-LOTCONSULTA01")
+
+    def test_resolver_lote_desde_qr_con_lote_inactivo_lanza_validation_error(self):
+        """Verifica que un lote inactivo sea rechazado para consulta desde QR."""
+        self.lote.activo = False
+        self.lote.save()
+
+        with self.assertRaises(ValidationError):
+            resolver_lote_desde_qr("QR-LOTCONSULTA01")
+
+    def test_obtener_ficha_consolidada_lote_por_identificador_qr(self):
+        """Verifica que obtener_ficha_consolidada_lote acepte el identificador QR y retorne la ficha completa."""
+        ficha = obtener_ficha_consolidada_lote("QR-LOTCONSULTA01")
+        self.assertEqual(ficha["codigo"], "LOTCONSULTA01")
+        self.assertEqual(ficha["identificador_qr"], "QR-LOTCONSULTA01")
+        self.assertTrue(ficha["tiene_codigo_qr"])
+        self.assertEqual(ficha["finca"]["nombre"], "Hacienda San Isidro QR")
+
+    def test_vista_web_escanear_qr_exitoso_200_ok_y_template(self):
+        """Verifica que GET /trazabilidad/qr/<identificador>/ responda 200 OK y renderice la ficha digital."""
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": "QR-LOTCONSULTA01"})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+        self.assertTrue(response.context.get("es_escaneo_qr"))
+        self.assertEqual(response.context.get("codigo_qr").identificador, "QR-LOTCONSULTA01")
+        self.assertContains(response, "LOTCONSULTA01")
+        self.assertContains(response, "Hacienda San Isidro QR")
+        self.assertContains(response, "Consulta vía Escaneo QR")
+        self.assertContains(response, "QR Certificado Activo")
+
+    def test_vista_web_escanear_qr_registra_auditoria_en_bitacora(self):
+        """Verifica que el escaneo web registre auditoría en BitacoraFichaDigital con canal escaneo_qr."""
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": "QR-LOTCONSULTA01"})
+        self.client.get(url)
+
+        registro = BitacoraFichaDigital.objects.filter(
+            lote=self.lote, tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_WEB
+        ).order_by("-creado_en").first()
+
+        self.assertIsNotNone(registro)
+        self.assertEqual(registro.usuario_identificador, "Público / Escaneo QR")
+        self.assertEqual(registro.detalles.get("canal"), "escaneo_qr")
+        self.assertEqual(registro.detalles.get("identificador_qr"), "QR-LOTCONSULTA01")
+
+    def test_vista_web_escanear_qr_no_encontrado_responde_404_con_template_error(self):
+        """Verifica que consultar un QR inexistente responda 404 y use ficha_digital_error.html."""
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": "QR-DESCONOCIDO"})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTemplateUsed(response, "fincas/ficha_digital_error.html")
+        self.assertContains(response, "Ficha Digital No Disponible", status_code=404)
+
+    def test_api_consultar_ficha_desde_qr_200_ok_con_datos_completos(self):
+        """Verifica que GET /fincas/api/qr/<identificador>/ responda 200 OK con la ficha y metadatos de QR."""
+        url = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": "QR-LOTCONSULTA01"})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["codigo"], "LOTCONSULTA01")
+        self.assertEqual(data["cantidad_kg"], "200.00")
+        self.assertEqual(data["finca"]["nombre"], "Hacienda San Isidro QR")
+        self.assertEqual(data["variedad"]["nombre"], "Geisha")
+        self.assertEqual(data["proceso_beneficio"]["nombre"], "Honey Amarillo")
+
+        # Metadatos del QR adjuntos en la respuesta API
+        self.assertIn("codigo_qr", data)
+        qr_info = data["codigo_qr"]
+        self.assertEqual(qr_info["identificador"], "QR-LOTCONSULTA01")
+        self.assertEqual(qr_info["payload_url"], "/trazabilidad/lote/LOTCONSULTA01/")
+        self.assertEqual(qr_info["nivel_visibilidad"], VISIBILIDAD_QR_PUBLICA)
+        self.assertTrue(qr_info["activo"])
+        self.assertTrue(qr_info["imagen_base64"].startswith("data:image/png;base64,"))
+
+    def test_api_consultar_ficha_desde_qr_registra_auditoria(self):
+        """Verifica que la consulta API vía QR registre auditoría con tipo CONSULTA_API y canal api_qr."""
+        url = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": "QR-LOTCONSULTA01"})
+        self.client.get(url)
+
+        registro = BitacoraFichaDigital.objects.filter(
+            lote=self.lote, tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API
+        ).order_by("-creado_en").first()
+
+        self.assertIsNotNone(registro)
+        self.assertEqual(registro.detalles.get("canal"), "api_qr")
+        self.assertEqual(registro.detalles.get("identificador_qr"), "QR-LOTCONSULTA01")
+
+    def test_api_consultar_ficha_desde_qr_inactivo_o_inexistente_responde_404(self):
+        """Verifica que consultar un QR inexistente o inactivo por API responda 404 NOT FOUND."""
+        url_inexistente = reverse(
+            "api_consultar_ficha_desde_qr", kwargs={"identificador": "QR-NO-EXISTE-404"}
+        )
+        resp_inexistente = self.client.get(url_inexistente)
+        self.assertEqual(resp_inexistente.status_code, 404)
+        self.assertIn("error", resp_inexistente.json())
+
+        # Inactivar QR y verificar 404
+        self.qr.activo = False
+        self.qr.save()
+        url_inactivo = reverse(
+            "api_consultar_ficha_desde_qr", kwargs={"identificador": "QR-LOTCONSULTA01"}
+        )
+        resp_inactivo = self.client.get(url_inactivo)
+        self.assertEqual(resp_inactivo.status_code, 404)
+        self.assertIn("error", resp_inactivo.json())
+
 
 
 
