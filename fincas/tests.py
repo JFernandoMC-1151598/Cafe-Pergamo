@@ -17,6 +17,7 @@ Integración de:
 """
 
 import base64
+import json
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -86,8 +87,10 @@ from fincas.services import (
     obtener_codigo_qr_lote,
     obtener_estructura_qr_lote,
     resolver_lote_desde_qr,
+    sanitizar_ficha_por_visibilidad,
     sincronizar_o_generar_qr_lote,
     validar_estructura_identificador_qr,
+    verificar_permiso_visibilidad_qr,
     PREFIJO_IDENTIFICADOR_QR,
     VISIBILIDAD_QR_PUBLICA,
     VISIBILIDAD_QR_PRIVADA,
@@ -4539,7 +4542,7 @@ class TestScrum240ServiciosPublicacionYBitacora(TestCase):
         self.assertFalse(lote_retirado.publicado_en_catalogo)
 
         # La bitácora debe tener 2 eventos: PUBLICAR y DESPUBLICAR
-        historial = BitacoraPublicacionLote.objects.filter(lote=self.lote).order_by("creado_en")
+        historial = BitacoraPublicacionLote.objects.filter(lote=self.lote).order_by("creado_en", "id")
         self.assertEqual(historial.count(), 2)
         ultimo_evento = historial.last()
         self.assertEqual(ultimo_evento.accion, "DESPUBLICAR")
@@ -7826,6 +7829,297 @@ class CodigoQRConsultaFichaTests(TestCase):
         resp_inactivo = self.client.get(url_inactivo)
         self.assertEqual(resp_inactivo.status_code, 404)
         self.assertIn("error", resp_inactivo.json())
+
+
+class CodigoQRControlVisibilidadTests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST4 (SCRUM-178):
+    Aplicar control de visibilidad en la ficha digital accesible desde el QR.
+
+    Criterios de Aceptación y Escenarios:
+    1. Reglas de negocio del servicio `verificar_permiso_visibilidad_qr`:
+       - Visibilidad PUBLICA: Acceso permitido para cualquier usuario anónimo o externo.
+       - Visibilidad PRIVADA: Acceso restringido para anónimos o terceros; irrestricto para el productor dueño.
+    2. Enmascaramiento y sanitización mediante `sanitizar_ficha_por_visibilidad`:
+       - Usuarios no propietarios no visualizan datos sensibles del productor (número y tipo de documento).
+       - El productor propietario conserva los datos completos.
+    3. Vista Web de Escaneo `GET /trazabilidad/qr/<identificador>/`:
+       - Si es PRIVADA y el usuario es anónimo: responde HTTP 403 Forbidden y renderiza `fincas/ficha_digital_privada.html`.
+       - Si es PUBLICA y el usuario es anónimo: responde HTTP 200 OK con `fincas/ficha_digital.html`.
+       - Si es PRIVADA y el usuario es el dueño: responde HTTP 200 OK con `fincas/ficha_digital.html`.
+    4. Endpoint REST `GET /fincas/api/qr/<identificador>/`:
+       - Si es PRIVADA y el usuario es anónimo: responde HTTP 403 Forbidden.
+       - Si es PRIVADA y el usuario es el dueño: responde HTTP 200 OK con datos completos.
+       - Si es PUBLICA: responde HTTP 200 OK con datos enmascarados para anónimos.
+    5. Actualización de Visibilidad REST `POST /fincas/api/lotes/<pk>/qr/visibilidad/`:
+       - Productor dueño actualiza exitosamente a 'PRIVADA' o 'PUBLICA' (200 OK).
+       - Usuario no propietario es rechazado con 403 Forbidden.
+       - Solicitud anónima es rechazada con 401 Unauthorized.
+       - Valor de visibilidad inválido responde 400 Bad Request.
+    6. Conmutación Web `POST /fincas/lotes/<pk>/qr/visibilidad/`:
+       - Productor dueño conmuta visibilidad y es redirigido con mensaje de éxito (302 Redirect).
+       - Tercero o anónimo es rechazado apropiadamente.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Hacienda El Secreto QR",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3150"),
+            longitud=Decimal("-72.4850"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Bourbon Rosado", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO_VIS", nombre="Lavado Clásico", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("3000.00"),
+            cantidad_disponible=Decimal("2500.00"),
+            activo=True,
+        )
+        self.lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("500.00"),
+            codigo="LOTVISIBILIDAD01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        self.qr = self.lote.codigo_qr
+
+    def test_servicio_verificar_permiso_visibilidad_publica(self):
+        """Verifica que un QR con visibilidad PUBLICA permita el acceso tanto anónimo como de cualquier usuario."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PUBLICA
+        self.qr.save()
+
+        # Usuario anónimo (None)
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, None)
+        self.assertTrue(puede_acceder)
+        self.assertFalse(es_propietario)
+
+        # Tercero
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, self.otro_productor_id)
+        self.assertTrue(puede_acceder)
+        self.assertFalse(es_propietario)
+
+        # Productor propietario
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, self.productor_id)
+        self.assertTrue(puede_acceder)
+        self.assertTrue(es_propietario)
+
+    def test_servicio_verificar_permiso_visibilidad_privada(self):
+        """Verifica que un QR con visibilidad PRIVADA niegue el acceso a anónimos y terceros, pero lo permita al dueño."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        # Anónimo
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, None)
+        self.assertFalse(puede_acceder)
+        self.assertFalse(es_propietario)
+        self.assertIn("Acceso restringido", motivo)
+
+        # Tercero
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, self.otro_productor_id)
+        self.assertFalse(puede_acceder)
+        self.assertFalse(es_propietario)
+
+        # Dueño
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, self.productor_id)
+        self.assertTrue(puede_acceder)
+        self.assertTrue(es_propietario)
+
+    def test_servicio_sanitizar_ficha_por_visibilidad(self):
+        """Verifica que la sanitización oculte datos sensibles de identidad a no propietarios."""
+        ficha_mock = {
+            "id": self.lote.pk,
+            "codigo": self.lote.codigo,
+            "productor": {
+                "nombre": "Juan Pérez",
+                "numero_documento": "1098765432",
+                "tipo_documento": "CC",
+            },
+        }
+        # Caso no propietario: oculta documento
+        sanitizada_publica = sanitizar_ficha_por_visibilidad(ficha_mock, self.qr, es_propietario=False)
+        self.assertIsNone(sanitizada_publica["productor"]["numero_documento"])
+        self.assertIsNone(sanitizada_publica["productor"]["tipo_documento"])
+        self.assertEqual(sanitizada_publica["productor"]["nombre"], "Juan Pérez")
+        self.assertFalse(sanitizada_publica["es_propietario"])
+
+        # Caso propietario: conserva documento
+        sanitizada_propietario = sanitizar_ficha_por_visibilidad(ficha_mock, self.qr, es_propietario=True)
+        self.assertEqual(sanitizada_propietario["productor"]["numero_documento"], "1098765432")
+        self.assertEqual(sanitizada_propietario["productor"]["tipo_documento"], "CC")
+        self.assertTrue(sanitizada_propietario["es_propietario"])
+
+    def test_web_escanear_qr_publica_acceso_anonimo_exitoso(self):
+        """GET /trazabilidad/qr/<identificador>/ con QR PUBLICA responde 200 OK y plantilla ficha_digital.html."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PUBLICA
+        self.qr.save()
+
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+        self.assertContains(response, self.lote.codigo)
+
+    def test_web_escanear_qr_privada_anonimo_retorna_403_pantalla_privada(self):
+        """GET /trazabilidad/qr/<identificador>/ con QR PRIVADA y anónimo responde 403 y plantilla ficha_digital_privada.html."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTemplateUsed(response, "fincas/ficha_digital_privada.html")
+        self.assertContains(response, "Ficha Digital Privada", status_code=403)
+        self.assertContains(response, "visibilidad privada", status_code=403)
+        self.assertContains(response, self.lote.codigo, status_code=403)
+
+    def test_web_escanear_qr_privada_productor_propietario_acceso_exitoso(self):
+        """GET /trazabilidad/qr/<identificador>/ con QR PRIVADA y dueño autenticado responde 200 OK."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+
+    def test_api_consultar_qr_publica_anonimo_exitoso_y_enmascarado(self):
+        """GET /fincas/api/qr/<identificador>/ con QR PUBLICA responde 200 OK y oculta documento del productor."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PUBLICA
+        self.qr.save()
+
+        url = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["codigo_qr"]["nivel_visibilidad"], "PUBLICA")
+        self.assertFalse(data["es_propietario"])
+
+    def test_api_consultar_qr_privada_anonimo_retorna_403(self):
+        """GET /fincas/api/qr/<identificador>/ con QR PRIVADA responde 403 FORBIDDEN para usuarios no autorizados."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        url = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("error", response.json())
+
+    def test_api_consultar_qr_privada_propietario_retorna_200(self):
+        """GET /fincas/api/qr/<identificador>/ con QR PRIVADA responde 200 OK para el productor propietario."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["es_propietario"])
+        self.assertEqual(data["codigo_qr"]["nivel_visibilidad"], "PRIVADA")
+
+    @patch("fincas.views.Usuario")
+    def test_api_actualizar_visibilidad_propietario_exitoso(self, mock_usuario_model):
+        """POST /fincas/api/lotes/<pk>/qr/visibilidad/ permite al dueño actualizar visibilidad a PRIVADA."""
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.productor_id)
+        url = reverse("api_lote_qr_visibilidad", kwargs={"pk": self.lote.pk})
+        response = self.client.post(
+            url,
+            data=json.dumps({"nivel_visibilidad": "PRIVADA"}),
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.qr.refresh_from_db()
+        self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PRIVADA)
+
+    @patch("fincas.views.Usuario")
+    def test_api_actualizar_visibilidad_no_propietario_retorna_403(self, mock_usuario_model):
+        """POST /fincas/api/lotes/<pk>/qr/visibilidad/ rechaza a productores que no sean dueños con 403 FORBIDDEN."""
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.otro_productor_id)
+        url = reverse("api_lote_qr_visibilidad", kwargs={"pk": self.lote.pk})
+        response = self.client.post(
+            url,
+            data=json.dumps({"nivel_visibilidad": "PRIVADA"}),
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("error", response.json())
+
+    def test_api_actualizar_visibilidad_sin_autenticacion_retorna_401(self):
+        """POST /fincas/api/lotes/<pk>/qr/visibilidad/ rechaza peticiones anónimas con 401 UNAUTHORIZED."""
+        url = reverse("api_lote_qr_visibilidad", kwargs={"pk": self.lote.pk})
+        response = self.client.post(
+            url,
+            data=json.dumps({"nivel_visibilidad": "PRIVADA"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    @patch("fincas.views.Usuario")
+    def test_api_actualizar_visibilidad_valor_invalido_retorna_400(self, mock_usuario_model):
+        """POST /fincas/api/lotes/<pk>/qr/visibilidad/ con nivel inválido retorna 400 BAD REQUEST."""
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.productor_id)
+        url = reverse("api_lote_qr_visibilidad", kwargs={"pk": self.lote.pk})
+        response = self.client.post(
+            url,
+            data=json.dumps({"nivel_visibilidad": "CONFIDENCIAL"}),
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_web_cambiar_visibilidad_conmuta_exitosamente(self):
+        """POST /fincas/lotes/<pk>/qr/visibilidad/ conmuta la visibilidad de PUBLICA a PRIVADA para el dueño."""
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("lote_qr_visibilidad_web", kwargs={"pk": self.lote.pk})
+        response = self.client.post(url, follow=False)
+
+        self.assertEqual(response.status_code, 302)
+        self.qr.refresh_from_db()
+        self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PRIVADA)
+
 
 
 

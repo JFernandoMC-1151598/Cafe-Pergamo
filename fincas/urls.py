@@ -33,6 +33,7 @@ urlpatterns = [
     path('trazabilidad/lote/<str:codigo>/', views.ficha_digital_web_view, name='trazabilidad_lote_publica'),
     path('trazabilidad/qr/<str:identificador>/', views.escanear_qr_web_view, name='trazabilidad_qr_web'),
     path('qr/<str:identificador>/', views.escanear_qr_web_view, name='escanear_qr_web_directo'),
+    path('lotes/<int:pk>/qr/visibilidad/', views.cambiar_visibilidad_qr_web_view, name='lote_qr_visibilidad_web'),
 
     # Interfaz Web de Catálogo de Municipios (HU-09 / SCRUM-111)
     path('municipios/', views.admin_municipios_view, name='admin_municipios'),
@@ -84,6 +85,9 @@ urlpatterns = [
     path('api/qr/<str:identificador>/', views.api_consultar_ficha_desde_qr_view, name='api_consultar_ficha_desde_qr'),
     path('api/v1/qr/<str:identificador>/', views.api_consultar_ficha_desde_qr_view, name='api_v1_consultar_ficha_desde_qr'),
     path('api/qr/<str:identificador>/ficha/', views.api_consultar_ficha_desde_qr_view, name='api_consultar_ficha_desde_qr_alias'),
+
+    # API REST de Control de Visibilidad del Código QR (HU-18 / SCRUM-178)
+    path('api/lotes/<int:pk>/qr/visibilidad/', views.api_actualizar_visibilidad_qr_view, name='api_lote_qr_visibilidad'),
 
     # API REST pública del catálogo con filtros combinados (HU-20 / SCRUM-250)
     path('api/catalogo/', views.api_catalogo_view, name='api_catalogo'),

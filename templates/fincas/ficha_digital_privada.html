@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Ficha Digital Privada — Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-5 text-center">
+    <div class="row justify-content-center">
+        <div class="col-md-7 col-lg-5">
+            <div class="card border-0 shadow-sm rounded-4 p-5">
+                <div class="mb-3">
+                    <span class="d-inline-flex align-items-center justify-content-center rounded-circle bg-danger-subtle text-danger" style="width: 80px; height: 80px;">
+                        <i class="bi bi-shield-lock-fill" style="font-size: 2.5rem;"></i>
+                    </span>
+                </div>
+                <h1 class="h4 fw-bold text-dark mb-2">Ficha Digital Privada</h1>
+                <p class="text-muted small mb-3">
+                    El código QR asignado al Lote 
+                    {% if lote.codigo %}
+                        <strong class="text-dark font-monospace">"{{ lote.codigo }}"</strong>
+                    {% elif codigo_qr.identificador %}
+                        <strong class="text-dark font-monospace">"{{ codigo_qr.identificador }}"</strong>
+                    {% else %}
+                        consultado
+                    {% endif %}
+                    se encuentra configurado con <strong>visibilidad privada</strong> por su productor.
+                </p>
+                <div class="alert alert-light border border-secondary-subtle small text-muted text-start mb-4 py-2 px-3 rounded-3">
+                    <i class="bi bi-info-circle text-primary me-1"></i>
+                    Para visualizar los datos agronómicos y la trazabilidad de este lote, debe iniciar sesión con la cuenta de productor autorizada.
+                </div>
+                <div class="d-flex justify-content-center gap-2 flex-wrap">
+                    <a href="{% url 'login' %}?next={{ request.path }}" class="btn btn-primary rounded-pill px-4 fw-semibold">
+                        <i class="bi bi-box-arrow-in-right me-1"></i> Iniciar Sesión
+                    </a>
+                    <a href="{% url 'catalogo' %}" class="btn btn-outline-secondary rounded-pill px-3 fw-medium">
+                        <i class="bi bi-grid me-1"></i> Ir al Catálogo
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+

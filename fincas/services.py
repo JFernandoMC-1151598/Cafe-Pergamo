@@ -17,6 +17,7 @@ from decimal import Decimal
 import io
 import re
 from typing import Any, Dict, List, Optional, Union
+import uuid
 
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
@@ -1924,5 +1925,72 @@ def actualizar_visibilidad_codigo_qr(
             qr_obj.nivel_visibilidad = nivel_normalizado
             qr_obj.save(update_fields=["nivel_visibilidad", "actualizado_en"])
         return qr_obj
+
+
+def verificar_permiso_visibilidad_qr(
+    qr: CodigoQRLote,
+    usuario_id: Optional[Union[uuid.UUID, str]] = None,
+) -> tuple[bool, bool, str]:
+    """
+    Evalúa si un usuario tiene autorización para acceder a la ficha digital asociada al QR (HU18-ST4 / SCRUM-178).
+
+    Retorna:
+      (puede_acceder: bool, es_propietario: bool, motivo: str)
+
+    Reglas de Negocio:
+    1. Si el usuario autenticado es el productor dueño de la finca a la que pertenece el lote (es_propietario=True):
+       Siempre tiene acceso irrestricto, incluso si el QR está configurado como PRIVADA.
+    2. Si el código QR tiene nivel_visibilidad == PUBLICA:
+       Cualquier usuario anónimo o externo tiene acceso a la información de trazabilidad.
+    3. Si el código QR tiene nivel_visibilidad == PRIVADA y el usuario NO es el propietario:
+       El acceso es denegado (requiere autenticación del productor propietario).
+    """
+    productor_dueno_id = None
+    try:
+        if hasattr(qr, "lote") and qr.lote and hasattr(qr.lote, "cosecha") and qr.lote.cosecha:
+            productor_dueno_id = qr.lote.cosecha.finca.productor_id
+    except Exception:
+        pass
+
+    es_propietario = bool(
+        usuario_id and productor_dueno_id and str(productor_dueno_id) == str(usuario_id)
+    )
+
+    if es_propietario:
+        return True, True, "Acceso concedido al productor propietario del lote."
+
+    if qr.nivel_visibilidad == CodigoQRLote.VISIBILIDAD_PUBLICA:
+        return True, False, "Acceso público concedido."
+
+    # Visibilidad PRIVADA sin ser el propietario
+    return (
+        False,
+        False,
+        "Acceso restringido: La ficha digital de este lote tiene visibilidad privada. Requiere autenticación del productor propietario.",
+    )
+
+
+def sanitizar_ficha_por_visibilidad(
+    ficha: Dict[str, Any],
+    qr: CodigoQRLote,
+    es_propietario: bool = False,
+) -> Dict[str, Any]:
+    """
+    Aplica filtros de seguridad sobre la ficha consolidada según el nivel de visibilidad y rol (HU18-ST4 / SCRUM-178).
+    - Si no es propietario, enmascara datos de identidad sensible del productor (documento de identidad).
+    - Adjunta el nivel de visibilidad configurado y el indicador de si quien consulta es el propietario.
+    """
+    ficha_modificada = dict(ficha)
+    ficha_modificada["nivel_visibilidad"] = qr.nivel_visibilidad
+    ficha_modificada["es_propietario"] = es_propietario
+
+    if not es_propietario and "productor" in ficha_modificada:
+        productor = dict(ficha_modificada["productor"])
+        # Ocultar documento personal para acceso público no autenticado
+        productor["numero_documento"] = None
+        productor["tipo_documento"] = None
+        ficha_modificada["productor"] = productor
+
+    return ficha_modificada
 
 
