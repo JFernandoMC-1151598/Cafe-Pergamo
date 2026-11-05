@@ -60,6 +60,78 @@
                 </div>
             </div>
 
+            <!-- Código QR de Trazabilidad del Lote (HU18-ST6 / SCRUM-179) -->
+            <div class="card border-0 shadow-sm rounded-4 overflow-hidden mb-4" id="seccion-codigo-qr">
+                <div class="card-header bg-white p-4 border-bottom">
+                    <div class="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                        <div>
+                            <h2 class="h5 mb-0 fw-bold text-dark">
+                                <i class="bi bi-qr-code text-primary me-2"></i>Código QR de Trazabilidad
+                            </h2>
+                            <p class="text-muted small mb-0">Identificador físico-digital único asignado a este lote.</p>
+                        </div>
+                        {% if codigo_qr %}
+                            {% if codigo_qr.nivel_visibilidad == 'PUBLICA' %}
+                                <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">
+                                    <i class="bi bi-globe me-1"></i>Visibilidad Pública
+                                </span>
+                            {% else %}
+                                <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle px-3 py-2">
+                                    <i class="bi bi-lock-fill me-1"></i>Visibilidad Privada
+                                </span>
+                            {% endif %}
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="card-body p-4">
+                    {% if codigo_qr and codigo_qr.imagen_base64 %}
+                    <div class="row align-items-center g-4">
+                        <div class="col-sm-auto text-center">
+                            <div class="bg-white p-3 rounded-4 d-inline-block shadow-sm border">
+                                <img src="{{ codigo_qr.imagen_base64 }}" alt="Código QR Lote {{ lote.codigo }}" class="img-fluid" style="width: 170px; height: 170px;">
+                            </div>
+                        </div>
+                        <div class="col-sm">
+                            <h3 class="h6 fw-bold text-dark mb-1">Identificador del Código</h3>
+                            <div class="mb-3">
+                                <span class="badge bg-light text-dark border font-monospace px-3 py-2 fs-6">
+                                    {{ codigo_qr.identificador }}
+                                </span>
+                            </div>
+                            <p class="text-muted small mb-3">
+                                Este código QR permite a clientes y compradores acceder directamente a la ficha digital de trazabilidad del lote. Puedes conmutar su visibilidad en cualquier momento.
+                            </p>
+                            <div class="d-flex gap-2 flex-wrap align-items-center">
+                                <a href="{% url 'trazabilidad_qr_web' codigo_qr.identificador %}" target="_blank" class="btn btn-primary bg-primary btn-sm fw-semibold px-3">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Ver Ficha Digital (Escaneo)
+                                </a>
+                                <form method="POST" action="{% url 'lote_qr_visibilidad_web' lote.pk %}" class="d-inline">
+                                    {% csrf_token %}
+                                    {% if codigo_qr.nivel_visibilidad == 'PUBLICA' %}
+                                        <input type="hidden" name="nivel_visibilidad" value="PRIVADA">
+                                        <button type="submit" class="btn btn-outline-secondary btn-sm px-3" title="Restringir acceso al QR solo para ti">
+                                            <i class="bi bi-lock-fill me-1"></i>Cambiar a Privada
+                                        </button>
+                                    {% else %}
+                                        <input type="hidden" name="nivel_visibilidad" value="PUBLICA">
+                                        <button type="submit" class="btn btn-outline-success btn-sm px-3" title="Hacer accesible el QR al público y compradores">
+                                            <i class="bi bi-globe me-1"></i>Cambiar a Pública
+                                        </button>
+                                    {% endif %}
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="text-center py-4">
+                        <i class="bi bi-qr-code fs-1 text-muted mb-2 d-block"></i>
+                        <h5 class="fw-bold text-dark">Código QR en proceso de sincronización</h5>
+                        <p class="text-muted small mb-0">El identificador QR se generará automáticamente al actualizar o consultar el lote.</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
             <!-- Historial de beneficio (HU14-ST2) -->
             <div class="card border-0 shadow-sm rounded-4 overflow-hidden" id="historial-beneficio">
                 <div class="card-header bg-white p-4 border-bottom">

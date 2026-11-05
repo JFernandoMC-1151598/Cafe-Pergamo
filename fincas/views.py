@@ -96,6 +96,7 @@ from .services import (
     registrar_etapa_beneficio,
     resolver_lote_desde_qr,
     sanitizar_ficha_por_visibilidad,
+    sincronizar_o_generar_qr_lote,
     toggle_estado_municipio,
     validar_lote_para_publicacion,
     verificar_permiso_visibilidad_qr,
@@ -1100,6 +1101,7 @@ def mis_lotes_view(request):
             "cosecha__variedad",
             "proceso_beneficio",
             "caracteristicas_calidad",
+            "codigo_qr",
         )
         .order_by("-creado_en")
     )
@@ -1119,12 +1121,19 @@ def mis_lotes_view(request):
             lotes = lotes.filter(cosecha__finca_id=finca_id)
             finca_seleccionada = fincas_productor.filter(pk=finca_id).first()
 
-    # Precalculamos el estado de publicación y validación para la interfaz
+    # Precalculamos el estado de publicación, validación y QR para la interfaz
     lotes_info = []
     for lote in lotes:
         es_valido, errores_val = validar_lote_para_publicacion(lote)
+        qr_obj = getattr(lote, "codigo_qr", None)
+        if not qr_obj:
+            try:
+                qr_obj = sincronizar_o_generar_qr_lote(lote)
+            except Exception:
+                qr_obj = None
         lotes_info.append({
             "lote": lote,
+            "codigo_qr": qr_obj,
             "puede_publicar": es_valido,
             "errores_publicacion": errores_val,
         })
@@ -1797,6 +1806,7 @@ def _obtener_lote_del_productor(productor_id, pk):
             "cosecha__variedad",
             "proceso_beneficio",
             "estado_lote",
+            "codigo_qr",
         ),
         pk=pk,
         cosecha__finca__productor_id=productor_id,
@@ -1805,11 +1815,10 @@ def _obtener_lote_del_productor(productor_id, pk):
 
 def detalle_lote_view(request, pk):
     """
-    Detalle de un lote con su historial de beneficio (HU14-ST2 /
-    SCRUM-149): todas las etapas registradas, en orden cronológico, con
-    fecha, etapa y observaciones. Si el lote todavía no tiene etapas se
-    muestra un estado vacío explícito, nunca un error ni una página en
-    blanco.
+    Detalle de un lote con su historial de beneficio y visualización de Código QR
+    (HU14-ST2 / SCRUM-149, HU18-ST6 / SCRUM-179):
+    Todas las etapas registradas, en orden cronológico, y módulo visual del Código QR
+    asociado con conmutador de visibilidad e información de trazabilidad.
     """
     productor_id = _resolver_productor_id(request)
     if not productor_id:
@@ -1820,6 +1829,13 @@ def detalle_lote_view(request, pk):
         return redirect(f"{reverse('login')}?next={request.path}")
 
     lote = _obtener_lote_del_productor(productor_id, pk)
+    qr_obj = getattr(lote, "codigo_qr", None)
+    if not qr_obj:
+        try:
+            qr_obj = sincronizar_o_generar_qr_lote(lote)
+        except Exception:
+            qr_obj = None
+
     # El orden cronológico lo define EtapaBeneficio.Meta.ordering; se
     # repite aquí para que el historial no dependa de un cambio en Meta.
     etapas = lote.etapas_beneficio.filter(activo=True).order_by("fecha", "creado_en", "id")
@@ -1827,7 +1843,7 @@ def detalle_lote_view(request, pk):
     return render(
         request,
         "fincas/detalle_lote.html",
-        {"lote": lote, "etapas": etapas},
+        {"lote": lote, "codigo_qr": qr_obj, "etapas": etapas},
     )
 
 

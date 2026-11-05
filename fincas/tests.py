@@ -8121,6 +8121,136 @@ class CodigoQRControlVisibilidadTests(TestCase):
         self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PRIVADA)
 
 
+class CodigoQRVisualizacionGestionTests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST6 (SCRUM-179):
+    Incluir la visualización del QR en la interfaz de gestión del lote.
+
+    Criterios de Aceptación y Escenarios:
+    1. Vista 'Mis Lotes' (mis_lotes_view):
+       - El contexto 'lotes_info' provee el objeto 'codigo_qr' sincronizado.
+       - La tabla de lotes renderiza el badge de visibilidad del QR (Público / Privado).
+       - Se incluye el botón interactivo de apertura de modal QR en la columna de acciones.
+       - El modal del QR renderiza la imagen matricial Base64, el identificador formal y el conmutador de visibilidad.
+    2. Vista de Detalle de Lote (detalle_lote_view):
+       - Se incluye la sección 'seccion-codigo-qr' con la visualización gráfica del código QR.
+       - Se visualiza el identificador formal, el badge de nivel de visibilidad y el enlace directo de escaneo.
+       - Permite conmutar la visibilidad entre Pública y Privada directamente desde la pantalla de detalle.
+    3. Auto-sincronización resiliente:
+       - Si un lote preexistente carece de registro QR en base de datos, las vistas de gestión lo auto-generan
+         al consultarlo para garantizar que el caficultor siempre disponga de su código QR.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        _iniciar_sesion_productor(self.client, self.productor_id)
+
+        self.finca = Finca.objects.create(
+            nombre="Finca La Esperanza QR",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3110"),
+            longitud=Decimal("-72.4810"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="NATURAL_GEST", nombre="Natural Clásico", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 10),
+            cantidad_total=Decimal("4000.00"),
+            cantidad_disponible=Decimal("3500.00"),
+            activo=True,
+        )
+        self.lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("500.00"),
+            codigo="LOTGESTIONQR01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        self.qr = self.lote.codigo_qr
+
+    def test_mis_lotes_incluye_codigo_qr_en_lotes_info_y_modal(self):
+        """mis_lotes_view incluye el QR en el contexto y renderiza el modal interactivo con imagen y datos."""
+        response = self.client.get(reverse("mis_lotes"))
+        self.assertEqual(response.status_code, 200)
+
+        # Contexto
+        lotes_info = response.context["lotes_info"]
+        self.assertEqual(len(lotes_info), 1)
+        self.assertIsNotNone(lotes_info[0]["codigo_qr"])
+        self.assertEqual(lotes_info[0]["codigo_qr"].identificador, "QR-LOTGESTIONQR01")
+
+        # Renderizado en tabla y modal
+        self.assertContains(response, "LOTGESTIONQR01")
+        self.assertContains(response, f"modalQRLote{self.lote.id}")
+        self.assertContains(response, "QR-LOTGESTIONQR01")
+        self.assertContains(response, "Público")
+        self.assertContains(response, self.qr.imagen_base64)
+
+    def test_mis_lotes_refleja_badge_privado_cuando_qr_es_privado(self):
+        """mis_lotes_view refleja visualmente la visibilidad privada configurada."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        response = self.client.get(reverse("mis_lotes"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Privado")
+        self.assertContains(response, "Hacer Público")
+
+    def test_detalle_lote_incluye_seccion_codigo_qr(self):
+        """detalle_lote_view renderiza la sección 'seccion-codigo-qr' con la imagen y controles del QR."""
+        url = reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "id=\"seccion-codigo-qr\"")
+        self.assertContains(response, "Código QR de Trazabilidad")
+        self.assertContains(response, "QR-LOTGESTIONQR01")
+        self.assertContains(response, "Visibilidad Pública")
+        self.assertContains(response, self.qr.imagen_base64)
+        self.assertContains(response, "Ver Ficha Digital (Escaneo)")
+
+    def test_detalle_lote_auto_sincroniza_qr_si_no_existia(self):
+        """detalle_lote_view genera y asocia el QR automáticamente si no existía previamente."""
+        self.qr.delete()
+        self.lote.refresh_from_db()
+        self.assertFalse(self.lote.tiene_codigo_qr)
+
+        url = reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.lote.refresh_from_db()
+        self.assertTrue(self.lote.tiene_codigo_qr)
+        self.assertEqual(self.lote.codigo_qr.identificador, "QR-LOTGESTIONQR01")
+        self.assertContains(response, "QR-LOTGESTIONQR01")
+
+
+
 
 
 
