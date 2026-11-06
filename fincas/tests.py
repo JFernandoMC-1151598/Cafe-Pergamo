@@ -8451,6 +8451,216 @@ class CodigoQRDescargaImpresionTests(TestCase):
         self.assertContains(resp_detalle, reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk}))
 
 
+class CodigoQRCertificacionUnicidadE2ETests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST8 (SCRUM-181):
+    Validar unicidad y correcto funcionamiento del QR por lote.
+
+    Criterios de Aceptación y Certificación:
+    1. Unicidad Estricta (1:1):
+       - Cada lote tiene exactamente un código QR único (restricción OneToOneField).
+       - Intentar crear un segundo registro de CodigoQRLote para el mismo lote lanza IntegrityError.
+       - La unicidad del identificador formal ('QR-<CODIGO>') es absoluta entre distintos lotes.
+       - La función de asociación 'asociar_codigo_qr_a_lote' es estrictamente idempotente.
+    2. Consistencia en Actualización de Lote:
+       - Modificar el código de un lote mantiene la unicidad y actualiza el identificador del QR.
+    3. Ciclo de Vida Completo E2E (Trazabilidad y Funcionamiento):
+       - Fase 1 (Creación): Registro automático del QR al crear el lote.
+       - Fase 2 (Escaneo Web): Consulta pública de la ficha digital y registro en bitácora (CONSULTA_WEB).
+       - Fase 3 (Consulta API REST): Consumo por escáner de aplicación móvil (CONSULTA_API).
+       - Fase 4 (Seguridad y Visibilidad): Conmutación a PRIVADA con bloqueo inmediato a anónimos (403)
+         y acceso irrestricto al productor dueño.
+       - Fase 5 (Descarga Física): Emisión del archivo PNG en alta definición con Content-Disposition.
+       - Fase 6 (Rotulado e Impresión): Renderizado de la etiqueta física con datos de origen y QR.
+       - Fase 7 (Trazabilidad Inmutable): Auditoría íntegra y ordenada en la BitacoraFichaDigital.
+    4. Aislamiento Multi-Productor:
+       - Productores no propietarios no pueden descargar ni consultar lotes privados ajenos.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.productor_ajeno_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Hacienda San José Certificación",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3130"),
+            longitud=Decimal("-72.4815"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Typica", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="HONEY_CERT", nombre="Honey Rojo", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 20),
+            cantidad_total=Decimal("8000.00"),
+            cantidad_disponible=Decimal("7500.00"),
+            activo=True,
+        )
+        self.lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("500.00"),
+            codigo="LOTCERT01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        self.qr = self.lote.codigo_qr
+
+    def test_unicidad_estricta_un_solo_qr_por_lote(self):
+        """Verifica que no sea posible crear un segundo CodigoQRLote para el mismo lote (ValidationError o IntegrityError)."""
+        with self.assertRaises((ValidationError, IntegrityError)):
+            CodigoQRLote.objects.create(
+                lote=self.lote,
+                identificador="QR-DUPLICADO-ERR",
+                payload_url="/trazabilidad/lote/DUPLICADO/",
+                nivel_visibilidad=CodigoQRLote.VISIBILIDAD_PUBLICA,
+            )
+
+    def test_unicidad_identificador_no_duplicable_entre_lotes(self):
+        """Verifica que dos lotes distintos no puedan compartir el mismo identificador de QR (ValidationError o IntegrityError)."""
+        lote2 = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("200.00"),
+            codigo="LOTCERT02",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        with self.assertRaises((ValidationError, IntegrityError)):
+            lote2.codigo_qr.identificador = self.qr.identificador
+            lote2.codigo_qr.save()
+
+    def test_asociar_codigo_qr_a_lote_idempotente_garantiza_unicidad(self):
+        """Invocaciones sucesivas de 'asociar_codigo_qr_a_lote' retornan el mismo registro sin duplicar."""
+        qr1 = asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+        qr2 = asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+
+        self.assertEqual(qr1.pk, qr2.pk)
+        self.assertEqual(qr1.identificador, "QR-LOTCERT01")
+        self.assertEqual(CodigoQRLote.objects.filter(lote=self.lote).count(), 1)
+
+    def test_actualizar_codigo_lote_mantiene_consistencia_y_unicidad_qr(self):
+        """Modificar el código del lote actualiza sincronizadamente el identificador del QR conservando unicidad."""
+        lote_actualizado = actualizar_lote(lote_o_id=self.lote, codigo="LOTCERTRENOMBRADO")
+        self.assertEqual(lote_actualizado.codigo, "LOTCERTRENOMBRADO")
+
+        self.qr.refresh_from_db()
+        self.assertEqual(self.qr.identificador, "QR-LOTCERTRENOMBRADO")
+        self.assertEqual(self.qr.payload_url, "/trazabilidad/lote/LOTCERTRENOMBRADO/")
+
+    def test_ciclo_completo_e2e_trazabilidad_qr(self):
+        """
+        Ejecuta el ciclo de vida completo E2E de un código QR:
+        Creación -> Escaneo Web -> Consulta API -> Cambio de Visibilidad -> Descarga PNG -> Impresión -> Auditoría.
+        """
+        # Fase 1: Creación automática verificada
+        self.assertTrue(self.lote.tiene_codigo_qr)
+        self.assertEqual(self.qr.identificador, "QR-LOTCERT01")
+        self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PUBLICA)
+
+        # Fase 2: Escaneo Web Público
+        url_scan_web = reverse("trazabilidad_qr_web", kwargs={"identificador": self.qr.identificador})
+        resp_web = self.client.get(url_scan_web)
+        self.assertEqual(resp_web.status_code, 200)
+        self.assertTemplateUsed(resp_web, "fincas/ficha_digital.html")
+
+        # Fase 3: Consulta API REST Consolidada
+        url_scan_api = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": self.qr.identificador})
+        resp_api = self.client.get(url_scan_api)
+        self.assertEqual(resp_api.status_code, 200)
+        data_api = resp_api.json()
+        self.assertEqual(data_api["codigo"], "LOTCERT01")
+        self.assertEqual(data_api["codigo_qr"]["identificador"], "QR-LOTCERT01")
+        self.assertFalse(data_api["es_propietario"])
+
+        # Fase 4: Modificación de Visibilidad a PRIVADA
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url_vis = reverse("lote_qr_visibilidad_web", kwargs={"pk": self.lote.pk})
+        resp_toggle = self.client.post(url_vis, {"nivel_visibilidad": "PRIVADA"}, follow=False)
+        self.assertEqual(resp_toggle.status_code, 302)
+        self.qr.refresh_from_db()
+        self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PRIVADA)
+
+        # Validación de bloqueo a anónimos
+        cliente_anonimo = Client()
+        resp_anon_web = cliente_anonimo.get(url_scan_web)
+        self.assertEqual(resp_anon_web.status_code, 403)
+        self.assertTemplateUsed(resp_anon_web, "fincas/ficha_digital_privada.html")
+
+        resp_anon_api = cliente_anonimo.get(url_scan_api)
+        self.assertEqual(resp_anon_api.status_code, 403)
+
+        # Validación de acceso al productor dueño
+        resp_owner_web = self.client.get(url_scan_web)
+        self.assertEqual(resp_owner_web.status_code, 200)
+
+        # Fase 5: Descarga de imagen física PNG
+        url_descarga = reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk})
+        resp_descarga = self.client.get(url_descarga)
+        self.assertEqual(resp_descarga.status_code, 200)
+        self.assertEqual(resp_descarga["Content-Type"], "image/png")
+        self.assertTrue(resp_descarga.content.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertIn('filename="QR-LOTCERT01.png"', resp_descarga["Content-Disposition"])
+
+        # Fase 6: Rotulado e Impresión de Etiqueta
+        url_imprimir = reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk})
+        resp_imprimir = self.client.get(url_imprimir)
+        self.assertEqual(resp_imprimir.status_code, 200)
+        self.assertTemplateUsed(resp_imprimir, "fincas/etiqueta_qr_lote.html")
+        self.assertContains(resp_imprimir, "QR-LOTCERT01")
+        self.assertContains(resp_imprimir, "window.print()")
+
+        # Fase 7: Auditoría Inmutable en Bitácora
+        auditorias = BitacoraFichaDigital.objects.filter(lote=self.lote).order_by("creado_en", "id")
+        self.assertTrue(auditorias.filter(tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_WEB).exists())
+        self.assertTrue(auditorias.filter(tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API).exists())
+
+    def test_aislamiento_entre_productores_y_seguridad_qr(self):
+        """Un productor ajeno no puede descargar el QR privado ni conmutar la visibilidad de otro lote."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        # Iniciar sesión como otro productor
+        _iniciar_sesion_productor(self.client, self.productor_ajeno_id)
+
+        # Intento de descarga de QR privado ajeno -> 403
+        url_descarga = reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk})
+        resp_descarga = self.client.get(url_descarga)
+        self.assertEqual(resp_descarga.status_code, 403)
+
+        # Intento de cambio de visibilidad de lote ajeno -> Redirigido o error
+        url_vis = reverse("lote_qr_visibilidad_web", kwargs={"pk": self.lote.pk})
+        resp_vis = self.client.post(url_vis, {"nivel_visibilidad": "PUBLICA"})
+        self.assertEqual(resp_vis.status_code, 302)
+
+        self.qr.refresh_from_db()
+        self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PRIVADA)
+
+
+
 
 
 
