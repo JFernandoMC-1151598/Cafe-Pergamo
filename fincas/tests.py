@@ -8936,6 +8936,136 @@ class TestScrum264EndpointManifestarInteres(TestCase):
         self.assertEqual(resp.status_code, 400)
 
 
+# ==============================================================================
+# SUBTAREA: HU22-ST6 (SCRUM-265) & HU22-ST7 (SCRUM-266): INTERFAZ Y CONFIRMACIÓN
+# ==============================================================================
+
+
+class TestScrum265InterfazManifestarInteresYCatalogo(TestCase):
+    """
+    Pruebas unitarias de interfaz y feedback UX para la acción de manifestar interés
+    en el catálogo y ficha digital (HU22-ST6 / SCRUM-265, HU22-ST7 / SCRUM-266).
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-TOLEDO-UI",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Finca Vista Hermosa",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            vereda="Santa Inés",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Bourbon Rosado",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="HONEY_UI",
+            nombre="Honey",
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-01",
+            cantidad_total=Decimal("800.00"),
+            cantidad_disponible=Decimal("400.00"),
+            activo=True,
+        )
+
+        self.lote = Lote.objects.create(
+            codigo="LOT-UI-2026-01",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("200.00"),
+            precio_referencial=Decimal("22000.00"),
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+
+        self.calidad = CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            puntaje_taza=Decimal("86.50"),
+            humedad=Decimal("11.20"),
+            perfil_sensorial="Notas florales, jazmín y miel.",
+        )
+
+    def _iniciar_sesion(self, usuario_id, correo="comprador.ui@example.com", rol="COMPRADOR"):
+        session = self.client.session
+        session["usuario_id"] = str(usuario_id)
+        session["correo"] = correo
+        session["usuario_email"] = correo
+        session["rol"] = rol
+        session.save()
+
+    def test_catalogo_muestra_boton_manifestar_interes_en_tarjeta(self):
+        """La grilla del catálogo incluye el botón interactivo de manifestar interés por cada lote."""
+        url = reverse("catalogo")
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Manifestar Interés")
+        self.assertContains(resp, f'id="btn-manifestar-interes-{self.lote.id}"')
+        self.assertContains(resp, 'data-bs-target="#modalManifestarInteres"')
+        self.assertContains(resp, f'data-lote-codigo="{self.lote.codigo}"')
+
+    def test_catalogo_incluye_modal_de_formulario_y_modal_de_confirmacion(self):
+        """La plantilla catalogo.html contiene el modal de captura y el modal de éxito (SCRUM-266)."""
+        url = reverse("catalogo")
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="modalManifestarInteres"')
+        self.assertContains(resp, 'name="cantidad_kg"')
+        self.assertContains(resp, 'name="mensaje"')
+        self.assertContains(resp, 'name="telefono_contacto"')
+        self.assertContains(resp, 'id="modalConfirmacionInteresExito"')
+        self.assertContains(resp, "¡Interés Manifestado con Éxito!")
+
+    def test_ficha_digital_muestra_boton_y_modal_de_interes_comercial(self):
+        """La Ficha Digital pública consolida la sección comercial con botón y modal de interés."""
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="btn-manifestar-interes-ficha"')
+        self.assertContains(resp, 'id="modalManifestarInteresFicha"')
+        self.assertContains(resp, 'id="modalConfirmacionInteresFichaExito"')
+
+    def test_confirmacion_al_comprador_via_ajax_devuelve_payload_de_exito(self):
+        """El flujo asíncrono responde confirmación estructurada para el feedback del comprador."""
+        self._iniciar_sesion(self.comprador_id)
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote.pk})
+        resp = self.client.post(
+            url,
+            data=json.dumps({"cantidad_kg": "50.00", "mensaje": "Solicitud de prueba"}),
+            content_type="application/json",
+            headers={"x-requested-with": "XMLHttpRequest"},
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertTrue(data["ok"])
+        self.assertIn("notificada al productor", data["mensaje"])
+        self.assertEqual(data["data"]["lote_codigo"], self.lote.codigo)
+
+
+
 
 
 
