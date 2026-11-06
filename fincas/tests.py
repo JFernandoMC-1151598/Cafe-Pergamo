@@ -34,6 +34,7 @@ from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse, JsonResponse
 from django.test import Client, RequestFactory, SimpleTestCase, TestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
 
 
@@ -9063,6 +9064,211 @@ class TestScrum265InterfazManifestarInteresYCatalogo(TestCase):
         self.assertTrue(data["ok"])
         self.assertIn("notificada al productor", data["mensaje"])
         self.assertEqual(data["data"]["lote_codigo"], self.lote.codigo)
+
+
+# ==============================================================================
+# SUBTAREA: HU22-ST8 (SCRUM-267): PRUEBAS DEL REGISTRO Y NOTIFICACIÓN DE INTERÉS
+# ==============================================================================
+
+
+class TestScrum267PruebasRegistroYNotificacionInteres(TestCase):
+    """
+    Batería exhaustiva de pruebas unitarias y de integración para certificar el
+    cumplimiento de los criterios de aceptación de la HU-22 (SCRUM-267):
+    - Criterio 1: La manifestación queda registrada.
+    - Criterio 2: La manifestación es notificada al productor/comercializador del lote.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-TOLEDO-ST8",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.comprador_1_id = uuid.uuid4()
+        self.comprador_2_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Finca La Samaria",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            vereda="El Roble",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Geisha Especial",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="ANAEROBICO_ST8",
+            nombre="Anaeróbico 72h",
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-15",
+            cantidad_total=Decimal("1500.00"),
+            cantidad_disponible=Decimal("1500.00"),
+            activo=True,
+        )
+
+        self.lote_a = Lote.objects.create(
+            codigo="LOT-ST8-001",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("500.00"),
+            precio_referencial=Decimal("28000.00"),
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+
+        self.lote_b = Lote.objects.create(
+            codigo="LOT-ST8-002",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("300.00"),
+            precio_referencial=Decimal("25000.00"),
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+
+    def test_criterio1_registro_completo_con_contrato_estructurado(self):
+        """Certifica Criterio 1: La manifestación queda registrada con todos los metadatos necesarios."""
+        resultado = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            comprador_correo="comprador.especial@mercado.com",
+            cantidad_kg=Decimal("250.00"),
+            mensaje="Interés en lote para exportación a Europa.",
+            telefono_contacto="+57 315 8889900",
+        )
+
+        self.assertIsNotNone(resultado["id"])
+        self.assertTrue(resultado["id"].startswith("INT-"))
+        self.assertEqual(resultado["lote_id"], self.lote_a.id)
+        self.assertEqual(resultado["lote_codigo"], "LOT-ST8-001")
+        self.assertEqual(resultado["finca_nombre"], "Finca La Samaria")
+        self.assertEqual(resultado["productor_id"], str(self.productor_id))
+        self.assertEqual(resultado["comprador_id"], str(self.comprador_1_id))
+        self.assertEqual(resultado["comprador_correo"], "comprador.especial@mercado.com")
+        self.assertEqual(resultado["cantidad_kg"], "250.00")
+        self.assertEqual(resultado["mensaje"], "Interés en lote para exportación a Europa.")
+        self.assertEqual(resultado["telefono_contacto"], "+57 315 8889900")
+        self.assertEqual(resultado["estado"], "REGISTRADO")
+
+    def test_criterio2_notificacion_al_productor_del_lote(self):
+        """Certifica Criterio 2: La manifestación es notificada al productor del lote con la información requerida."""
+        resultado = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            comprador_correo="juan.comprador@tostadores.com",
+            cantidad_kg=Decimal("100.00"),
+            mensaje="Propuesta de compra inmediata para despacho en Bucaramanga.",
+            telefono_contacto="+57 301 5554433",
+        )
+
+        # La respuesta confirma que se generó la notificación
+        self.assertTrue(resultado["notificado"])
+        # Incluye los canales de contacto requeridos para la notificación
+        self.assertEqual(resultado["productor_id"], str(self.productor_id))
+        self.assertIn("La Samaria", resultado["productor_nombre"])
+        self.assertEqual(resultado["comprador_correo"], "juan.comprador@tostadores.com")
+
+    def test_multiples_compradores_en_el_mismo_lote_tienen_solicitudes_unicas(self):
+        """Dos compradores distintos registran interés en el mismo lote de forma independiente."""
+        reg1 = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            comprador_correo="comprador1@example.com",
+            cantidad_kg=Decimal("100.00"),
+        )
+        reg2 = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_2_id,
+            comprador_correo="comprador2@example.com",
+            cantidad_kg=Decimal("150.00"),
+        )
+
+        self.assertNotEqual(reg1["id"], reg2["id"])
+        self.assertNotEqual(reg1["comprador_id"], reg2["comprador_id"])
+        self.assertEqual(reg1["lote_codigo"], reg2["lote_codigo"])
+        self.assertEqual(reg1["estado"], "REGISTRADO")
+        self.assertEqual(reg2["estado"], "REGISTRADO")
+
+    def test_un_mismo_comprador_puede_manifestar_interes_en_multiples_lotes(self):
+        """Un comprador registra interés en dos lotes distintos con éxito."""
+        reg_lote_a = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            cantidad_kg=Decimal("200.00"),
+        )
+        reg_lote_b = registrar_manifestacion_interes(
+            lote_id=self.lote_b.id,
+            comprador_id=self.comprador_1_id,
+            cantidad_kg=Decimal("100.00"),
+        )
+
+        self.assertEqual(reg_lote_a["lote_codigo"], "LOT-ST8-001")
+        self.assertEqual(reg_lote_b["lote_codigo"], "LOT-ST8-002")
+        self.assertNotEqual(reg_lote_a["id"], reg_lote_b["id"])
+
+    def test_limite_exacto_de_stock_disponible_es_admitido(self):
+        """Solicitar exactamente todo el stock del lote (500 kg) es válido."""
+        resultado = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            cantidad_kg=Decimal("500.00"),
+        )
+        self.assertEqual(resultado["cantidad_kg"], "500.00")
+
+    def test_superar_stock_incluso_por_un_gramo_es_rechazado(self):
+        """Solicitar 500.01 kg sobre un stock de 500.00 kg es rechazado."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_a.id,
+                comprador_id=self.comprador_1_id,
+                cantidad_kg=Decimal("500.01"),
+            )
+        self.assertIn("cantidad_kg", ctx.exception.message_dict)
+        self.assertIn("superar el stock", ctx.exception.message_dict["cantidad_kg"][0])
+
+    def test_preservacion_de_caracteres_especiales_y_tildes(self):
+        """Mensajes con tildes, signos de puntuación y saltos de línea se preservan íntegros."""
+        mensaje_complejo = "¡Hola! ¿Tienen disponibilidad de envío a Medellín? Interesado en 150 kg café año 2026."
+        resultado = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            mensaje=mensaje_complejo,
+        )
+        self.assertEqual(resultado["mensaje"], mensaje_complejo)
+
+    def test_mock_disparo_notificacion_externa(self):
+        """Simula y verifica que el flujo dispara correctamente el mecanismo de notificación."""
+        with patch("fincas.services.timezone.now") as mock_now:
+            ahora_fijo = timezone.now()
+            mock_now.return_value = ahora_fijo
+
+            resultado = registrar_manifestacion_interes(
+                lote_id=self.lote_a.id,
+                comprador_id=self.comprador_1_id,
+                comprador_correo="test@comprador.com",
+            )
+            self.assertEqual(resultado["fecha_registro"], ahora_fijo.isoformat())
+            self.assertTrue(resultado["notificado"])
+
 
 
 
