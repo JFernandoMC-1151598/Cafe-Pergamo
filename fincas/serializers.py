@@ -638,3 +638,34 @@ class EstructuraCodigoQRSerializer(serializers.Serializer):
     creado_en = serializers.DateTimeField(required=False)
 
 
+class ManifestacionInteresInputSerializer(serializers.Serializer):
+    """
+    Serializador de entrada para registrar la manifestación de interés sobre un lote
+    (HU22-ST5 / SCRUM-264).
+    """
+
+    cantidad_kg = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=Decimal("0.01"),
+        help_text="Cantidad de café en kilogramos que el comprador desea adquirir o negociar.",
+    )
+    mensaje = serializers.CharField(
+        max_length=1000,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Mensaje o propuesta inicial del comprador hacia el productor/comercializador.",
+    )
+    telefono_contacto = serializers.CharField(
+        max_length=30,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Teléfono o canal de contacto directo para agilizar la negociación.",
+    )
+
+
+

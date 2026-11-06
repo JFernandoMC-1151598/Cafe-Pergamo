@@ -519,8 +519,15 @@
             </div>
             <div class="col-md-4 text-md-end">
                 {% if ficha.disponible_para_venta %}
-                    <a href="{% url 'catalogo' %}" class="btn btn-primary bg-primary px-4 fw-semibold rounded-pill">
-                        <i class="bi bi-handbag me-1"></i> Ver en Catálogo Público
+                    <button type="button" 
+                            class="btn btn-success bg-success px-4 fw-semibold rounded-pill shadow-sm"
+                            data-bs-toggle="modal" 
+                            data-bs-target="#modalManifestarInteresFicha"
+                            id="btn-manifestar-interes-ficha">
+                        <i class="bi bi-send-check me-1"></i> Manifestar Interés
+                    </button>
+                    <a href="{% url 'catalogo' %}" class="btn btn-outline-primary btn-sm rounded-pill px-3 ms-md-2 mt-2 mt-md-0">
+                        <i class="bi bi-handbag me-1"></i> Ver Catálogo
                     </a>
                 {% else %}
                     <button class="btn btn-secondary px-4 fw-semibold rounded-pill" disabled>
@@ -531,5 +538,239 @@
         </div>
     </div>
 
+    <!-- Modal de Formulario para Manifestar Interés desde Ficha Digital (HU-22 / SCRUM-265) -->
+    <div class="modal fade no-print" id="modalManifestarInteresFicha" tabindex="-1" aria-labelledby="modalFichaLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow rounded-4 overflow-hidden">
+                <div class="modal-header text-white p-4" style="background: linear-gradient(135deg, #2B1810 0%, #4A2C2A 50%, #1B381E 100%) !important; color: #ffffff !important;">
+                    <div>
+                        <span class="badge bg-warning text-dark fw-bold mb-1"><i class="bi bi-tag-fill me-1"></i>Negociación Directa</span>
+                        <h5 class="modal-title fw-bold text-white mb-0" id="modalFichaLabel">
+                            Manifestar Interés — Lote {{ ficha.codigo }}
+                        </h5>
+                    </div>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                
+                <form id="formManifestarInteresFicha" method="POST" action="{% url 'lote_manifestar_interes_web' ficha.id %}">
+                    {% csrf_token %}
+                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    
+                    <div class="modal-body p-4 text-start">
+                        <!-- Resumen del lote -->
+                        <div class="bg-light p-3 rounded-3 mb-3 border">
+                            <div class="row g-2 small">
+                                <div class="col-6">
+                                    <span class="text-muted d-block">Finca:</span>
+                                    <strong class="text-dark">{{ ficha.finca.nombre }}</strong>
+                                </div>
+                                <div class="col-6">
+                                    <span class="text-muted d-block">Stock disponible:</span>
+                                    <strong class="text-success">{{ ficha.cantidad_kg }} kg</strong>
+                                </div>
+                                <div class="col-12 border-top pt-2 mt-2">
+                                    <span class="text-muted">Origen:</span>
+                                    <span class="text-dark ms-1">{{ ficha.finca.municipio }}, {{ ficha.finca.departamento }}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="modalFichaAlertError" class="alert alert-danger d-none py-2 px-3 small" role="alert"></div>
+
+                        {% if not user.is_authenticated %}
+                            <div class="alert alert-warning border-warning-subtle small mb-3">
+                                <i class="bi bi-info-circle me-1"></i>
+                                Para formalizar tu manifestación de interés y contactar al productor, debes 
+                                <a href="{% url 'login' %}?next={{ request.get_full_path }}" class="fw-bold text-dark text-decoration-underline">iniciar sesión</a> o 
+                                <a href="{% url 'registro' %}" class="fw-bold text-dark text-decoration-underline">registrarte como comprador</a>.
+                            </div>
+                        {% endif %}
+
+                        <div class="mb-3">
+                            <label for="fichaInputCantidad" class="form-label fw-semibold text-dark small mb-1">
+                                Cantidad en kilogramos (kg) que deseas cotizar o negociar:
+                            </label>
+                            <div class="input-group input-group-sm">
+                                <input type="number" 
+                                       class="form-control" 
+                                       id="fichaInputCantidad" 
+                                       name="cantidad_kg" 
+                                       min="0.01" 
+                                       max="{{ ficha.cantidad_kg }}"
+                                       step="0.01" 
+                                       placeholder="Ej: 100.00 (opcional, máx {{ ficha.cantidad_kg }} kg)">
+                                <span class="input-group-text bg-white">kg</span>
+                            </div>
+                            <div class="form-text small">Deja vacío si tu consulta es por el lote completo.</div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="fichaInputTelefono" class="form-label fw-semibold text-dark small mb-1">
+                                Teléfono o WhatsApp de contacto directo:
+                            </label>
+                            <input type="tel" 
+                                   class="form-control form-control-sm" 
+                                   id="fichaInputTelefono" 
+                                   name="telefono_contacto" 
+                                   placeholder="+57 300 0000000" 
+                                   maxlength="30">
+                        </div>
+
+                        <div class="mb-2">
+                            <label for="fichaInputMensaje" class="form-label fw-semibold text-dark small mb-1">
+                                Mensaje o propuesta inicial:
+                            </label>
+                            <textarea class="form-control form-control-sm" 
+                                      id="fichaInputMensaje" 
+                                      name="mensaje" 
+                                      rows="3" 
+                                      maxlength="1000" 
+                                      placeholder="Escribe aquí tu interés de compra, muestras, tiempos de entrega..."></textarea>
+                        </div>
+                    </div>
+
+                    <div class="modal-footer bg-light border-top p-3 d-flex justify-content-between">
+                        <button type="button" class="btn btn-outline-secondary btn-sm px-3" data-bs-dismiss="modal">
+                            Cancelar
+                        </button>
+                        {% if user.is_authenticated %}
+                            <button type="submit" class="btn btn-success bg-success btn-sm px-4 fw-semibold" id="btnEnviarManifestacionFicha">
+                                <span class="spinner-border spinner-border-sm me-1 d-none" id="spinnerFicha" role="status" aria-hidden="true"></span>
+                                <i class="bi bi-send-check me-1" id="iconFicha"></i> Enviar Manifestación
+                            </button>
+                        {% else %}
+                            <a href="{% url 'login' %}?next={{ request.get_full_path }}" class="btn btn-primary bg-primary btn-sm px-4 fw-semibold">
+                                <i class="bi bi-box-arrow-in-right me-1"></i> Iniciar Sesión para Enviar
+                            </a>
+                        {% endif %}
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de Confirmación Exitosa desde Ficha Digital (HU-22 / SCRUM-266) -->
+    <div class="modal fade no-print" id="modalConfirmacionInteresFichaExito" tabindex="-1" aria-labelledby="modalFichaExitoLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow rounded-4 text-center p-4">
+                <div class="modal-body">
+                    <div class="d-inline-flex align-items-center justify-content-center bg-success-subtle text-success rounded-circle p-4 mb-3" style="width: 80px; height: 80px;">
+                        <i class="bi bi-check2-circle fs-1"></i>
+                    </div>
+                    <h4 class="fw-bold text-dark mb-2" id="modalFichaExitoLabel">¡Interés Registrado Exitosamente!</h4>
+                    <p class="text-muted small mb-3" id="modalFichaExitoMensaje">
+                        Tu manifestación de interés por el lote <strong>{{ ficha.codigo }}</strong> ha sido registrada y notificada al productor.
+                    </p>
+                    <div class="bg-light p-3 rounded-3 text-start small mb-4 border">
+                        <div class="d-flex justify-content-between mb-1">
+                            <span class="text-muted">Lote:</span>
+                            <strong class="text-dark">{{ ficha.codigo }}</strong>
+                        </div>
+                        <div class="d-flex justify-content-between mb-1">
+                            <span class="text-muted">Identificador:</span>
+                            <span class="font-monospace text-primary fw-bold" id="modalFichaExitoId">—</span>
+                        </div>
+                        <div class="d-flex justify-content-between">
+                            <span class="text-muted">Estado:</span>
+                            <span class="badge bg-success">REGISTRADO Y NOTIFICADO</span>
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-primary bg-primary px-4 fw-semibold rounded-pill" data-bs-dismiss="modal">
+                        <i class="bi bi-check-lg me-1"></i> Entendido
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const formFicha = document.getElementById('formManifestarInteresFicha');
+    if (!formFicha) return;
+
+    const modalFicha = document.getElementById('modalManifestarInteresFicha');
+    const alertError = document.getElementById('modalFichaAlertError');
+    const btnEnviar = document.getElementById('btnEnviarManifestacionFicha');
+    const spinner = document.getElementById('spinnerFicha');
+    const icon = document.getElementById('iconFicha');
+    const btnMainFicha = document.getElementById('btn-manifestar-interes-ficha');
+
+    formFicha.addEventListener('submit', function (e) {
+        e.preventDefault();
+
+        if (alertError) {
+            alertError.classList.add('d-none');
+            alertError.textContent = '';
+        }
+
+        if (btnEnviar) {
+            btnEnviar.disabled = true;
+            if (spinner) spinner.classList.remove('d-none');
+            if (icon) icon.classList.add('d-none');
+        }
+
+        const formData = new FormData(formFicha);
+
+        fetch(formFicha.action, {
+            method: 'POST',
+            body: formData,
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest'
+            }
+        })
+        .then(async function (response) {
+            const data = await response.json().catch(() => ({}));
+            if (response.ok && data.ok) {
+                // Ocultar modal de formulario
+                const bsModal = bootstrap.Modal.getInstance(modalFicha);
+                if (bsModal) bsModal.hide();
+
+                // Cambiar estado del botón principal en la ficha
+                if (btnMainFicha) {
+                    btnMainFicha.className = 'btn btn-outline-success px-4 fw-semibold rounded-pill disabled';
+                    btnMainFicha.innerHTML = '<i class="bi bi-check-circle-fill me-1 text-success"></i> Interés Registrado';
+                    btnMainFicha.setAttribute('disabled', 'disabled');
+                }
+
+                // Abrir modal de éxito
+                const exitoModalEl = document.getElementById('modalConfirmacionInteresFichaExito');
+                if (exitoModalEl) {
+                    const exitoMsg = document.getElementById('modalFichaExitoMensaje');
+                    const exitoId = document.getElementById('modalFichaExitoId');
+                    if (exitoMsg && data.mensaje) exitoMsg.textContent = data.mensaje;
+                    if (exitoId && data.data) exitoId.textContent = data.data.id;
+
+                    const bsExito = new bootstrap.Modal(exitoModalEl);
+                    bsExito.show();
+                }
+
+                formFicha.reset();
+            } else {
+                const errorMsg = data.error || 'Ocurrió un error al registrar la manifestación de interés.';
+                if (alertError) {
+                    alertError.textContent = errorMsg;
+                    alertError.classList.remove('d-none');
+                }
+            }
+        })
+        .catch(function (err) {
+            if (alertError) {
+                alertError.textContent = 'Error de conexión con el servidor. Intente nuevamente.';
+                alertError.classList.remove('d-none');
+            }
+        })
+        .finally(function () {
+            if (btnEnviar) {
+                btnEnviar.disabled = false;
+                if (spinner) spinner.classList.add('d-none');
+                if (icon) icon.classList.remove('d-none');
+            }
+        });
+    });
+});
+</script>
 {% endblock %}

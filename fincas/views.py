@@ -75,6 +75,7 @@ from .serializers import (
     LoteDespublicarInputSerializer,
     LotePublicarInputSerializer,
     LoteSerializer,
+    ManifestacionInteresInputSerializer,
     MunicipioSerializer,
 )
 from .services import (
@@ -93,6 +94,7 @@ from .services import (
     obtener_ficha_consolidada_lote,
     publicar_lote_en_catalogo,
     reactivar_municipio,
+    registrar_manifestacion_interes,
     registrar_auditoria_ficha_digital,
     registrar_etapa_beneficio,
     resolver_lote_desde_qr,
@@ -2171,3 +2173,160 @@ def api_catalogo_view(request):
             MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO if filtros else MENSAJE_CATALOGO_VACIO
         )
     return Response(respuesta, status=status.HTTP_200_OK)
+
+
+# ==============================================================================
+# MANIFESTACIÓN DE INTERÉS SOBRE UN LOTE (HU-22 / SCRUM-231 / SCRUM-264)
+# ==============================================================================
+
+
+def manifestar_interes_lote_web_view(request, pk):
+    """
+    Controlador web para que un comprador manifieste interés formal sobre un lote
+    específico publicado en el catálogo o desde su ficha de detalle (HU22-ST5 / SCRUM-264).
+
+    Soporta peticiones POST estándar de formularios HTML y peticiones asíncronas
+    AJAX / Fetch devolviendo JSON con formato estandarizado.
+    """
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    es_ajax = (
+        request.headers.get("x-requested-with") == "XMLHttpRequest"
+        or "application/json" in request.headers.get("accept", "").lower()
+        or request.content_type == "application/json"
+    )
+
+    comprador_id = _resolver_productor_id(request)
+    if not comprador_id:
+        if es_ajax:
+            return JsonResponse(
+                {"ok": False, "error": "Debe iniciar sesión para manifestar interés en este lote."},
+                status=401,
+            )
+        messages.error(request, "Debe iniciar sesión como comprador para manifestar interés en este lote.")
+        next_url = request.POST.get("next") or request.META.get("HTTP_REFERER") or reverse("catalogo")
+        return redirect(f"{reverse('login')}?next={next_url}")
+
+    comprador_correo = _resolver_usuario_correo(request)
+
+    # Extraer parámetros según el tipo de contenido
+    if request.content_type == "application/json" and request.body:
+        import json
+        try:
+            payload = json.loads(request.body.decode("utf-8"))
+        except Exception:
+            payload = {}
+        cantidad_kg = payload.get("cantidad_kg")
+        mensaje = payload.get("mensaje", "")
+        telefono_contacto = payload.get("telefono_contacto", "")
+    else:
+        cantidad_kg = request.POST.get("cantidad_kg", "").strip() or None
+        mensaje = request.POST.get("mensaje", "").strip()
+        telefono_contacto = request.POST.get("telefono_contacto", "").strip()
+
+    next_redirect = request.POST.get("next") or request.META.get("HTTP_REFERER") or "catalogo"
+
+    try:
+        resultado = registrar_manifestacion_interes(
+            lote_id=pk,
+            comprador_id=comprador_id,
+            comprador_correo=comprador_correo,
+            cantidad_kg=cantidad_kg,
+            mensaje=mensaje,
+            telefono_contacto=telefono_contacto,
+        )
+
+        mensaje_exito = (
+            f"¡Tu manifestación de interés por el lote '{resultado['lote_codigo']}' "
+            f"ha sido registrada y notificada al productor exitosamente!"
+        )
+
+        if es_ajax:
+            return JsonResponse(
+                {
+                    "ok": True,
+                    "mensaje": mensaje_exito,
+                    "data": resultado,
+                },
+                status=201,
+            )
+
+        messages.success(request, mensaje_exito)
+        return redirect(next_redirect)
+
+    except ValidationError as exc:
+        detalles_error = (
+            "; ".join(
+                [f"{', '.join(v) if isinstance(v, list) else v}" for v in exc.message_dict.values()]
+            )
+            if hasattr(exc, "message_dict")
+            else str(exc)
+        )
+        if es_ajax:
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "error": detalles_error,
+                },
+                status=400,
+            )
+
+        messages.error(request, f"No se pudo registrar la manifestación de interés: {detalles_error}")
+        return redirect(next_redirect)
+
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_manifestar_interes_lote_view(request, pk):
+    """
+    Endpoint REST para registrar la manifestación de interés sobre un lote comercial
+    (HU22-ST5 / SCRUM-264).
+    POST /fincas/api/lotes/<pk>/interes/
+    Body JSON: {"cantidad_kg": <decimal opcional>, "mensaje": <str opcional>, "telefono_contacto": <str opcional>}
+    """
+    comprador_id = _resolver_productor_id(request)
+    if not comprador_id:
+        return Response(
+            {"error": "Debe autenticarse como comprador para registrar interés en el lote."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    serializer = ManifestacionInteresInputSerializer(data=request.data or {})
+    if not serializer.is_valid():
+        return Response(
+            {"error": "Datos de entrada inválidos.", "detalles": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    cantidad_kg = serializer.validated_data.get("cantidad_kg")
+    mensaje = serializer.validated_data.get("mensaje", "")
+    telefono_contacto = serializer.validated_data.get("telefono_contacto", "")
+    comprador_correo = _resolver_usuario_correo(request)
+
+    try:
+        resultado = registrar_manifestacion_interes(
+            lote_id=pk,
+            comprador_id=comprador_id,
+            comprador_correo=comprador_correo,
+            cantidad_kg=cantidad_kg,
+            mensaje=mensaje,
+            telefono_contacto=telefono_contacto,
+        )
+        return Response(
+            {
+                "mensaje": (
+                    f"Manifestación de interés registrada exitosamente para el lote '{resultado['lote_codigo']}'."
+                ),
+                "manifestacion": resultado,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+    except ValidationError as exc:
+        detalles = exc.message_dict if hasattr(exc, "message_dict") else {"error": str(exc)}
+        return Response(
+            {"error": "No fue posible registrar la manifestación de interés.", "detalles": detalles},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
