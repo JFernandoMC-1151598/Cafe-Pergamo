@@ -27,6 +27,7 @@ urlpatterns = [
     path('lotes/<int:pk>/', views.detalle_lote_view, name='lote_detalle'),
     path('lotes/<int:pk>/calidad/', views.registrar_calidad_lote_view, name='lote_calidad'),
     path('lotes/<int:pk>/etapas/nueva/', views.registrar_etapa_beneficio_view, name='lote_etapa_registro'),
+    path('lotes/<int:pk>/manifestar-interes/', views.manifestar_interes_lote_web_view, name='lote_manifestar_interes_web'),
     path('lotes/<int:pk>/publicar/', views.publicar_lote_web_view, name='lote_publicar'),
     path('lotes/<int:pk>/despublicar/', views.despublicar_lote_web_view, name='lote_despublicar'),
     path('lotes/<str:codigo>/ficha/', views.ficha_digital_web_view, name='lote_ficha_digital_web'),
@@ -94,4 +95,7 @@ urlpatterns = [
 
     # API REST pública del catálogo con filtros combinados (HU-20 / SCRUM-250)
     path('api/catalogo/', views.api_catalogo_view, name='api_catalogo'),
+
+    # API REST de Manifestación de Interés en un Lote (HU-22 / SCRUM-264)
+    path('api/lotes/<int:pk>/interes/', views.api_manifestar_interes_lote_view, name='api_lote_manifestar_interes'),
 ]

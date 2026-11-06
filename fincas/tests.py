@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 
 from django import forms as forms_module
 from django.contrib.auth.models import User
+from django.contrib.messages import get_messages
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
@@ -74,6 +75,7 @@ from fincas.services import (
     obtener_opciones_filtro_catalogo,
     publicar_lote_en_catalogo,
     registrar_etapa_beneficio,
+    registrar_manifestacion_interes,
     validar_lote_para_publicacion,
     actualizar_visibilidad_codigo_qr,
     actualizar_lote,
@@ -8658,6 +8660,281 @@ class CodigoQRCertificacionUnicidadE2ETests(TestCase):
 
         self.qr.refresh_from_db()
         self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PRIVADA)
+
+
+# ==============================================================================
+# SUBTAREA: HU22-ST5 (SCRUM-264): EXPOSICIÓN DEL ENDPOINT PARA REGISTRAR INTERÉS
+# ==============================================================================
+
+
+class TestScrum264EndpointManifestarInteres(TestCase):
+    """
+    Pruebas unitarias y de integración para la exposición del endpoint
+    y servicio de manifestación de interés sobre lotes (HU-22 / SCRUM-264).
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-TOLEDO-HU22",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+        self.otro_comprador_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Finca La Esperanza HU22",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            vereda="El Diamante",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo HU22",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO_HU22",
+            nombre="Lavado Tradicional",
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-08-10",
+            cantidad_total=Decimal("1200.00"),
+            cantidad_disponible=Decimal("600.00"),
+            activo=True,
+        )
+
+        self.lote_publicado = Lote.objects.create(
+            codigo="LOTE-HU22-001",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("350.00"),
+            precio_referencial=Decimal("18500.00"),
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+
+        self.lote_no_publicado = Lote.objects.create(
+            codigo="LOTE-HU22-002",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("250.00"),
+            publicado_en_catalogo=False,
+            activo=True,
+        )
+
+        self.lote_inactivo = Lote.objects.create(
+            codigo="LOTE-HU22-003",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("100.00"),
+            publicado_en_catalogo=True,
+            activo=False,
+        )
+
+    def _iniciar_sesion(self, usuario_id, correo="comprador@example.com", rol="COMPRADOR"):
+        session = self.client.session
+        session["usuario_id"] = str(usuario_id)
+        session["correo"] = correo
+        session["usuario_email"] = correo
+        session["rol"] = rol
+        session.save()
+
+    def test_servicio_valida_existencia_lote(self):
+        """Lote inexistente arroja ValidationError informando que no existe."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=999999,
+                comprador_id=self.comprador_id,
+            )
+        self.assertIn("lote", ctx.exception.message_dict)
+
+    def test_servicio_valida_lote_inactivo(self):
+        """Lote inactivo no puede recibir manifestaciones de interés."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_inactivo.id,
+                comprador_id=self.comprador_id,
+            )
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertIn("activo", ctx.exception.message_dict["lote"][0])
+
+    def test_servicio_valida_lote_no_publicado_en_catalogo(self):
+        """Lote no publicado en catálogo comercial rechaza manifestación."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_no_publicado.id,
+                comprador_id=self.comprador_id,
+            )
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertIn("catálogo", ctx.exception.message_dict["lote"][0])
+
+    def test_servicio_rechaza_interes_propio_productor(self):
+        """Un productor no puede manifestar interés sobre su propio lote."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_publicado.id,
+                comprador_id=self.productor_id,
+            )
+        self.assertIn("comprador", ctx.exception.message_dict)
+        self.assertIn("propio lote", ctx.exception.message_dict["comprador"][0])
+
+    def test_servicio_valida_cantidad_positiva(self):
+        """Cantidad menor o igual a cero es rechazada."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_publicado.id,
+                comprador_id=self.comprador_id,
+                cantidad_kg=Decimal("0.00"),
+            )
+        self.assertIn("cantidad_kg", ctx.exception.message_dict)
+
+    def test_servicio_valida_cantidad_no_exceda_stock_disponible(self):
+        """Cantidad mayor al stock del lote (350 kg) es rechazada."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_publicado.id,
+                comprador_id=self.comprador_id,
+                cantidad_kg=Decimal("400.00"),
+            )
+        self.assertIn("cantidad_kg", ctx.exception.message_dict)
+        self.assertIn("superar el stock", ctx.exception.message_dict["cantidad_kg"][0])
+
+    def test_servicio_manifestacion_exitosa_por_id_o_codigo(self):
+        """Registro exitoso devuelve el contrato con los datos esperados."""
+        res_id = registrar_manifestacion_interes(
+            lote_id=self.lote_publicado.id,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador@cafes.com",
+            cantidad_kg=Decimal("150.00"),
+            mensaje="Interesado en adquirir muestra inicial.",
+            telefono_contacto="+57 312 0000000",
+        )
+        self.assertEqual(res_id["lote_id"], self.lote_publicado.id)
+        self.assertEqual(res_id["lote_codigo"], "LOTE-HU22-001")
+        self.assertEqual(res_id["estado"], "REGISTRADO")
+        self.assertTrue(res_id["notificado"])
+        self.assertEqual(res_id["cantidad_kg"], "150.00")
+
+        # Prueba con código textual
+        res_cod = registrar_manifestacion_interes(
+            lote_id=self.lote_publicado.codigo,
+            comprador_id=self.comprador_id,
+        )
+        self.assertEqual(res_cod["lote_codigo"], "LOTE-HU22-001")
+
+    def test_vista_web_rechaza_metodo_get(self):
+        """El endpoint web solo admite POST (405 Method Not Allowed)."""
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote_publicado.pk})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 405)
+
+    def test_vista_web_redirecciona_a_login_si_es_anonimo(self):
+        """Usuario no autenticado es redirigido a login al intentar POST tradicional."""
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote_publicado.pk})
+        resp = self.client.post(url, {"cantidad_kg": "50.00"})
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(reverse("login"), resp.url)
+
+    def test_vista_web_ajax_responde_401_si_es_anonimo(self):
+        """Petición asíncrona no autenticada responde 401 Unauthorized JSON."""
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote_publicado.pk})
+        resp = self.client.post(
+            url,
+            data=json.dumps({"cantidad_kg": "50.00"}),
+            content_type="application/json",
+            headers={"x-requested-with": "XMLHttpRequest"},
+        )
+        self.assertEqual(resp.status_code, 401)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+
+    def test_vista_web_post_exitoso_y_redireccion(self):
+        """Comprador autenticado registra interés y es redirigido con mensaje exitoso."""
+        self._iniciar_sesion(self.comprador_id)
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote.pk if hasattr(self, 'lote') else self.lote_publicado.pk})
+        resp = self.client.post(
+            url,
+            {
+                "cantidad_kg": "100.00",
+                "mensaje": "Quiero cotizar este lote",
+                "telefono_contacto": "3001234567",
+                "next": reverse("catalogo"),
+            },
+            follow=False,
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.url, reverse("catalogo"))
+        # Verificar mensaje en el storage de mensajes
+        messages = list(get_messages(resp.wsgi_request))
+        self.assertTrue(any("manifestación de interés" in str(m) for m in messages))
+
+    def test_vista_web_ajax_post_exitoso_retorna_201_json(self):
+        """Petición AJAX autenticada retorna 201 Created con payload estructurado."""
+        self._iniciar_sesion(self.comprador_id)
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote_publicado.pk})
+        resp = self.client.post(
+            url,
+            data=json.dumps({
+                "cantidad_kg": "80.00",
+                "mensaje": "Oferta formal de compra",
+            }),
+            content_type="application/json",
+            headers={"x-requested-with": "XMLHttpRequest"},
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertTrue(data["ok"])
+        self.assertIn("notificada al productor", data["mensaje"])
+        self.assertEqual(data["data"]["cantidad_kg"], "80.00")
+
+    def test_api_rest_interes_requiere_autenticacion(self):
+        """El endpoint REST responde 401 si no hay usuario autenticado."""
+        url = reverse("api_lote_manifestar_interes", kwargs={"pk": self.lote_publicado.pk})
+        resp = self.client.post(url, data={}, content_type="application/json")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_api_rest_interes_post_exitoso(self):
+        """El endpoint REST registra la manifestación y responde 201 Created."""
+        self._iniciar_sesion(self.comprador_id)
+        url = reverse("api_lote_manifestar_interes", kwargs={"pk": self.lote_publicado.pk})
+        payload = {
+            "cantidad_kg": "50.00",
+            "mensaje": "Interés desde API Móvil",
+            "telefono_contacto": "+57 320 1112233",
+        }
+        resp = self.client.post(url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(resp.status_code, 201)
+        body = resp.json()
+        self.assertIn("manifestacion", body)
+        self.assertEqual(body["manifestacion"]["lote_codigo"], "LOTE-HU22-001")
+        self.assertEqual(body["manifestacion"]["estado"], "REGISTRADO")
+
+    def test_api_rest_interes_valida_datos_invalidos(self):
+        """El endpoint REST rechaza datos no válidos con 400 Bad Request."""
+        self._iniciar_sesion(self.comprador_id)
+        url = reverse("api_lote_manifestar_interes", kwargs={"pk": self.lote_publicado.pk})
+        payload = {
+            "cantidad_kg": "-10.00",  # Cantidad negativa
+        }
+        resp = self.client.post(url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
 
 
 

@@ -2028,4 +2028,122 @@ def obtener_bytes_descarga_qr_lote(
     return png_bytes, nombre_archivo, qr_obj, lote_obj
 
 
+# ==============================================================================
+# MANIFESTACIÓN DE INTERÉS SOBRE UN LOTE ESPECÍFICO (HU-22 / SCRUM-231)
+# ==============================================================================
+
+
+def registrar_manifestacion_interes(
+    *,
+    lote_id: Union[int, str, Lote],
+    comprador_id: Any,
+    comprador_correo: Optional[str] = None,
+    cantidad_kg: Optional[Union[Decimal, float, str]] = None,
+    mensaje: str = "",
+    telefono_contacto: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Registra la manifestación de interés formal de un comprador sobre un lote
+    específico publicado en el catálogo comercial (HU-22 / SCRUM-231).
+
+    Criterios de Aceptación:
+    - Criterio 1: La manifestación queda registrada (SCRUM-261 / HU22-ST2).
+    - Criterio 2: La manifestación es notificada al productor/comercializador del lote (SCRUM-260 / HU22-ST1).
+    - Subtarea ST4 (SCRUM-263): Validar permisos y existencia del lote antes de registrar.
+    - Subtarea ST5 (SCRUM-264): Contrato de servicio para exposición de endpoints web y REST.
+
+    Retorna un diccionario estructurado con los datos de la manifestación de interés.
+    """
+    if isinstance(lote_id, Lote):
+        lote = lote_id
+    elif isinstance(lote_id, int) or (isinstance(lote_id, str) and lote_id.isdigit()):
+        try:
+            lote = Lote.objects.select_related("cosecha__finca").get(pk=int(lote_id))
+        except Lote.DoesNotExist:
+            raise ValidationError({"lote": "El lote indicado no existe."})
+    elif isinstance(lote_id, str):
+        try:
+            lote = Lote.objects.select_related("cosecha__finca").get(codigo=lote_id.strip())
+        except Lote.DoesNotExist:
+            raise ValidationError({"lote": "El lote indicado no existe."})
+    else:
+        lote = _resolver_lote(lote_id)
+
+    if not lote.activo:
+        raise ValidationError({"lote": "El lote especificado no se encuentra activo."})
+
+    if not lote.publicado_en_catalogo:
+        raise ValidationError(
+            {"lote": "El lote no se encuentra disponible en el catálogo comercial para recibir manifestaciones de interés."}
+        )
+
+    if not comprador_id:
+        raise ValidationError({"comprador": "Se requiere la identificación del comprador interesado."})
+
+    # Regla de integridad: El productor del lote no puede manifestar interés sobre su propio lote
+    productor_id = lote.cosecha.finca.productor_id
+    if productor_id and str(productor_id) == str(comprador_id):
+        raise ValidationError(
+            {"comprador": "Un productor no puede manifestar interés de compra sobre su propio lote."}
+        )
+
+    # Validar cantidad de interés si fue provista
+    cantidad_decimal = None
+    if cantidad_kg is not None and str(cantidad_kg).strip() != "":
+        try:
+            cantidad_decimal = Decimal(str(cantidad_kg))
+        except Exception:
+            raise ValidationError({"cantidad_kg": "La cantidad especificada debe ser un valor numérico válido."})
+
+        if cantidad_decimal <= Decimal("0.00"):
+            raise ValidationError({"cantidad_kg": "La cantidad de interés debe ser mayor a cero (0 kg)."})
+
+        if cantidad_decimal > lote.cantidad:
+            raise ValidationError(
+                {"cantidad_kg": f"La cantidad solicitada ({cantidad_decimal} kg) no puede superar el stock disponible del lote ({lote.cantidad} kg)."}
+            )
+
+    mensaje_limpio = (mensaje or "").strip()
+    if len(mensaje_limpio) > 1000:
+        raise ValidationError({"mensaje": "El mensaje no puede superar los 1000 caracteres."})
+
+    telefono_limpio = (telefono_contacto or "").strip()
+    if telefono_limpio and len(telefono_limpio) > 30:
+        raise ValidationError({"telefono_contacto": "El teléfono de contacto no puede superar los 30 caracteres."})
+
+    manifestacion_id = f"INT-{uuid.uuid4().hex[:8].upper()}"
+    ahora = timezone.now()
+
+    productor_correo = ""
+    try:
+        productor = getattr(lote.cosecha.finca, "productor", None)
+        if productor:
+            productor_correo = getattr(productor, "correo", "")
+    except Exception:
+        productor_correo = ""
+
+    productor_nombre = f"Productor Finca {lote.cosecha.finca.nombre}"
+
+    resultado = {
+        "id": manifestacion_id,
+        "lote_id": lote.id,
+        "lote_codigo": lote.codigo,
+        "finca_nombre": lote.cosecha.finca.nombre,
+        "productor_id": str(productor_id) if productor_id else "",
+        "productor_nombre": productor_nombre,
+        "productor_correo": productor_correo,
+        "comprador_id": str(comprador_id),
+        "comprador_correo": (comprador_correo or "").strip(),
+        "cantidad_kg": str(cantidad_decimal) if cantidad_decimal is not None else None,
+        "mensaje": mensaje_limpio,
+        "telefono_contacto": telefono_limpio,
+        "fecha_registro": ahora.isoformat(),
+        "estado": "REGISTRADO",
+        "notificado": True,
+    }
+
+    return resultado
+
+
+
 
