@@ -73,7 +73,20 @@
                 <tr>
                     <td class="fw-semibold text-dark">
                         <span class="d-block">{{ lote.codigo }}</span>
-                        <small class="text-muted">{{ lote.creado_en|date:"d/m/Y" }}</small>
+                        <div class="mt-1 d-flex align-items-center gap-1">
+                            <small class="text-muted">{{ lote.creado_en|date:"d/m/Y" }}</small>
+                            {% if item.codigo_qr %}
+                                {% if item.codigo_qr.nivel_visibilidad == 'PUBLICA' %}
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle small py-0 px-1" title="Código QR Público: Acceso libre a compradores">
+                                        <i class="bi bi-qr-code me-1"></i>Público
+                                    </span>
+                                {% else %}
+                                    <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle small py-0 px-1" title="Código QR Privado: Restringido al productor">
+                                        <i class="bi bi-qr-code me-1"></i>Privado
+                                    </span>
+                                {% endif %}
+                            {% endif %}
+                        </div>
                     </td>
                     <td class="small">
                         <div class="fw-semibold text-dark">{{ lote.cosecha.finca.nombre }}</div>
@@ -161,6 +174,10 @@
                             <a href="{% url 'lote_etapa_registro' lote.id %}" class="btn btn-outline-success btn-sm" title="Registrar nueva etapa de beneficio">
                                 <i class="bi bi-plus-circle me-1"></i>Etapa
                             </a>
+                            <!-- HU-18: Visualización y gestión de Código QR del lote -->
+                            <button type="button" class="btn btn-outline-dark btn-sm" data-bs-toggle="modal" data-bs-target="#modalQRLote{{ lote.id }}" title="Ver y gestionar Código QR del lote">
+                                <i class="bi bi-qr-code me-1"></i>QR
+                            </button>
                         </div>
                         {% if lote.publicado_en_catalogo %}
                             <div class="btn-group">
@@ -319,6 +336,96 @@
                     </div>
                 </div>
                 {% endif %}
+
+                <!-- Modal Visualización y Gestión de Código QR (HU18-ST6 / SCRUM-179) -->
+                <div class="modal fade" id="modalQRLote{{ lote.id }}" tabindex="-1" aria-labelledby="modalQRLoteLabel{{ lote.id }}" aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content rounded-4 border-0 shadow">
+                            <div class="modal-header border-0 pb-0">
+                                <h5 class="modal-title fw-bold text-dark" id="modalQRLoteLabel{{ lote.id }}">
+                                    <i class="bi bi-qr-code text-primary me-2"></i>Código QR — Lote {{ lote.codigo }}
+                                </h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body text-center py-3">
+                                {% if item.codigo_qr and item.codigo_qr.imagen_base64 %}
+                                    <div class="bg-white p-3 rounded-4 d-inline-block shadow-sm border mb-3">
+                                        <img src="{{ item.codigo_qr.imagen_base64 }}" alt="Código QR Lote {{ lote.codigo }}" class="img-fluid" style="width: 220px; height: 220px;">
+                                    </div>
+                                    <div class="mb-2">
+                                        <span class="badge bg-light text-dark border font-monospace px-3 py-2 fs-6">
+                                            {{ item.codigo_qr.identificador }}
+                                        </span>
+                                    </div>
+                                    <p class="text-muted small mb-3">
+                                        Escanea este código con la cámara de un dispositivo móvil para consultar la ficha digital de trazabilidad del lote.
+                                    </p>
+                                    <div class="card bg-light border-0 rounded-3 p-3 text-start small mb-3">
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <span class="text-muted fw-semibold">Nivel de Visibilidad:</span>
+                                            {% if item.codigo_qr.nivel_visibilidad == 'PUBLICA' %}
+                                                <span class="badge bg-success text-white px-2 py-1">
+                                                    <i class="bi bi-globe me-1"></i>Pública (Compradores)
+                                                </span>
+                                            {% else %}
+                                                <span class="badge bg-secondary text-white px-2 py-1">
+                                                    <i class="bi bi-lock-fill me-1"></i>Privada (Restringida)
+                                                </span>
+                                            {% endif %}
+                                        </div>
+                                        <div class="d-flex justify-content-between align-items-center mb-1">
+                                            <span class="text-muted fw-semibold">Ruta Codificada:</span>
+                                            <span class="text-secondary font-monospace">{{ item.codigo_qr.payload_url }}</span>
+                                        </div>
+                                        <div class="d-flex justify-content-between align-items-center">
+                                            <span class="text-muted fw-semibold">Generado:</span>
+                                            <span class="text-secondary">{{ item.codigo_qr.creado_en|date:"d/m/Y H:i" }}</span>
+                                        </div>
+                                    </div>
+
+                                    <div class="d-flex justify-content-center gap-2 flex-wrap mb-2">
+                                        <!-- Conmutador rápido de Visibilidad (HU18-ST4 / SCRUM-178) -->
+                                        <form method="POST" action="{% url 'lote_qr_visibilidad_web' lote.pk %}" class="d-inline">
+                                            {% csrf_token %}
+                                            {% if item.codigo_qr.nivel_visibilidad == 'PUBLICA' %}
+                                                <input type="hidden" name="nivel_visibilidad" value="PRIVADA">
+                                                <button type="submit" class="btn btn-outline-secondary btn-sm rounded-pill px-3" title="Cambiar visibilidad a Privada">
+                                                    <i class="bi bi-lock-fill me-1"></i>Hacer Privado
+                                                </button>
+                                            {% else %}
+                                                <input type="hidden" name="nivel_visibilidad" value="PUBLICA">
+                                                <button type="submit" class="btn btn-outline-success btn-sm rounded-pill px-3" title="Cambiar visibilidad a Pública">
+                                                    <i class="bi bi-globe me-1"></i>Hacer Público
+                                                </button>
+                                            {% endif %}
+                                        </form>
+
+                                        <a href="{% url 'trazabilidad_qr_web' item.codigo_qr.identificador %}" target="_blank" class="btn btn-primary btn-sm bg-primary rounded-pill px-3 fw-semibold">
+                                            <i class="bi bi-box-arrow-up-right me-1"></i>Probar Escaneo
+                                        </a>
+                                    </div>
+                                    <div class="d-flex justify-content-center gap-2 flex-wrap border-top pt-2">
+                                        <!-- HU18-ST7 / SCRUM-180: Descarga e Impresión -->
+                                        <a href="{% url 'lote_qr_descargar' lote.pk %}" class="btn btn-outline-primary btn-sm rounded-pill px-3" title="Descargar imagen PNG del código QR">
+                                            <i class="bi bi-download me-1"></i>Descargar PNG
+                                        </a>
+                                        <a href="{% url 'lote_qr_imprimir' lote.pk %}" target="_blank" class="btn btn-outline-dark btn-sm rounded-pill px-3" title="Imprimir etiqueta para sacos de café">
+                                            <i class="bi bi-printer me-1"></i>Imprimir Etiqueta
+                                        </a>
+                                    </div>
+                                {% else %}
+                                    <div class="py-4 text-center">
+                                        <i class="bi bi-qr-code fs-1 text-muted mb-2 d-block"></i>
+                                        <p class="text-muted small">No se encontró imagen generada para este código QR.</p>
+                                    </div>
+                                {% endif %}
+                            </div>
+                            <div class="modal-footer border-0 pt-0">
+                                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
 
                 {% endwith %}
                 {% endfor %}

@@ -8,21 +8,35 @@ Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
 físicas y de calidad del lote.
 Subtarea: SCRUM-248 / HU20-ST4: Definir criterios y reglas de filtrado del catálogo.
 Subtarea: SCRUM-249 / HU20-ST5: Implementar consulta de filtrado para lotes disponibles.
+Subtarea: SCRUM-175 / HU18-ST2: Definir la estructura y generación del identificador QR por lote.
 """
 
+import base64
 from datetime import date
 from decimal import Decimal
+import io
+import re
 from typing import Any, Dict, List, Optional, Union
+import uuid
 
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+import qrcode
+from qrcode.constants import (
+    ERROR_CORRECT_H,
+    ERROR_CORRECT_L,
+    ERROR_CORRECT_M,
+    ERROR_CORRECT_Q,
+)
+
 
 from .models import (
     BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
+    CodigoQRLote,
     Cosecha,
     EtapaBeneficio,
     Finca,
@@ -468,6 +482,9 @@ def crear_lote(
         cosecha.cantidad_disponible = cosecha.cantidad_disponible - cantidad
         cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
 
+        # HU18-ST1 (SCRUM-174): Generación y persistencia automática del código QR asociado al lote
+        sincronizar_o_generar_qr_lote(lote)
+
     return lote
 
 
@@ -622,17 +639,45 @@ def obtener_ficha_consolidada_lote(lote_identificador: Union[Lote, int, str]) ->
             raise ValidationError({"lote": f"No se encontró ningún lote con el ID '{lote_identificador}'."})
     elif isinstance(lote_identificador, str):
         codigo_limpio = lote_identificador.strip().upper()
-        try:
-            lote = (
-                Lote.objects.select_related(
-                    "cosecha__finca__municipio",
-                    "cosecha__variedad",
-                    "proceso_beneficio",
-                    "estado_lote",
-                ).get(codigo__iexact=codigo_limpio)
+        # HU18-ST3 (SCRUM-177): Resolución polimórfica si se consulta por identificador QR
+        if codigo_limpio.startswith(PREFIJO_IDENTIFICADOR_QR):
+            qr_match = (
+                CodigoQRLote.objects.select_related(
+                    "lote__cosecha__finca__municipio",
+                    "lote__cosecha__variedad",
+                    "lote__proceso_beneficio",
+                    "lote__estado_lote",
+                )
+                .filter(identificador__iexact=codigo_limpio)
+                .first()
             )
-        except Lote.DoesNotExist:
-            raise ValidationError({"lote": f"No se encontró ningún lote con el código '{codigo_limpio}'."})
+            if qr_match and qr_match.lote:
+                lote = qr_match.lote
+            else:
+                codigo_extraido = extraer_codigo_lote_desde_qr(codigo_limpio)
+                try:
+                    lote = (
+                        Lote.objects.select_related(
+                            "cosecha__finca__municipio",
+                            "cosecha__variedad",
+                            "proceso_beneficio",
+                            "estado_lote",
+                        ).get(codigo__iexact=codigo_extraido)
+                    )
+                except Lote.DoesNotExist:
+                    raise ValidationError({"lote": f"No se encontró ningún lote asociado al código QR '{codigo_limpio}'."})
+        else:
+            try:
+                lote = (
+                    Lote.objects.select_related(
+                        "cosecha__finca__municipio",
+                        "cosecha__variedad",
+                        "proceso_beneficio",
+                        "estado_lote",
+                    ).get(codigo__iexact=codigo_limpio)
+                )
+            except Lote.DoesNotExist:
+                raise ValidationError({"lote": f"No se encontró ningún lote con el código '{codigo_limpio}'."})
     else:
         raise ValidationError({"lote": "Identificador de lote no válido."})
 
@@ -777,6 +822,8 @@ def obtener_ficha_consolidada_lote(lote_identificador: Union[Lote, int, str]) ->
         "estado_comercial": codigo_estado,
         "disponible_para_venta": disponible_venta,
         "url_publica": url_publica,
+        "identificador_qr": lote.identificador_qr,
+        "tiene_codigo_qr": lote.tiene_codigo_qr,
         "completitud_porcentaje": evaluacion["porcentaje"],
         "nivel_completitud": evaluacion["nivel"],
         "color_nivel": evaluacion["color_nivel"],
@@ -1338,3 +1385,647 @@ def registrar_etapa_beneficio(
         nueva.full_clean(exclude=["activo"])
         nueva.save()
         return nueva
+
+
+# ==============================================================================
+# CÓDIGO QR ASOCIADO AL LOTE (HU-18 / SCRUM-175 / SCRUM-22)
+# ==============================================================================
+
+PREFIJO_IDENTIFICADOR_QR = "QR-"
+PATRON_IDENTIFICADOR_QR = re.compile(r"^QR-[A-Za-z0-9_-]+$")
+
+VISIBILIDAD_QR_PUBLICA = "PUBLICA"
+VISIBILIDAD_QR_PRIVADA = "PRIVADA"
+OPCIONES_VISIBILIDAD_QR = (
+    (VISIBILIDAD_QR_PUBLICA, "Pública"),
+    (VISIBILIDAD_QR_PRIVADA, "Privada"),
+)
+
+MAPA_NIVELES_CORRECCION_QR = {
+    "L": ERROR_CORRECT_L,  # ~7% recuperación de errores
+    "M": ERROR_CORRECT_M,  # ~15% recuperación de errores (recomendado)
+    "Q": ERROR_CORRECT_Q,  # ~25% recuperación de errores
+    "H": ERROR_CORRECT_H,  # ~30% recuperación de errores
+}
+
+COLOR_PRIMARIO_CAFE_PERGAMO = "#2B1810"
+COLOR_FONDO_QR_DEFAULT = "#FFFFFF"
+
+
+def extraer_codigo_lote_normalizado(lote_o_codigo: Union[Lote, str, int]) -> str:
+    """
+    Resuelve y normaliza el código alfanumérico del lote a partir de una instancia,
+    un identificador numérico (PK) o una cadena de texto (código de lote o identificador QR).
+    """
+    if isinstance(lote_o_codigo, Lote):
+        codigo = lote_o_codigo.codigo
+    elif isinstance(lote_o_codigo, int) or (isinstance(lote_o_codigo, str) and lote_o_codigo.isdigit()):
+        try:
+            lote = Lote.objects.get(pk=int(lote_o_codigo))
+            codigo = lote.codigo
+        except Lote.DoesNotExist:
+            raise ValidationError({"lote": f"No se encontró ningún lote con el ID '{lote_o_codigo}'."})
+    elif isinstance(lote_o_codigo, str):
+        codigo_limpio = lote_o_codigo.strip()
+        if not codigo_limpio:
+            raise ValidationError({"codigo": "El código del lote no puede estar vacío."})
+        if codigo_limpio.upper().startswith(PREFIJO_IDENTIFICADOR_QR):
+            codigo = codigo_limpio[len(PREFIJO_IDENTIFICADOR_QR):]
+        else:
+            codigo = codigo_limpio
+    else:
+        raise ValidationError({"lote": "Identificador o código de lote inválido."})
+
+    codigo_final = codigo.strip().upper()
+    if not codigo_final:
+        raise ValidationError({"codigo": "El código del lote no puede estar vacío."})
+    return codigo_final
+
+
+def generar_identificador_qr_lote(lote_o_codigo: Union[Lote, str, int]) -> str:
+    """
+    Genera el identificador único y formal del código QR por lote (HU18-ST2 / SCRUM-175).
+    Estructura estandarizada: 'QR-<CODIGO_LOTE_EN_MAYUSCULAS>'.
+    Garantiza unicidad estricta 1:1, determinismo e interoperabilidad con las etiquetas físicas.
+    """
+    codigo = extraer_codigo_lote_normalizado(lote_o_codigo)
+    identificador = f"{PREFIJO_IDENTIFICADOR_QR}{codigo}"
+    if not validar_estructura_identificador_qr(identificador):
+        raise ValidationError({
+            "identificador_qr": f"El identificador generado '{identificador}' contiene caracteres no permitidos."
+        })
+    return identificador
+
+
+def validar_estructura_identificador_qr(identificador_qr: str) -> bool:
+    """
+    Valida que un identificador QR cumpla la especificación técnica formal:
+    prefijo 'QR-' seguido de caracteres alfanuméricos, guiones o guiones bajos.
+    """
+    if not identificador_qr or not isinstance(identificador_qr, str):
+        return False
+    return bool(PATRON_IDENTIFICADOR_QR.match(identificador_qr.strip()))
+
+
+def extraer_codigo_lote_desde_qr(identificador_qr: str) -> str:
+    """
+    Extrae el código único del lote desde un identificador QR válido.
+    Lanza ValidationError si la estructura no cumple la especificación.
+    """
+    if not validar_estructura_identificador_qr(identificador_qr):
+        raise ValidationError({
+            "identificador_qr": f"El valor '{identificador_qr}' no cumple la estructura de identificador QR (formato esperado: 'QR-<codigo>')."
+        })
+    return identificador_qr.strip()[len(PREFIJO_IDENTIFICADOR_QR):].upper()
+
+
+def construir_payload_qr_lote(lote_o_codigo: Union[Lote, str, int], base_url: Optional[str] = None) -> str:
+    """
+    Construye la carga útil (URL canónica de consulta) que se codifica en la matriz del QR.
+    Si se proporciona `base_url`, retorna la URL absoluta completa (ej. 'https://cafepergamo.com/trazabilidad/lote/LOT-001/').
+    De lo contrario, retorna la ruta relativa canónica ('/trazabilidad/lote/LOT-001/').
+    """
+    codigo = extraer_codigo_lote_normalizado(lote_o_codigo)
+    ruta_relativa = f"/trazabilidad/lote/{codigo}/"
+    if base_url:
+        return f"{base_url.rstrip('/')}{ruta_relativa}"
+    return ruta_relativa
+
+
+def generar_matriz_qr_lote(
+    lote_o_codigo: Union[Lote, str, int],
+    base_url: Optional[str] = None,
+    box_size: int = 10,
+    border: int = 4,
+    error_correction: str = "M",
+    fill_color: str = COLOR_PRIMARIO_CAFE_PERGAMO,
+    back_color: str = COLOR_FONDO_QR_DEFAULT,
+) -> bytes:
+    """
+    Genera la imagen rasterizada en bytes (PNG) del código QR para un lote.
+    Utiliza corrección de errores nivel M (15%) o Q (25%) para soportar daño físico o polvo en etiquetas.
+    Aplica la paleta institucional (#2B1810) sobre fondo blanco.
+    """
+    payload = construir_payload_qr_lote(lote_o_codigo, base_url=base_url)
+    nivel_ecc = MAPA_NIVELES_CORRECCION_QR.get(error_correction.upper(), ERROR_CORRECT_M)
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=nivel_ecc,
+        box_size=box_size,
+        border=border,
+    )
+    qr.add_data(payload)
+    qr.make(fit=True)
+
+    img = qr.make_image(fill_color=fill_color, back_color=back_color)
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def generar_qr_base64_lote(
+    lote_o_codigo: Union[Lote, str, int],
+    base_url: Optional[str] = None,
+    box_size: int = 10,
+    border: int = 4,
+    error_correction: str = "M",
+    fill_color: str = COLOR_PRIMARIO_CAFE_PERGAMO,
+    back_color: str = COLOR_FONDO_QR_DEFAULT,
+) -> str:
+    """
+    Genera el código QR codificado en Data URI Base64 ('data:image/png;base64,...'),
+    óptimo para renderizado directo en plantillas HTML y respuestas API REST sin peticiones extra.
+    """
+    png_bytes = generar_matriz_qr_lote(
+        lote_o_codigo=lote_o_codigo,
+        base_url=base_url,
+        box_size=box_size,
+        border=border,
+        error_correction=error_correction,
+        fill_color=fill_color,
+        back_color=back_color,
+    )
+    b64_str = base64.b64encode(png_bytes).decode("utf-8")
+    return f"data:image/png;base64,{b64_str}"
+
+
+def obtener_estructura_qr_lote(
+    lote_o_codigo: Union[Lote, str, int],
+    base_url: Optional[str] = None,
+    nivel_visibilidad: str = VISIBILIDAD_QR_PUBLICA,
+    incluir_imagen_base64: bool = True,
+) -> Dict[str, Any]:
+    """
+    Retorna el diccionario formal estructurado (DTO) con los metadatos y la representación
+    completa del código QR asociado al lote (HU18-ST2 / SCRUM-175).
+    """
+    nivel_normalizado = (nivel_visibilidad or VISIBILIDAD_QR_PUBLICA).strip().upper()
+    niveles_validos = [VISIBILIDAD_QR_PUBLICA, VISIBILIDAD_QR_PRIVADA]
+    if nivel_normalizado not in niveles_validos:
+        raise ValidationError({
+            "nivel_visibilidad": f"Nivel de visibilidad inválido ('{nivel_visibilidad}'). Opciones válidas: {', '.join(niveles_validos)}."
+        })
+
+    codigo = extraer_codigo_lote_normalizado(lote_o_codigo)
+    identificador_qr = generar_identificador_qr_lote(codigo)
+    payload_url = construir_payload_qr_lote(codigo)
+    url_absoluta = construir_payload_qr_lote(codigo, base_url=base_url) if base_url else payload_url
+
+    lote_id = None
+    if isinstance(lote_o_codigo, Lote):
+        lote_id = lote_o_codigo.id
+    else:
+        lote_obj = Lote.objects.filter(codigo__iexact=codigo).first()
+        if lote_obj:
+            lote_id = lote_obj.id
+
+    imagen_base64 = ""
+    if incluir_imagen_base64:
+        imagen_base64 = generar_qr_base64_lote(codigo, base_url=base_url)
+
+    return {
+        "identificador_qr": identificador_qr,
+        "lote_id": lote_id,
+        "lote_codigo": codigo,
+        "payload_url": payload_url,
+        "url_absoluta": url_absoluta,
+        "nivel_visibilidad": nivel_normalizado,
+        "version_qr": "1.0",
+        "formato": "PNG",
+        "nivel_correccion": "M",
+        "tamano_px": 300,
+        "imagen_base64": imagen_base64,
+        "creado_en": timezone.now(),
+    }
+
+
+def asociar_codigo_qr_a_lote(
+    *,
+    lote_o_id: Union[Lote, int, str],
+    nivel_visibilidad: str = VISIBILIDAD_QR_PUBLICA,
+    regenerar_imagen: bool = False,
+    base_url: Optional[str] = None,
+) -> CodigoQRLote:
+    """
+    Persiste y asocia de forma única el código QR con el lote (HU18-ST5 / SCRUM-176).
+    - Unicidad: Cada lote posee como máximo un registro asociado (OneToOne).
+    - Nivel de visibilidad: Permite configurar si el acceso es público o privado.
+    - Idempotencia: Si ya existe un registro para el lote, actualiza sus metadatos sin duplicar.
+    """
+    with transaction.atomic():
+        lote = _resolver_lote(lote_o_id)
+
+        nivel_normalizado = (nivel_visibilidad or VISIBILIDAD_QR_PUBLICA).strip().upper()
+        if nivel_normalizado not in [VISIBILIDAD_QR_PUBLICA, VISIBILIDAD_QR_PRIVADA]:
+            raise ValidationError({
+                "nivel_visibilidad": f"Nivel de visibilidad '{nivel_visibilidad}' no válido. Opciones: {VISIBILIDAD_QR_PUBLICA}, {VISIBILIDAD_QR_PRIVADA}."
+            })
+
+        identificador = generar_identificador_qr_lote(lote)
+        payload_url = construir_payload_qr_lote(lote, base_url=base_url)
+
+        qr_existente = CodigoQRLote.objects.select_for_update().filter(lote=lote).first()
+        if qr_existente:
+            cambio_codigo = (qr_existente.identificador != identificador or qr_existente.payload_url != payload_url)
+            qr_existente.identificador = identificador
+            qr_existente.payload_url = payload_url
+            qr_existente.nivel_visibilidad = nivel_normalizado
+            if regenerar_imagen or not qr_existente.imagen_base64 or cambio_codigo:
+                qr_existente.imagen_base64 = generar_qr_base64_lote(lote, base_url=base_url)
+            qr_existente.save()
+            return qr_existente
+
+        imagen_base64 = generar_qr_base64_lote(lote, base_url=base_url)
+        nuevo_qr = CodigoQRLote(
+            lote=lote,
+            identificador=identificador,
+            nivel_visibilidad=nivel_normalizado,
+            payload_url=payload_url,
+            imagen_base64=imagen_base64,
+            activo=True,
+        )
+        nuevo_qr.full_clean()
+        nuevo_qr.save()
+        return nuevo_qr
+
+
+def sincronizar_o_generar_qr_lote(
+    lote_o_id: Union[Lote, int, str],
+    *,
+    nivel_visibilidad: Optional[str] = None,
+    forzar_regeneracion: bool = False,
+    base_url: Optional[str] = None,
+) -> CodigoQRLote:
+    """
+    Garantiza y sincroniza la existencia del código QR asociado al lote (HU18-ST1 / SCRUM-174).
+
+    Reglas de Negocio:
+    1. Si el lote no tiene código QR, lo genera y asocia automáticamente con visibilidad por defecto (PUBLICA).
+    2. Si ya tiene código QR, valida que su identificador ('QR-<CODIGO>') y payload coincidan con el lote actual.
+    3. Si el código del lote fue modificado o forzar_regeneracion=True, regenera la matriz gráfica Base64 y actualiza los metadatos.
+    4. Mantiene idempotencia estricta: llamadas sucesivas con los mismos datos no duplican registros ni computan imágenes innecesarias.
+    """
+    with transaction.atomic():
+        lote = _resolver_lote(lote_o_id)
+        identificador_esperado = generar_identificador_qr_lote(lote)
+        payload_esperado = construir_payload_qr_lote(lote, base_url=base_url)
+
+        qr_existente = CodigoQRLote.objects.select_for_update().filter(lote=lote).first()
+
+        if not qr_existente:
+            visibilidad = nivel_visibilidad or VISIBILIDAD_QR_PUBLICA
+            return asociar_codigo_qr_a_lote(
+                lote_o_id=lote,
+                nivel_visibilidad=visibilidad,
+                regenerar_imagen=True,
+                base_url=base_url,
+            )
+
+        cambio_identificador = (qr_existente.identificador != identificador_esperado)
+        cambio_payload = (qr_existente.payload_url != payload_esperado)
+        cambio_visibilidad = bool(
+            nivel_visibilidad and qr_existente.nivel_visibilidad != nivel_visibilidad.strip().upper()
+        )
+        necesita_imagen = (
+            forzar_regeneracion
+            or not qr_existente.imagen_base64
+            or cambio_identificador
+            or cambio_payload
+        )
+
+        hubo_cambios = False
+
+        if cambio_identificador:
+            qr_existente.identificador = identificador_esperado
+            hubo_cambios = True
+
+        if cambio_payload:
+            qr_existente.payload_url = payload_esperado
+            hubo_cambios = True
+
+        if cambio_visibilidad and nivel_visibilidad:
+            nivel_norm = nivel_visibilidad.strip().upper()
+            if nivel_norm in [VISIBILIDAD_QR_PUBLICA, VISIBILIDAD_QR_PRIVADA]:
+                qr_existente.nivel_visibilidad = nivel_norm
+                hubo_cambios = True
+
+        if necesita_imagen:
+            qr_existente.imagen_base64 = generar_qr_base64_lote(lote, base_url=base_url)
+            hubo_cambios = True
+
+        if not qr_existente.activo:
+            qr_existente.activo = True
+            hubo_cambios = True
+
+        if hubo_cambios:
+            qr_existente.full_clean()
+            qr_existente.save()
+
+        return qr_existente
+
+
+def actualizar_lote(
+    *,
+    lote_o_id: Union[Lote, int, str],
+    codigo: Optional[str] = None,
+    cantidad: Optional[Union[Decimal, str, float]] = None,
+    proceso_beneficio_id: Optional[int] = None,
+    estado_lote_id: Optional[int] = None,
+    activo: Optional[bool] = None,
+    precio_referencial: Optional[Union[Decimal, str, float]] = None,
+    sincronizar_qr: bool = True,
+) -> Lote:
+    """
+    Actualiza la configuración de un lote y sincroniza su código QR (HU18-ST1 / SCRUM-174).
+    Si el código del lote cambia, actualiza su identificador y regenera la imagen QR.
+    Si la cantidad cambia, valida y descuenta/reintegra la diferencia al saldo disponible de la cosecha.
+    """
+    with transaction.atomic():
+        lote = _resolver_lote(lote_o_id)
+        campos_modificados = []
+
+        if codigo is not None:
+            codigo_limpio = str(codigo).strip().upper()
+            if not codigo_limpio:
+                raise ValidationError({"codigo": "El código del lote no puede estar vacío."})
+            if not codigo_limpio.isalnum():
+                raise ValidationError({"codigo": "El código del lote debe ser alfanumérico."})
+            if Lote.objects.filter(codigo__iexact=codigo_limpio).exclude(pk=lote.pk).exists():
+                raise ValidationError({"codigo": f"Ya existe otro lote con el código '{codigo_limpio}'."})
+            if lote.codigo != codigo_limpio:
+                lote.codigo = codigo_limpio
+                campos_modificados.append("codigo")
+
+        if cantidad is not None:
+            try:
+                nueva_cantidad = Decimal(str(cantidad))
+            except Exception:
+                raise ValidationError({"cantidad": "La cantidad del lote debe ser un valor numérico."})
+            if nueva_cantidad <= Decimal("0.00"):
+                raise ValidationError({"cantidad": "La cantidad del lote debe ser mayor a cero."})
+
+            diferencia = nueva_cantidad - lote.cantidad
+            if diferencia != Decimal("0.00"):
+                cosecha = Cosecha.objects.select_for_update().get(pk=lote.cosecha_id)
+                if diferencia > 0 and diferencia > cosecha.cantidad_disponible:
+                    raise ValidationError({
+                        "cantidad": (
+                            f"El incremento ({diferencia} kg) supera el saldo disponible "
+                            f"de la cosecha ({cosecha.cantidad_disponible} kg)."
+                        )
+                    })
+                cosecha.cantidad_disponible = cosecha.cantidad_disponible - diferencia
+                cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
+                lote.cantidad = nueva_cantidad
+                campos_modificados.append("cantidad")
+
+        if proceso_beneficio_id is not None:
+            proceso = ProcesoBeneficio.objects.filter(pk=proceso_beneficio_id, activo=True).first()
+            if proceso is None:
+                raise ValidationError({"proceso_beneficio": "El proceso seleccionado no existe o no está activo."})
+            lote.proceso_beneficio = proceso
+            campos_modificados.append("proceso_beneficio")
+
+        if estado_lote_id is not None:
+            estado = EstadoLote.objects.filter(pk=estado_lote_id, activo=True).first()
+            if estado is None:
+                raise ValidationError({"estado_lote": "El estado seleccionado no existe o no está activo."})
+            lote.estado_lote = estado
+            campos_modificados.append("estado_lote")
+
+        if activo is not None:
+            lote.activo = bool(activo)
+            campos_modificados.append("activo")
+
+        if precio_referencial is not None:
+            try:
+                lote.precio_referencial = Decimal(str(precio_referencial))
+            except Exception:
+                raise ValidationError({"precio_referencial": "El precio referencial debe ser numérico."})
+            campos_modificados.append("precio_referencial")
+
+        if campos_modificados:
+            lote.full_clean()
+            lote.save(sincronizar_qr=False)
+
+        if sincronizar_qr:
+            hubo_cambio_codigo = bool("codigo" in campos_modificados)
+            sincronizar_o_generar_qr_lote(lote, forzar_regeneracion=hubo_cambio_codigo)
+
+        return lote
+
+
+def obtener_codigo_qr_lote(
+    lote_o_id: Union[Lote, int, str],
+    *,
+    auto_generar: bool = False,
+) -> Optional[CodigoQRLote]:
+    """
+    Recupera la entidad persistida de código QR asociada al lote, o None si aún no se ha generado.
+    Si auto_generar=True y el lote aún no cuenta con QR, lo genera y asocia en el momento (HU18-ST1).
+    """
+    lote = _resolver_lote(lote_o_id)
+    qr = CodigoQRLote.objects.filter(lote=lote).first()
+    if not qr and auto_generar:
+        qr = sincronizar_o_generar_qr_lote(lote)
+    return qr
+
+
+def resolver_lote_desde_qr(identificador_qr: str) -> tuple[CodigoQRLote, Lote]:
+    """
+    Resuelve el código QR persistido y su lote asociado a partir del identificador formal
+    o código codificado en el escaneo (HU18-ST3 / SCRUM-177).
+
+    Validaciones y Reglas:
+    - Identificador no vacío ni nulo.
+    - Soporte para identificador formal ('QR-<CODIGO>') o código directo de lote.
+    - Verifica que el código QR exista y tenga activo=True.
+    - Verifica que el lote asociado exista y tenga activo=True.
+    """
+    if not identificador_qr or not str(identificador_qr).strip():
+        raise ValidationError({"qr": "El identificador del código QR no puede estar vacío."})
+
+    identificador_limpio = str(identificador_qr).strip().upper()
+
+    # 1. Búsqueda directa por identificador formal único en CodigoQRLote
+    qr_obj = CodigoQRLote.objects.select_related(
+        "lote__cosecha__finca__municipio",
+        "lote__cosecha__variedad",
+        "lote__proceso_beneficio",
+        "lote__estado_lote",
+    ).filter(identificador__iexact=identificador_limpio).first()
+
+    # 2. Si no se encontró y viene con prefijo QR-, intentar por código de lote extraído
+    if not qr_obj and identificador_limpio.startswith(PREFIJO_IDENTIFICADOR_QR):
+        codigo_lote = extraer_codigo_lote_desde_qr(identificador_limpio)
+        qr_obj = CodigoQRLote.objects.select_related(
+            "lote__cosecha__finca__municipio",
+            "lote__cosecha__variedad",
+            "lote__proceso_beneficio",
+            "lote__estado_lote",
+        ).filter(lote__codigo__iexact=codigo_lote).first()
+
+    # 3. Si no trae prefijo QR-, intentar resolver asumiendo que se ingresó el código del lote
+    if not qr_obj:
+        qr_obj = CodigoQRLote.objects.select_related(
+            "lote__cosecha__finca__municipio",
+            "lote__cosecha__variedad",
+            "lote__proceso_beneficio",
+            "lote__estado_lote",
+        ).filter(lote__codigo__iexact=identificador_limpio).first()
+
+    # 4. Si aún no existe pero el lote sí existe, auto-aprovisionar con sincronizar_o_generar_qr_lote
+    if not qr_obj:
+        try:
+            codigo_candidato = (
+                extraer_codigo_lote_desde_qr(identificador_limpio)
+                if identificador_limpio.startswith(PREFIJO_IDENTIFICADOR_QR)
+                else identificador_limpio
+            )
+            lote_existente = Lote.objects.filter(codigo__iexact=codigo_candidato).first()
+            if lote_existente:
+                qr_obj = sincronizar_o_generar_qr_lote(lote_existente)
+        except Exception:
+            pass
+
+    if not qr_obj:
+        raise ValidationError({"qr": f"No se encontró ningún código QR con el identificador '{identificador_limpio}'."})
+
+    if not qr_obj.activo:
+        raise ValidationError({"qr": f"El código QR '{qr_obj.identificador}' se encuentra inactivo para consultas."})
+
+    lote = qr_obj.lote
+    if not lote or not lote.activo:
+        raise ValidationError({"lote": f"El lote asociado al código QR '{qr_obj.identificador}' se encuentra inactivo."})
+
+    return qr_obj, lote
+
+
+def actualizar_visibilidad_codigo_qr(
+    *,
+    lote_o_id: Union[Lote, int, str],
+    nuevo_nivel: str,
+) -> CodigoQRLote:
+    """
+    Actualiza el nivel de visibilidad (PUBLICA / PRIVADA) del código QR asociado al lote (HU18-ST4/ST5).
+    """
+    with transaction.atomic():
+        lote = _resolver_lote(lote_o_id)
+        nivel_normalizado = (nuevo_nivel or "").strip().upper()
+        if nivel_normalizado not in [VISIBILIDAD_QR_PUBLICA, VISIBILIDAD_QR_PRIVADA]:
+            raise ValidationError({
+                "nivel_visibilidad": f"Nivel de visibilidad '{nuevo_nivel}' no válido. Opciones permitidas: {VISIBILIDAD_QR_PUBLICA}, {VISIBILIDAD_QR_PRIVADA}."
+            })
+
+        qr_obj = CodigoQRLote.objects.select_for_update().filter(lote=lote).first()
+        if not qr_obj:
+            qr_obj = asociar_codigo_qr_a_lote(lote_o_id=lote, nivel_visibilidad=nivel_normalizado)
+        else:
+            qr_obj.nivel_visibilidad = nivel_normalizado
+            qr_obj.save(update_fields=["nivel_visibilidad", "actualizado_en"])
+        return qr_obj
+
+
+def verificar_permiso_visibilidad_qr(
+    qr: CodigoQRLote,
+    usuario_id: Optional[Union[uuid.UUID, str]] = None,
+) -> tuple[bool, bool, str]:
+    """
+    Evalúa si un usuario tiene autorización para acceder a la ficha digital asociada al QR (HU18-ST4 / SCRUM-178).
+
+    Retorna:
+      (puede_acceder: bool, es_propietario: bool, motivo: str)
+
+    Reglas de Negocio:
+    1. Si el usuario autenticado es el productor dueño de la finca a la que pertenece el lote (es_propietario=True):
+       Siempre tiene acceso irrestricto, incluso si el QR está configurado como PRIVADA.
+    2. Si el código QR tiene nivel_visibilidad == PUBLICA:
+       Cualquier usuario anónimo o externo tiene acceso a la información de trazabilidad.
+    3. Si el código QR tiene nivel_visibilidad == PRIVADA y el usuario NO es el propietario:
+       El acceso es denegado (requiere autenticación del productor propietario).
+    """
+    productor_dueno_id = None
+    try:
+        if hasattr(qr, "lote") and qr.lote and hasattr(qr.lote, "cosecha") and qr.lote.cosecha:
+            productor_dueno_id = qr.lote.cosecha.finca.productor_id
+    except Exception:
+        pass
+
+    es_propietario = bool(
+        usuario_id and productor_dueno_id and str(productor_dueno_id) == str(usuario_id)
+    )
+
+    if es_propietario:
+        return True, True, "Acceso concedido al productor propietario del lote."
+
+    if qr.nivel_visibilidad == CodigoQRLote.VISIBILIDAD_PUBLICA:
+        return True, False, "Acceso público concedido."
+
+    # Visibilidad PRIVADA sin ser el propietario
+    return (
+        False,
+        False,
+        "Acceso restringido: La ficha digital de este lote tiene visibilidad privada. Requiere autenticación del productor propietario.",
+    )
+
+
+def sanitizar_ficha_por_visibilidad(
+    ficha: Dict[str, Any],
+    qr: CodigoQRLote,
+    es_propietario: bool = False,
+) -> Dict[str, Any]:
+    """
+    Aplica filtros de seguridad sobre la ficha consolidada según el nivel de visibilidad y rol (HU18-ST4 / SCRUM-178).
+    - Si no es propietario, enmascara datos de identidad sensible del productor (documento de identidad).
+    - Adjunta el nivel de visibilidad configurado y el indicador de si quien consulta es el propietario.
+    """
+    ficha_modificada = dict(ficha)
+    ficha_modificada["nivel_visibilidad"] = qr.nivel_visibilidad
+    ficha_modificada["es_propietario"] = es_propietario
+
+    if not es_propietario and "productor" in ficha_modificada:
+        productor = dict(ficha_modificada["productor"])
+        # Ocultar documento personal para acceso público no autenticado
+        productor["numero_documento"] = None
+        productor["tipo_documento"] = None
+        ficha_modificada["productor"] = productor
+
+    return ficha_modificada
+
+
+def obtener_bytes_descarga_qr_lote(
+    lote_o_id: Union[Lote, int, str],
+    *,
+    box_size: int = 12,
+    border: int = 4,
+    error_correction: str = "M",
+) -> tuple[bytes, str, CodigoQRLote, Lote]:
+    """
+    Genera u obtiene los bytes PNG de alta definición y el nombre canónico para
+    la descarga física o impresión del código QR (HU18-ST7 / SCRUM-180).
+
+    Retorna:
+      (png_bytes: bytes, nombre_archivo: str, qr_obj: CodigoQRLote, lote_obj: Lote)
+    """
+    if isinstance(lote_o_id, str) and (
+        lote_o_id.strip().upper().startswith(PREFIJO_IDENTIFICADOR_QR)
+    ):
+        qr_obj, lote_obj = resolver_lote_desde_qr(lote_o_id)
+    else:
+        lote_obj = _resolver_lote(lote_o_id)
+        qr_obj = getattr(lote_obj, "codigo_qr", None)
+        if not qr_obj:
+            qr_obj = sincronizar_o_generar_qr_lote(lote_obj)
+
+    png_bytes = generar_matriz_qr_lote(
+        lote_o_codigo=lote_obj,
+        box_size=box_size,
+        border=border,
+        error_correction=error_correction,
+    )
+    nombre_archivo = f"{qr_obj.identificador}.png"
+    return png_bytes, nombre_archivo, qr_obj, lote_obj
+
+
+

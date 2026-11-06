@@ -238,6 +238,8 @@ class LoteSerializer(serializers.ModelSerializer):
     cantidad_disponible_cosecha = serializers.DecimalField(
         source="cosecha.cantidad_disponible", max_digits=10, decimal_places=2, read_only=True
     )
+    tiene_codigo_qr = serializers.BooleanField(read_only=True)
+    identificador_qr = serializers.CharField(read_only=True)
 
     class Meta:
         model = Lote
@@ -254,6 +256,8 @@ class LoteSerializer(serializers.ModelSerializer):
             "activo",
             "proceso_beneficio",
             "estado_lote",
+            "tiene_codigo_qr",
+            "identificador_qr",
             "creado_en",
         ]
         read_only_fields = fields
@@ -479,6 +483,8 @@ class FichaDigitalSerializer(serializers.Serializer):
 
     # Metadatos de navegación y trazabilidad
     url_publica = serializers.CharField(required=False)
+    identificador_qr = serializers.CharField(required=False, allow_null=True)
+    tiene_codigo_qr = serializers.BooleanField(required=False, default=False)
     completitud_porcentaje = serializers.IntegerField(required=False, default=50)
 
     # Diagnóstico de consistencia y completitud (HU-17 / ST6 - SCRUM-171)
@@ -610,4 +616,25 @@ class CatalogoLoteSerializer(serializers.ModelSerializer):
     def get_perfil_sensorial(self, obj):
         calidad = self._calidad(obj)
         return calidad.perfil_sensorial if calidad else ""
+
+
+class EstructuraCodigoQRSerializer(serializers.Serializer):
+    """
+    Serializador de contrato de datos DTO para la estructura del Código QR asociado a un lote (HU18-ST2 / SCRUM-175).
+    Valida y expone la carga útil, nivel de visibilidad (pública/privada) y representación base64.
+    """
+
+    identificador_qr = serializers.CharField(max_length=60)
+    lote_id = serializers.IntegerField(required=False, allow_null=True)
+    lote_codigo = serializers.CharField(max_length=30)
+    payload_url = serializers.CharField()
+    url_absoluta = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    nivel_visibilidad = serializers.ChoiceField(choices=["PUBLICA", "PRIVADA"], default="PUBLICA")
+    version_qr = serializers.CharField(default="1.0")
+    formato = serializers.CharField(default="PNG")
+    nivel_correccion = serializers.CharField(default="M")
+    tamano_px = serializers.IntegerField(default=300)
+    imagen_base64 = serializers.CharField(required=False, allow_blank=True)
+    creado_en = serializers.DateTimeField(required=False)
+
 

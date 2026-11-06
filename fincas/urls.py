@@ -31,6 +31,12 @@ urlpatterns = [
     path('lotes/<int:pk>/despublicar/', views.despublicar_lote_web_view, name='lote_despublicar'),
     path('lotes/<str:codigo>/ficha/', views.ficha_digital_web_view, name='lote_ficha_digital_web'),
     path('trazabilidad/lote/<str:codigo>/', views.ficha_digital_web_view, name='trazabilidad_lote_publica'),
+    path('trazabilidad/qr/<str:identificador>/', views.escanear_qr_web_view, name='trazabilidad_qr_web'),
+    path('qr/<str:identificador>/', views.escanear_qr_web_view, name='escanear_qr_web_directo'),
+    path('lotes/<int:pk>/qr/visibilidad/', views.cambiar_visibilidad_qr_web_view, name='lote_qr_visibilidad_web'),
+    path('lotes/<int:pk>/qr/descargar/', views.descargar_qr_lote_view, name='lote_qr_descargar'),
+    path('qr/<str:identificador>/descargar/', views.descargar_qr_lote_view, name='qr_descargar_directo'),
+    path('lotes/<int:pk>/qr/imprimir/', views.imprimir_etiqueta_qr_view, name='lote_qr_imprimir'),
 
     # Interfaz Web de Catálogo de Municipios (HU-09 / SCRUM-111)
     path('municipios/', views.admin_municipios_view, name='admin_municipios'),
@@ -77,6 +83,14 @@ urlpatterns = [
     # API REST de Ficha Digital Consolidada por Lote (HU-17 / SCRUM-167)
     path('api/lotes/<str:codigo>/ficha/', views.api_consultar_ficha_digital_view, name='api_lote_ficha_digital'),
     path('api/v1/lotes/<str:codigo>/ficha/', views.api_consultar_ficha_digital_view, name='api_v1_lote_ficha_digital'),
+
+    # API REST de Consulta de Ficha Digital vía Código QR (HU-18 / SCRUM-177)
+    path('api/qr/<str:identificador>/', views.api_consultar_ficha_desde_qr_view, name='api_consultar_ficha_desde_qr'),
+    path('api/v1/qr/<str:identificador>/', views.api_consultar_ficha_desde_qr_view, name='api_v1_consultar_ficha_desde_qr'),
+    path('api/qr/<str:identificador>/ficha/', views.api_consultar_ficha_desde_qr_view, name='api_consultar_ficha_desde_qr_alias'),
+
+    # API REST de Control de Visibilidad del Código QR (HU-18 / SCRUM-178)
+    path('api/lotes/<int:pk>/qr/visibilidad/', views.api_actualizar_visibilidad_qr_view, name='api_lote_qr_visibilidad'),
 
     # API REST pública del catálogo con filtros combinados (HU-20 / SCRUM-250)
     path('api/catalogo/', views.api_catalogo_view, name='api_catalogo'),

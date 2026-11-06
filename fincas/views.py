@@ -31,7 +31,7 @@ from typing import Optional
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db.models import Count, Q
-from django.http import JsonResponse, HttpResponseNotAllowed, HttpResponse
+from django.http import Http404, HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
 from rest_framework import status
@@ -56,6 +56,7 @@ from .models import (
     BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
+    CodigoQRLote,
     Cosecha,
     EtapaBeneficio,
     Finca,
@@ -77,6 +78,7 @@ from .serializers import (
     MunicipioSerializer,
 )
 from .services import (
+    actualizar_visibilidad_codigo_qr,
     crear_cosecha,
     crear_caracteristicas_calidad,
     crear_lote,
@@ -87,13 +89,18 @@ from .services import (
     generar_snapshot_trazabilidad,
     inactivar_municipio,
     normalizar_filtros_catalogo,
+    obtener_bytes_descarga_qr_lote,
     obtener_ficha_consolidada_lote,
     publicar_lote_en_catalogo,
     reactivar_municipio,
     registrar_auditoria_ficha_digital,
     registrar_etapa_beneficio,
+    resolver_lote_desde_qr,
+    sanitizar_ficha_por_visibilidad,
+    sincronizar_o_generar_qr_lote,
     toggle_estado_municipio,
     validar_lote_para_publicacion,
+    verificar_permiso_visibilidad_qr,
 )
 from usuarios.models import Usuario
 from usuarios.permissions import permiso_requerido_sesion
@@ -1095,6 +1102,7 @@ def mis_lotes_view(request):
             "cosecha__variedad",
             "proceso_beneficio",
             "caracteristicas_calidad",
+            "codigo_qr",
         )
         .order_by("-creado_en")
     )
@@ -1114,12 +1122,19 @@ def mis_lotes_view(request):
             lotes = lotes.filter(cosecha__finca_id=finca_id)
             finca_seleccionada = fincas_productor.filter(pk=finca_id).first()
 
-    # Precalculamos el estado de publicación y validación para la interfaz
+    # Precalculamos el estado de publicación, validación y QR para la interfaz
     lotes_info = []
     for lote in lotes:
         es_valido, errores_val = validar_lote_para_publicacion(lote)
+        qr_obj = getattr(lote, "codigo_qr", None)
+        if not qr_obj:
+            try:
+                qr_obj = sincronizar_o_generar_qr_lote(lote)
+            except Exception:
+                qr_obj = None
         lotes_info.append({
             "lote": lote,
+            "codigo_qr": qr_obj,
             "puede_publicar": es_valido,
             "errores_publicacion": errores_val,
         })
@@ -1244,7 +1259,444 @@ def ficha_digital_web_view(request, codigo=None):
     except Exception:
         pass
 
-    return render(request, "fincas/ficha_digital.html", {"ficha": ficha})
+    codigo_qr = CodigoQRLote.objects.filter(lote_id=ficha["id"]).first()
+    if codigo_qr:
+        productor_id = _resolver_productor_id(request)
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(codigo_qr, productor_id)
+        if not puede_acceder:
+            try:
+                lote_obj = Lote.objects.filter(id=ficha["id"]).first()
+                if lote_obj:
+                    registrar_auditoria_ficha_digital(
+                        lote=lote_obj,
+                        tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_WEB,
+                        request=request,
+                        es_consistente=False,
+                        detalles={"canal": "web_bloqueo_privado", "motivo": motivo},
+                    )
+            except Exception:
+                pass
+            return render(
+                request,
+                "fincas/ficha_digital_privada.html",
+                {
+                    "lote": Lote.objects.filter(id=ficha["id"]).first(),
+                    "codigo_qr": codigo_qr,
+                    "motivo": motivo,
+                },
+                status=403,
+            )
+        ficha = sanitizar_ficha_por_visibilidad(ficha, codigo_qr, es_propietario=es_propietario)
+
+    return render(
+        request,
+        "fincas/ficha_digital.html",
+        {
+            "ficha": ficha,
+            "codigo_qr": codigo_qr,
+        },
+    )
+
+
+def escanear_qr_web_view(request, identificador=None):
+    """
+    Vista web de acceso directo y escaneo de código QR hacia la Ficha Digital
+    (HU18-ST3 / SCRUM-177, HU18-ST4 / SCRUM-178).
+    Ruta: /trazabilidad/qr/<identificador>/ y /fincas/qr/<identificador>/
+    Resuelve el lote asociado al QR, evalúa permisos de visibilidad (PUBLICA / PRIVADA)
+    y renderiza la ficha digital consolidada, registrando la auditoría de escaneo.
+    """
+    if not identificador or not str(identificador).strip():
+        return render(
+            request,
+            "fincas/ficha_digital_error.html",
+            {"codigo": "", "error_detalle": "Identificador de código QR no especificado."},
+            status=400,
+        )
+
+    identificador_limpio = str(identificador).strip()
+    try:
+        qr_obj, lote_obj = resolver_lote_desde_qr(identificador_limpio)
+        ficha = obtener_ficha_consolidada_lote(lote_obj)
+    except ValidationError as exc:
+        msg = (
+            exc.message_dict.get("qr", exc.message_dict.get("lote", ["Código QR no encontrado"]))[0]
+            if hasattr(exc, "message_dict")
+            else str(exc)
+        )
+        return render(
+            request,
+            "fincas/ficha_digital_error.html",
+            {"codigo": identificador_limpio, "error_detalle": msg},
+            status=404,
+        )
+    except Exception as exc:
+        return render(
+            request,
+            "fincas/ficha_digital_error.html",
+            {"codigo": identificador_limpio, "error_detalle": str(exc)},
+            status=500,
+        )
+
+    # Control de Visibilidad del QR (HU18-ST4 / SCRUM-178)
+    productor_id = _resolver_productor_id(request)
+    puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(qr_obj, productor_id)
+    if not puede_acceder:
+        try:
+            registrar_auditoria_ficha_digital(
+                lote=lote_obj,
+                tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_WEB,
+                request=request,
+                es_consistente=False,
+                usuario_identificador="Público / Intento Acceso Privado",
+                detalles={
+                    "canal": "escaneo_qr_bloqueo_privado",
+                    "identificador_qr": qr_obj.identificador,
+                    "motivo": motivo,
+                    "ruta": request.path,
+                },
+            )
+        except Exception:
+            pass
+        return render(
+            request,
+            "fincas/ficha_digital_privada.html",
+            {
+                "lote": lote_obj,
+                "codigo_qr": qr_obj,
+                "motivo": motivo,
+            },
+            status=403,
+        )
+
+    ficha = sanitizar_ficha_por_visibilidad(ficha, qr_obj, es_propietario=es_propietario)
+
+    # Registrar auditoría de escaneo QR Web exitoso (HU-18 / SCRUM-177)
+    try:
+        registrar_auditoria_ficha_digital(
+            lote=lote_obj,
+            tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_WEB,
+            request=request,
+            completitud_porcentaje=ficha.get("completitud_porcentaje", 0),
+            es_consistente=ficha.get("es_consistente", True),
+            usuario_identificador="Propietario / Escaneo QR" if es_propietario else "Público / Escaneo QR",
+            detalles={
+                "canal": "escaneo_qr",
+                "identificador_qr": qr_obj.identificador,
+                "nivel_visibilidad": qr_obj.nivel_visibilidad,
+                "es_propietario": es_propietario,
+                "ruta": request.path,
+            },
+        )
+    except Exception:
+        pass
+
+    return render(
+        request,
+        "fincas/ficha_digital.html",
+        {
+            "ficha": ficha,
+            "codigo_qr": qr_obj,
+            "es_escaneo_qr": True,
+            "es_propietario": es_propietario,
+        },
+    )
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_consultar_ficha_desde_qr_view(request, identificador=None):
+    """
+    Endpoint REST para consultar la ficha digital consolidada a partir del escaneo de su Código QR
+    (HU18-ST3 / SCRUM-177, HU18-ST4 / SCRUM-178).
+    GET /fincas/api/qr/<identificador>/
+    GET /api/v1/qr/<identificador>/
+    GET /fincas/api/qr/<identificador>/ficha/
+    """
+    if not identificador or not str(identificador).strip():
+        return Response(
+            {"error": "El identificador del código QR es obligatorio."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    identificador_limpio = str(identificador).strip()
+    try:
+        qr_obj, lote_obj = resolver_lote_desde_qr(identificador_limpio)
+    except ValidationError as exc:
+        msg = (
+            exc.message_dict.get("qr", exc.message_dict.get("lote", ["Código QR no encontrado"]))[0]
+            if hasattr(exc, "message_dict")
+            else str(exc)
+        )
+        return Response({"error": msg}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as exc:
+        return Response(
+            {"error": f"Error al procesar el código QR: {str(exc)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # Control de Visibilidad del QR (HU18-ST4 / SCRUM-178)
+    productor_id = _resolver_productor_id(request)
+    puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(qr_obj, productor_id)
+    if not puede_acceder:
+        try:
+            registrar_auditoria_ficha_digital(
+                lote=lote_obj,
+                tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API,
+                request=request,
+                es_consistente=False,
+                usuario_identificador="Consulta API / Intento Acceso Privado",
+                detalles={
+                    "canal": "api_qr_bloqueo_privado",
+                    "identificador_qr": qr_obj.identificador,
+                    "motivo": motivo,
+                    "ruta": request.path,
+                },
+            )
+        except Exception:
+            pass
+        return Response(
+            {
+                "error": motivo,
+                "codigo": lote_obj.codigo,
+                "identificador_qr": qr_obj.identificador,
+                "nivel_visibilidad": qr_obj.nivel_visibilidad,
+                "acceso_restringido": True,
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        ficha_data = obtener_ficha_consolidada_lote(lote_obj)
+        ficha_data = sanitizar_ficha_por_visibilidad(ficha_data, qr_obj, es_propietario=es_propietario)
+    except Exception as exc:
+        return Response(
+            {"error": f"Error al consolidar la ficha digital: {str(exc)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    serializer = FichaDigitalSerializer(data=ficha_data)
+    if not serializer.is_valid():
+        return Response(
+            {
+                "error": "Inconsistencia interna en los datos de la ficha consolidada.",
+                "detalles": serializer.errors,
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    # Registrar auditoría de consulta API / QR (HU-17 / SCRUM-172 & HU-18 / SCRUM-177)
+    try:
+        registrar_auditoria_ficha_digital(
+            lote=lote_obj,
+            tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API,
+            request=request,
+            completitud_porcentaje=ficha_data.get("completitud_porcentaje", 0),
+            es_consistente=ficha_data.get("es_consistente", True),
+            usuario_identificador="Productor Propietario" if es_propietario else "Consulta API / Escaneo QR",
+            detalles={
+                "canal": "api_qr",
+                "identificador_qr": qr_obj.identificador,
+                "nivel_visibilidad": qr_obj.nivel_visibilidad,
+                "es_propietario": es_propietario,
+                "ruta": request.path,
+            },
+        )
+    except Exception:
+        pass
+
+    resultado = serializer.data
+    resultado["es_propietario"] = es_propietario
+    resultado["codigo_qr"] = {
+        "identificador": qr_obj.identificador,
+        "nivel_visibilidad": qr_obj.nivel_visibilidad,
+        "payload_url": qr_obj.payload_url,
+        "activo": qr_obj.activo,
+        "imagen_base64": qr_obj.imagen_base64,
+    }
+
+    return Response(resultado, status=status.HTTP_200_OK)
+
+
+@api_view(["POST", "PATCH"])
+def api_actualizar_visibilidad_qr_view(request, pk):
+    """
+    Endpoint REST para modificar el nivel de visibilidad (PUBLICA / PRIVADA) del QR de un lote
+    (HU18-ST4 / SCRUM-178).
+    POST /fincas/api/lotes/<pk>/qr/visibilidad/
+    Body: {"nivel_visibilidad": "PRIVADA" | "PUBLICA"}
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        return Response(
+            {"error": "No se pudo identificar al productor autenticado."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    try:
+        lote = Lote.objects.select_related("cosecha__finca").get(pk=pk)
+    except Lote.DoesNotExist:
+        return Response({"error": "El lote indicado no existe."}, status=status.HTTP_404_NOT_FOUND)
+
+    if str(lote.cosecha.finca.productor_id) != str(productor_id):
+        return Response(
+            {"error": "No tiene permisos para modificar la visibilidad de este lote."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    nuevo_nivel = request.data.get("nivel_visibilidad")
+    if not nuevo_nivel:
+        return Response(
+            {"nivel_visibilidad": ["Este campo es obligatorio. Opciones: PUBLICA, PRIVADA."]},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        qr = actualizar_visibilidad_codigo_qr(lote_o_id=lote, nuevo_nivel=nuevo_nivel)
+    except ValidationError as exc:
+        msg = (
+            exc.message_dict.get("nivel_visibilidad", [str(exc)])[0]
+            if hasattr(exc, "message_dict")
+            else str(exc)
+        )
+        return Response({"error": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response(
+        {
+            "mensaje": f"Nivel de visibilidad actualizado exitosamente a '{qr.nivel_visibilidad}'.",
+            "identificador_qr": qr.identificador,
+            "nivel_visibilidad": qr.nivel_visibilidad,
+            "codigo_lote": lote.codigo,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+def cambiar_visibilidad_qr_web_view(request, pk):
+    """
+    Vista web para conmutar el nivel de visibilidad (PUBLICA / PRIVADA) del QR de un lote
+    (HU18-ST4 / SCRUM-178).
+    POST /fincas/lotes/<pk>/qr/visibilidad/
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(request, "Debe iniciar sesión para modificar la visibilidad del lote.")
+        return redirect("login")
+
+    try:
+        lote = Lote.objects.select_related("cosecha__finca").get(pk=pk)
+    except Lote.DoesNotExist:
+        messages.error(request, "El lote indicado no existe.")
+        return redirect("mis_lotes")
+
+    if str(lote.cosecha.finca.productor_id) != str(productor_id):
+        messages.error(request, "No tiene permisos para modificar la configuración de este lote.")
+        return redirect("mis_lotes")
+
+    if request.method == "POST":
+        nuevo_nivel = request.POST.get("nivel_visibilidad")
+        if not nuevo_nivel:
+            actual = lote.codigo_qr.nivel_visibilidad if lote.tiene_codigo_qr else CodigoQRLote.VISIBILIDAD_PUBLICA
+            nuevo_nivel = CodigoQRLote.VISIBILIDAD_PRIVADA if actual == CodigoQRLote.VISIBILIDAD_PUBLICA else CodigoQRLote.VISIBILIDAD_PUBLICA
+
+        try:
+            qr = actualizar_visibilidad_codigo_qr(lote_o_id=lote, nuevo_nivel=nuevo_nivel)
+            messages.success(
+                request,
+                f"Visibilidad del Código QR para el lote '{lote.codigo}' actualizada a '{qr.get_nivel_visibilidad_display()}'."
+            )
+        except ValidationError as exc:
+            messages.error(request, str(exc))
+
+    return redirect(request.META.get("HTTP_REFERER") or "mis_lotes")
+
+
+def descargar_qr_lote_view(request, pk=None, identificador=None):
+    """
+    Descarga el archivo de imagen PNG en alta definición del código QR del lote (HU18-ST7 / SCRUM-180).
+    GET /fincas/lotes/<pk>/qr/descargar/
+    GET /fincas/qr/<identificador>/descargar/
+    """
+    productor_id = _resolver_productor_id(request)
+    lote = None
+    qr = None
+
+    if pk is not None:
+        lote = get_object_or_404(
+            Lote.objects.select_related("cosecha__finca", "codigo_qr"),
+            pk=pk,
+            activo=True,
+        )
+        qr = getattr(lote, "codigo_qr", None)
+        if not qr:
+            qr = sincronizar_o_generar_qr_lote(lote)
+    elif identificador is not None:
+        try:
+            qr, lote = resolver_lote_desde_qr(identificador)
+        except ValidationError:
+            raise Http404(f"Código QR '{identificador}' no encontrado.")
+    else:
+        raise Http404("Parámetros insuficientes para resolver el código QR.")
+
+    puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(qr, productor_id)
+    if not puede_acceder:
+        return HttpResponseForbidden(
+            f"Acceso denegado: El código QR de este lote tiene visibilidad privada. {motivo}"
+        )
+
+    png_bytes, nombre_archivo, qr_obj, lote_obj = obtener_bytes_descarga_qr_lote(lote)
+    response = HttpResponse(png_bytes, content_type="image/png")
+    response["Content-Disposition"] = f'attachment; filename="{nombre_archivo}"'
+    return response
+
+
+def imprimir_etiqueta_qr_view(request, pk):
+    """
+    Vista web optimizada para impresión de etiquetas de rotulado físico para sacos de café
+    con código QR de trazabilidad y datos agronómicos (HU18-ST7 / SCRUM-180).
+    GET /fincas/lotes/<pk>/qr/imprimir/
+    """
+    productor_id = _resolver_productor_id(request)
+    lote = get_object_or_404(
+        Lote.objects.select_related(
+            "cosecha",
+            "cosecha__finca",
+            "cosecha__finca__municipio",
+            "cosecha__variedad",
+            "proceso_beneficio",
+            "caracteristicas_calidad",
+            "codigo_qr",
+        ),
+        pk=pk,
+        activo=True,
+    )
+    qr = getattr(lote, "codigo_qr", None)
+    if not qr:
+        qr = sincronizar_o_generar_qr_lote(lote)
+
+    puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(qr, productor_id)
+    if not puede_acceder:
+        return render(
+            request,
+            "fincas/ficha_digital_privada.html",
+            {
+                "lote": lote,
+                "codigo_qr": qr,
+                "motivo": motivo,
+            },
+            status=403,
+        )
+
+    return render(
+        request,
+        "fincas/etiqueta_qr_lote.html",
+        {
+            "lote": lote,
+            "codigo_qr": qr,
+            "es_propietario": es_propietario,
+        },
+    )
+
 
 
 def _resolver_usuario_correo(request) -> Optional[str]:
@@ -1443,6 +1895,7 @@ def _obtener_lote_del_productor(productor_id, pk):
             "cosecha__variedad",
             "proceso_beneficio",
             "estado_lote",
+            "codigo_qr",
         ),
         pk=pk,
         cosecha__finca__productor_id=productor_id,
@@ -1451,11 +1904,10 @@ def _obtener_lote_del_productor(productor_id, pk):
 
 def detalle_lote_view(request, pk):
     """
-    Detalle de un lote con su historial de beneficio (HU14-ST2 /
-    SCRUM-149): todas las etapas registradas, en orden cronológico, con
-    fecha, etapa y observaciones. Si el lote todavía no tiene etapas se
-    muestra un estado vacío explícito, nunca un error ni una página en
-    blanco.
+    Detalle de un lote con su historial de beneficio y visualización de Código QR
+    (HU14-ST2 / SCRUM-149, HU18-ST6 / SCRUM-179):
+    Todas las etapas registradas, en orden cronológico, y módulo visual del Código QR
+    asociado con conmutador de visibilidad e información de trazabilidad.
     """
     productor_id = _resolver_productor_id(request)
     if not productor_id:
@@ -1466,6 +1918,13 @@ def detalle_lote_view(request, pk):
         return redirect(f"{reverse('login')}?next={request.path}")
 
     lote = _obtener_lote_del_productor(productor_id, pk)
+    qr_obj = getattr(lote, "codigo_qr", None)
+    if not qr_obj:
+        try:
+            qr_obj = sincronizar_o_generar_qr_lote(lote)
+        except Exception:
+            qr_obj = None
+
     # El orden cronológico lo define EtapaBeneficio.Meta.ordering; se
     # repite aquí para que el historial no dependa de un cambio en Meta.
     etapas = lote.etapas_beneficio.filter(activo=True).order_by("fecha", "creado_en", "id")
@@ -1473,7 +1932,7 @@ def detalle_lote_view(request, pk):
     return render(
         request,
         "fincas/detalle_lote.html",
-        {"lote": lote, "etapas": etapas},
+        {"lote": lote, "codigo_qr": qr_obj, "etapas": etapas},
     )
 
 
