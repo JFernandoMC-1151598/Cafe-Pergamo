@@ -383,7 +383,7 @@
                                         </div>
                                     </div>
 
-                                    <div class="d-flex justify-content-center gap-2 flex-wrap">
+                                    <div class="d-flex justify-content-center gap-2 flex-wrap mb-2">
                                         <!-- Conmutador rápido de Visibilidad (HU18-ST4 / SCRUM-178) -->
                                         <form method="POST" action="{% url 'lote_qr_visibilidad_web' lote.pk %}" class="d-inline">
                                             {% csrf_token %}
@@ -402,6 +402,15 @@
 
                                         <a href="{% url 'trazabilidad_qr_web' item.codigo_qr.identificador %}" target="_blank" class="btn btn-primary btn-sm bg-primary rounded-pill px-3 fw-semibold">
                                             <i class="bi bi-box-arrow-up-right me-1"></i>Probar Escaneo
+                                        </a>
+                                    </div>
+                                    <div class="d-flex justify-content-center gap-2 flex-wrap border-top pt-2">
+                                        <!-- HU18-ST7 / SCRUM-180: Descarga e Impresión -->
+                                        <a href="{% url 'lote_qr_descargar' lote.pk %}" class="btn btn-outline-primary btn-sm rounded-pill px-3" title="Descargar imagen PNG del código QR">
+                                            <i class="bi bi-download me-1"></i>Descargar PNG
+                                        </a>
+                                        <a href="{% url 'lote_qr_imprimir' lote.pk %}" target="_blank" class="btn btn-outline-dark btn-sm rounded-pill px-3" title="Imprimir etiqueta para sacos de café">
+                                            <i class="bi bi-printer me-1"></i>Imprimir Etiqueta
                                         </a>
                                     </div>
                                 {% else %}

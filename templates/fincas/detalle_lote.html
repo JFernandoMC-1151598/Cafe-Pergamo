@@ -119,6 +119,12 @@
                                         </button>
                                     {% endif %}
                                 </form>
+                                <a href="{% url 'lote_qr_descargar' lote.pk %}" class="btn btn-outline-primary btn-sm px-3" title="Descargar imagen PNG del código QR">
+                                    <i class="bi bi-download me-1"></i>Descargar PNG
+                                </a>
+                                <a href="{% url 'lote_qr_imprimir' lote.pk %}" target="_blank" class="btn btn-outline-dark btn-sm px-3" title="Ver e imprimir etiqueta de rotulado">
+                                    <i class="bi bi-printer me-1"></i>Imprimir Etiqueta
+                                </a>
                             </div>
                         </div>
                     </div>

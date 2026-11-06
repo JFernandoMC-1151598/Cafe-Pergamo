@@ -85,6 +85,7 @@ from fincas.services import (
     generar_matriz_qr_lote,
     generar_qr_base64_lote,
     obtener_codigo_qr_lote,
+    obtener_bytes_descarga_qr_lote,
     obtener_estructura_qr_lote,
     resolver_lote_desde_qr,
     sanitizar_ficha_por_visibilidad,
@@ -8248,6 +8249,207 @@ class CodigoQRVisualizacionGestionTests(TestCase):
         self.assertTrue(self.lote.tiene_codigo_qr)
         self.assertEqual(self.lote.codigo_qr.identificador, "QR-LOTGESTIONQR01")
         self.assertContains(response, "QR-LOTGESTIONQR01")
+
+
+class CodigoQRDescargaImpresionTests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST7 (SCRUM-180):
+    Permitir descargar o imprimir el QR del lote.
+
+    Criterios de Aceptación y Escenarios:
+    1. Servicio 'obtener_bytes_descarga_qr_lote':
+       - Genera bytes de imagen PNG válidos (firma de archivo \x89PNG\r\n\x1a\n).
+       - Retorna nombre de archivo canónico '{identificador}.png'.
+       - Soporta resolución tanto por instancia/ID de Lote como por identificador formal 'QR-<CODIGO>'.
+    2. Endpoint/Vista de Descarga 'descargar_qr_lote_view':
+       - GET /fincas/lotes/<pk>/qr/descargar/ retorna HTTP 200 con Content-Type: image/png y Content-Disposition: attachment.
+       - GET /fincas/qr/<identificador>/descargar/ retorna imagen descargable para acceso público.
+       - Si el QR está configurado como PRIVADA y quien solicita no es el propietario, retorna HTTP 403 Forbidden.
+       - Si quien solicita el QR privado es el productor dueño autenticado, retorna HTTP 200 con la imagen adjunta.
+       - QR inexistente retorna HTTP 404 Not Found.
+    3. Vista de Etiqueta Imprimible 'imprimir_etiqueta_qr_view':
+       - GET /fincas/lotes/<pk>/qr/imprimir/ renderiza plantilla 'fincas/etiqueta_qr_lote.html'.
+       - Incluye los datos esenciales: código de lote, finca, municipio, variedad, proceso, cantidad, QR Base64.
+       - Si el QR es PRIVADO y el usuario es anónimo o externo, retorna HTTP 403 Forbidden.
+       - Si el QR es PRIVADO y el usuario es el dueño autenticado, retorna HTTP 200 con la plantilla de etiqueta.
+    4. Integración en Interfaces:
+       - Modal de 'Mis Lotes' y tarjeta de 'Detalle de Lote' contienen los hipervínculos hacia descargar e imprimir.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Hacienda El Paraíso QR",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3125"),
+            longitud=Decimal("-72.4820"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Caturra", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="WASHED_ST7", nombre="Lavado Gourmet", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 15),
+            cantidad_total=Decimal("6000.00"),
+            cantidad_disponible=Decimal("5500.00"),
+            activo=True,
+        )
+        self.lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("500.00"),
+            codigo="LOTDESCARGA01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        self.qr = self.lote.codigo_qr
+
+    def test_servicio_obtener_bytes_descarga_qr_lote_valido(self):
+        """El servicio genera bytes PNG con el encabezado estándar y el nombre '{identificador}.png'."""
+        png_bytes, nombre_archivo, qr_obj, lote_obj = obtener_bytes_descarga_qr_lote(self.lote)
+
+        self.assertTrue(png_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(nombre_archivo, f"{self.qr.identificador}.png")
+        self.assertEqual(qr_obj.pk, self.qr.pk)
+        self.assertEqual(lote_obj.pk, self.lote.pk)
+
+    def test_servicio_obtener_bytes_descarga_por_identificador_formal(self):
+        """El servicio resuelve por el identificador formal 'QR-<CODIGO>' y genera la imagen correspondiente."""
+        png_bytes, nombre_archivo, qr_obj, lote_obj = obtener_bytes_descarga_qr_lote(self.qr.identificador)
+
+        self.assertTrue(png_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(nombre_archivo, "QR-LOTDESCARGA01.png")
+        self.assertEqual(lote_obj.codigo, "LOTDESCARGA01")
+
+    def test_vista_descargar_qr_por_pk_exitoso(self):
+        """GET /fincas/lotes/<pk>/qr/descargar/ retorna la imagen PNG con Content-Disposition: attachment."""
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "image/png")
+        self.assertIn('attachment; filename="QR-LOTDESCARGA01.png"', response["Content-Disposition"])
+        self.assertTrue(response.content.startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_vista_descargar_qr_por_identificador_publico_anonimo(self):
+        """GET /fincas/qr/<identificador>/descargar/ permite a usuarios anónimos descargar si es PUBLICA."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PUBLICA
+        self.qr.save()
+
+        url = reverse("qr_descargar_directo", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "image/png")
+        self.assertIn("attachment;", response["Content-Disposition"])
+
+    def test_vista_descargar_qr_privado_anonimo_retorna_403(self):
+        """GET descarga sobre un lote PRIVADO niega el acceso a anónimos con HTTP 403 Forbidden."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        url = reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_vista_descargar_qr_privado_propietario_retorna_200(self):
+        """GET descarga sobre un lote PRIVADO permite la descarga al productor dueño autenticado."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "image/png")
+
+    def test_vista_descargar_qr_inexistente_retorna_404(self):
+        """Solicitud de descarga con identificador inexistente retorna HTTP 404 Not Found."""
+        url = reverse("qr_descargar_directo", kwargs={"identificador": "QR-INEXISTENTE-999"})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_vista_imprimir_etiqueta_publica_renderiza_plantilla(self):
+        """GET /fincas/lotes/<pk>/qr/imprimir/ renderiza la plantilla 'fincas/etiqueta_qr_lote.html'."""
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/etiqueta_qr_lote.html")
+        self.assertContains(response, self.lote.codigo)
+        self.assertContains(response, self.finca.nombre)
+        self.assertContains(response, self.qr.identificador)
+        self.assertContains(response, "Imprimir Etiqueta")
+        self.assertContains(response, "window.print()")
+
+    def test_vista_imprimir_etiqueta_privada_anonimo_retorna_403(self):
+        """Petición anónima a etiqueta de lote PRIVADO retorna 403 y plantilla privada."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        url = reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTemplateUsed(response, "fincas/ficha_digital_privada.html")
+
+    def test_vista_imprimir_etiqueta_privada_propietario_retorna_200(self):
+        """Productor dueño autenticado puede imprimir la etiqueta de su lote privado (200 OK)."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/etiqueta_qr_lote.html")
+
+    def test_interfaces_incluyen_enlaces_descarga_e_impresion(self):
+        """Tanto 'Mis Lotes' como 'Detalle de Lote' contienen los enlaces a descargar e imprimir."""
+        _iniciar_sesion_productor(self.client, self.productor_id)
+
+        # Mis lotes
+        resp_mis_lotes = self.client.get(reverse("mis_lotes"))
+        self.assertEqual(resp_mis_lotes.status_code, 200)
+        self.assertContains(resp_mis_lotes, reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk}))
+        self.assertContains(resp_mis_lotes, reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk}))
+
+        # Detalle de lote
+        resp_detalle = self.client.get(reverse("lote_detalle", kwargs={"pk": self.lote.pk}))
+        self.assertEqual(resp_detalle.status_code, 200)
+        self.assertContains(resp_detalle, reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk}))
+        self.assertContains(resp_detalle, reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk}))
+
 
 
 

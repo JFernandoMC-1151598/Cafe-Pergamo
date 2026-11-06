@@ -34,6 +34,9 @@ urlpatterns = [
     path('trazabilidad/qr/<str:identificador>/', views.escanear_qr_web_view, name='trazabilidad_qr_web'),
     path('qr/<str:identificador>/', views.escanear_qr_web_view, name='escanear_qr_web_directo'),
     path('lotes/<int:pk>/qr/visibilidad/', views.cambiar_visibilidad_qr_web_view, name='lote_qr_visibilidad_web'),
+    path('lotes/<int:pk>/qr/descargar/', views.descargar_qr_lote_view, name='lote_qr_descargar'),
+    path('qr/<str:identificador>/descargar/', views.descargar_qr_lote_view, name='qr_descargar_directo'),
+    path('lotes/<int:pk>/qr/imprimir/', views.imprimir_etiqueta_qr_view, name='lote_qr_imprimir'),
 
     # Interfaz Web de Catálogo de Municipios (HU-09 / SCRUM-111)
     path('municipios/', views.admin_municipios_view, name='admin_municipios'),

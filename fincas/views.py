@@ -31,7 +31,7 @@ from typing import Optional
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.db.models import Count, Q
-from django.http import JsonResponse, HttpResponseNotAllowed, HttpResponse
+from django.http import Http404, HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
 from rest_framework import status
@@ -89,6 +89,7 @@ from .services import (
     generar_snapshot_trazabilidad,
     inactivar_municipio,
     normalizar_filtros_catalogo,
+    obtener_bytes_descarga_qr_lote,
     obtener_ficha_consolidada_lote,
     publicar_lote_en_catalogo,
     reactivar_municipio,
@@ -1608,6 +1609,94 @@ def cambiar_visibilidad_qr_web_view(request, pk):
             messages.error(request, str(exc))
 
     return redirect(request.META.get("HTTP_REFERER") or "mis_lotes")
+
+
+def descargar_qr_lote_view(request, pk=None, identificador=None):
+    """
+    Descarga el archivo de imagen PNG en alta definición del código QR del lote (HU18-ST7 / SCRUM-180).
+    GET /fincas/lotes/<pk>/qr/descargar/
+    GET /fincas/qr/<identificador>/descargar/
+    """
+    productor_id = _resolver_productor_id(request)
+    lote = None
+    qr = None
+
+    if pk is not None:
+        lote = get_object_or_404(
+            Lote.objects.select_related("cosecha__finca", "codigo_qr"),
+            pk=pk,
+            activo=True,
+        )
+        qr = getattr(lote, "codigo_qr", None)
+        if not qr:
+            qr = sincronizar_o_generar_qr_lote(lote)
+    elif identificador is not None:
+        try:
+            qr, lote = resolver_lote_desde_qr(identificador)
+        except ValidationError:
+            raise Http404(f"Código QR '{identificador}' no encontrado.")
+    else:
+        raise Http404("Parámetros insuficientes para resolver el código QR.")
+
+    puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(qr, productor_id)
+    if not puede_acceder:
+        return HttpResponseForbidden(
+            f"Acceso denegado: El código QR de este lote tiene visibilidad privada. {motivo}"
+        )
+
+    png_bytes, nombre_archivo, qr_obj, lote_obj = obtener_bytes_descarga_qr_lote(lote)
+    response = HttpResponse(png_bytes, content_type="image/png")
+    response["Content-Disposition"] = f'attachment; filename="{nombre_archivo}"'
+    return response
+
+
+def imprimir_etiqueta_qr_view(request, pk):
+    """
+    Vista web optimizada para impresión de etiquetas de rotulado físico para sacos de café
+    con código QR de trazabilidad y datos agronómicos (HU18-ST7 / SCRUM-180).
+    GET /fincas/lotes/<pk>/qr/imprimir/
+    """
+    productor_id = _resolver_productor_id(request)
+    lote = get_object_or_404(
+        Lote.objects.select_related(
+            "cosecha",
+            "cosecha__finca",
+            "cosecha__finca__municipio",
+            "cosecha__variedad",
+            "proceso_beneficio",
+            "caracteristicas_calidad",
+            "codigo_qr",
+        ),
+        pk=pk,
+        activo=True,
+    )
+    qr = getattr(lote, "codigo_qr", None)
+    if not qr:
+        qr = sincronizar_o_generar_qr_lote(lote)
+
+    puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(qr, productor_id)
+    if not puede_acceder:
+        return render(
+            request,
+            "fincas/ficha_digital_privada.html",
+            {
+                "lote": lote,
+                "codigo_qr": qr,
+                "motivo": motivo,
+            },
+            status=403,
+        )
+
+    return render(
+        request,
+        "fincas/etiqueta_qr_lote.html",
+        {
+            "lote": lote,
+            "codigo_qr": qr,
+            "es_propietario": es_propietario,
+        },
+    )
+
 
 
 def _resolver_usuario_correo(request) -> Optional[str]:

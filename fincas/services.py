@@ -1994,3 +1994,38 @@ def sanitizar_ficha_por_visibilidad(
     return ficha_modificada
 
 
+def obtener_bytes_descarga_qr_lote(
+    lote_o_id: Union[Lote, int, str],
+    *,
+    box_size: int = 12,
+    border: int = 4,
+    error_correction: str = "M",
+) -> tuple[bytes, str, CodigoQRLote, Lote]:
+    """
+    Genera u obtiene los bytes PNG de alta definición y el nombre canónico para
+    la descarga física o impresión del código QR (HU18-ST7 / SCRUM-180).
+
+    Retorna:
+      (png_bytes: bytes, nombre_archivo: str, qr_obj: CodigoQRLote, lote_obj: Lote)
+    """
+    if isinstance(lote_o_id, str) and (
+        lote_o_id.strip().upper().startswith(PREFIJO_IDENTIFICADOR_QR)
+    ):
+        qr_obj, lote_obj = resolver_lote_desde_qr(lote_o_id)
+    else:
+        lote_obj = _resolver_lote(lote_o_id)
+        qr_obj = getattr(lote_obj, "codigo_qr", None)
+        if not qr_obj:
+            qr_obj = sincronizar_o_generar_qr_lote(lote_obj)
+
+    png_bytes = generar_matriz_qr_lote(
+        lote_o_codigo=lote_obj,
+        box_size=box_size,
+        border=border,
+        error_correction=error_correction,
+    )
+    nombre_archivo = f"{qr_obj.identificador}.png"
+    return png_bytes, nombre_archivo, qr_obj, lote_obj
+
+
+
