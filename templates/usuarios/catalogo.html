@@ -282,8 +282,8 @@
                     </div>
                     {% endif %}
 
-                    <!-- Precio y Contacto -->
-                    <div class="pt-3 border-top d-flex align-items-center justify-content-between mt-auto">
+                    <!-- Precio y Acción Comercial de Interés (HU-22 / SCRUM-265) -->
+                    <div class="pt-3 border-top d-flex align-items-center justify-content-between mt-auto flex-wrap gap-2">
                         <div>
                             {% if lote.precio_referencial %}
                                 <div class="small text-muted">Precio orientativo:</div>
@@ -292,9 +292,24 @@
                                 <span class="badge bg-light text-secondary border">A convenir</span>
                             {% endif %}
                         </div>
-                        <a href="mailto:comercial@cafepergamo.co?subject=Inter%C3%A9s%20en%20Lote%20{{ lote.codigo }}%20({{ lote.cosecha.finca.nombre }})" class="btn btn-outline-primary btn-sm px-3 fw-semibold">
-                            <i class="bi bi-chat-dots me-1"></i>Contactar
-                        </a>
+                        <div class="d-flex align-items-center gap-2">
+                            <a href="{% url 'lote_ficha_digital_web' lote.codigo %}" class="btn btn-outline-secondary btn-sm px-2 fw-medium" title="Consultar Ficha Digital de Trazabilidad">
+                                <i class="bi bi-file-earmark-text"></i>
+                            </a>
+                            <button type="button" 
+                                    class="btn btn-primary bg-primary btn-sm px-3 fw-semibold btn-abrir-modal-interes" 
+                                    id="btn-manifestar-interes-{{ lote.id }}"
+                                    data-bs-toggle="modal" 
+                                    data-bs-target="#modalManifestarInteres"
+                                    data-lote-id="{{ lote.id }}"
+                                    data-lote-codigo="{{ lote.codigo }}"
+                                    data-lote-finca="{{ lote.cosecha.finca.nombre }}"
+                                    data-lote-cantidad="{{ lote.cantidad }}"
+                                    data-lote-precio="{% if lote.precio_referencial %}${{ lote.precio_referencial }} / kg{% else %}A convenir{% endif %}"
+                                    data-action-url="{% url 'lote_manifestar_interes_web' lote.id %}">
+                                <i class="bi bi-send-check me-1"></i>Manifestar Interés
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -348,5 +363,292 @@
         </div>
         {% endif %}
     {% endif %}
+
+    <!-- Modal de Formulario para Manifestar Interés (HU-22 / SCRUM-265) -->
+    <div class="modal fade" id="modalManifestarInteres" tabindex="-1" aria-labelledby="modalManifestarInteresLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow rounded-4 overflow-hidden">
+                <div class="modal-header text-white p-4" style="background: linear-gradient(135deg, #2B1810 0%, #4A2C2A 50%, #1B381E 100%) !important; color: #ffffff !important;">
+                    <div>
+                        <span class="badge bg-warning text-dark fw-bold mb-1"><i class="bi bi-tag-fill me-1"></i>Negociación Directa</span>
+                        <h5 class="modal-title fw-bold text-white mb-0" id="modalManifestarInteresLabel">
+                            Manifestar Interés — Lote <span id="modalLoteCodigoBadge"></span>
+                        </h5>
+                    </div>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                
+                <form id="formManifestarInteres" method="POST" action="">
+                    {% csrf_token %}
+                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    
+                    <div class="modal-body p-4">
+                        <!-- Resumen del lote seleccionado -->
+                        <div class="bg-light p-3 rounded-3 mb-3 border">
+                            <div class="row g-2 small">
+                                <div class="col-6">
+                                    <span class="text-muted d-block">Finca de origen:</span>
+                                    <strong class="text-dark" id="modalFincaNombre">—</strong>
+                                </div>
+                                <div class="col-6">
+                                    <span class="text-muted d-block">Stock disponible:</span>
+                                    <strong class="text-success" id="modalStockDisponible">—</strong>
+                                </div>
+                                <div class="col-12 border-top pt-2 mt-2">
+                                    <span class="text-muted">Precio orientativo:</span>
+                                    <span class="fw-bold text-primary ms-1" id="modalPrecioReferencial">—</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Contenedor dinámico de alertas en modal -->
+                        <div id="modalAlertError" class="alert alert-danger d-none py-2 px-3 small" role="alert"></div>
+
+                        {% if not user.is_authenticated %}
+                            <div class="alert alert-warning border-warning-subtle small mb-3">
+                                <i class="bi bi-info-circle me-1"></i>
+                                Para formalizar tu manifestación de interés y notificar al productor con tus datos verificados, debes 
+                                <a href="{% url 'login' %}?next={{ request.get_full_path }}" class="fw-bold text-dark text-decoration-underline">iniciar sesión</a> o 
+                                <a href="{% url 'registro' %}" class="fw-bold text-dark text-decoration-underline">registrarte como comprador</a>.
+                            </div>
+                        {% endif %}
+
+                        <!-- Campos del Formulario -->
+                        <div class="mb-3">
+                            <label for="modalInputCantidad" class="form-label fw-semibold text-dark small mb-1">
+                                Cantidad en kilogramos (kg) que deseas cotizar o negociar:
+                            </label>
+                            <div class="input-group input-group-sm">
+                                <input type="number" 
+                                       class="form-control" 
+                                       id="modalInputCantidad" 
+                                       name="cantidad_kg" 
+                                       min="0.01" 
+                                       step="0.01" 
+                                       placeholder="Ej: 100.00 (opcional, máx stock del lote)">
+                                <span class="input-group-text bg-white">kg</span>
+                            </div>
+                            <div class="form-text small">Deja este campo vacío si deseas hacer una consulta sobre la totalidad del lote.</div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="modalInputTelefono" class="form-label fw-semibold text-dark small mb-1">
+                                Teléfono o WhatsApp de contacto directo (opcional):
+                            </label>
+                            <input type="tel" 
+                                   class="form-control form-control-sm" 
+                                   id="modalInputTelefono" 
+                                   name="telefono_contacto" 
+                                   placeholder="+57 300 0000000" 
+                                   maxlength="30">
+                        </div>
+
+                        <div class="mb-2">
+                            <label for="modalInputMensaje" class="form-label fw-semibold text-dark small mb-1">
+                                Mensaje o propuesta inicial para el productor:
+                            </label>
+                            <textarea class="form-control form-control-sm" 
+                                      id="modalInputMensaje" 
+                                      name="mensaje" 
+                                      rows="3" 
+                                      maxlength="1000" 
+                                      placeholder="Escribe aquí tu propuesta comercial, solicitud de muestras, condiciones de entrega o dudas sensoriales..."></textarea>
+                        </div>
+                    </div>
+
+                    <div class="modal-footer bg-light border-top p-3 d-flex justify-content-between">
+                        <button type="button" class="btn btn-outline-secondary btn-sm px-3" data-bs-dismiss="modal">
+                            Cancelar
+                        </button>
+                        {% if user.is_authenticated %}
+                            <button type="submit" class="btn btn-primary bg-primary btn-sm px-4 fw-semibold" id="btnEnviarManifestacion">
+                                <span class="spinner-border spinner-border-sm me-1 d-none" id="spinnerEnviar" role="status" aria-hidden="true"></span>
+                                <i class="bi bi-send-check me-1" id="iconEnviar"></i> Enviar Manifestación
+                            </button>
+                        {% else %}
+                            <a href="{% url 'login' %}?next={{ request.get_full_path }}" class="btn btn-primary bg-primary btn-sm px-4 fw-semibold">
+                                <i class="bi bi-box-arrow-in-right me-1"></i> Iniciar Sesión para Enviar
+                            </a>
+                        {% endif %}
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de Confirmación Exitosa (HU-22 / SCRUM-266) -->
+    <div class="modal fade" id="modalConfirmacionInteresExito" tabindex="-1" aria-labelledby="modalExitoLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow rounded-4 text-center p-4">
+                <div class="modal-body">
+                    <div class="d-inline-flex align-items-center justify-content-center bg-success-subtle text-success rounded-circle p-4 mb-3" style="width: 80px; height: 80px;">
+                        <i class="bi bi-check2-circle fs-1"></i>
+                    </div>
+                    <h4 class="fw-bold text-dark mb-2" id="modalExitoLabel">¡Interés Manifestado con Éxito!</h4>
+                    <p class="text-muted small mb-3" id="modalExitoMensaje">
+                        Tu manifestación de interés ha quedado registrada y se ha enviado la notificación al productor responsable del lote.
+                    </p>
+                    <div class="bg-light p-3 rounded-3 text-start small mb-4 border">
+                        <div class="d-flex justify-content-between mb-1">
+                            <span class="text-muted">Código de Lote:</span>
+                            <strong class="text-dark" id="modalExitoCodigoLote">—</strong>
+                        </div>
+                        <div class="d-flex justify-content-between mb-1">
+                            <span class="text-muted">Identificador de Solicitud:</span>
+                            <span class="font-monospace text-primary fw-bold" id="modalExitoId">—</span>
+                        </div>
+                        <div class="d-flex justify-content-between">
+                            <span class="text-muted">Estado del Proceso:</span>
+                            <span class="badge bg-success">REGISTRADO Y NOTIFICADO</span>
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-primary bg-primary px-4 fw-semibold rounded-pill" data-bs-dismiss="modal">
+                        <i class="bi bi-check-lg me-1"></i> Entendido
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const modalElement = document.getElementById('modalManifestarInteres');
+    if (!modalElement) return;
+
+    const modalForm = document.getElementById('formManifestarInteres');
+    const badgeCodigo = document.getElementById('modalLoteCodigoBadge');
+    const labelFinca = document.getElementById('modalFincaNombre');
+    const labelStock = document.getElementById('modalStockDisponible');
+    const labelPrecio = document.getElementById('modalPrecioReferencial');
+    const inputCantidad = document.getElementById('modalInputCantidad');
+    const alertError = document.getElementById('modalAlertError');
+    const btnEnviar = document.getElementById('btnEnviarManifestacion');
+    const spinnerEnviar = document.getElementById('spinnerEnviar');
+    const iconEnviar = document.getElementById('iconEnviar');
+
+    let currentActionUrl = '';
+    let currentLoteId = '';
+
+    // Manejar apertura del modal y precarga de atributos del lote
+    modalElement.addEventListener('show.bs.modal', function (event) {
+        const triggerBtn = event.relatedTarget;
+        if (!triggerBtn) return;
+
+        currentLoteId = triggerBtn.getAttribute('data-lote-id') || '';
+        const codigo = triggerBtn.getAttribute('data-lote-codigo') || '';
+        const finca = triggerBtn.getAttribute('data-lote-finca') || '';
+        const cantidad = triggerBtn.getAttribute('data-lote-cantidad') || '';
+        const precio = triggerBtn.getAttribute('data-lote-precio') || '';
+        currentActionUrl = triggerBtn.getAttribute('data-action-url') || '';
+
+        if (badgeCodigo) badgeCodigo.textContent = codigo;
+        if (labelFinca) labelFinca.textContent = finca;
+        if (labelStock) labelStock.textContent = cantidad ? `${cantidad} kg` : 'Disponible';
+        if (labelPrecio) labelPrecio.textContent = precio;
+        if (modalForm) modalForm.action = currentActionUrl;
+
+        if (inputCantidad && cantidad) {
+            inputCantidad.max = cantidad;
+        }
+
+        if (alertError) {
+            alertError.classList.add('d-none');
+            alertError.textContent = '';
+        }
+    });
+
+    // Envío Asíncrono AJAX del Formulario de Interés (HU22-ST7 / SCRUM-266)
+    if (modalForm) {
+        modalForm.addEventListener('submit', function (e) {
+            // Si el navegador soporta fetch y FormData, enviamos por AJAX
+            e.preventDefault();
+
+            if (!currentActionUrl) {
+                currentActionUrl = modalForm.action;
+            }
+
+            if (alertError) {
+                alertError.classList.add('d-none');
+                alertError.textContent = '';
+            }
+
+            if (btnEnviar) {
+                btnEnviar.disabled = true;
+                if (spinnerEnviar) spinnerEnviar.classList.remove('d-none');
+                if (iconEnviar) iconEnviar.classList.add('d-none');
+            }
+
+            const formData = new FormData(modalForm);
+
+            fetch(currentActionUrl, {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            })
+            .then(async function (response) {
+                const data = await response.json().catch(() => ({}));
+                if (response.ok && data.ok) {
+                    // Cerrar modal de formulario
+                    const bsModal = bootstrap.Modal.getInstance(modalElement);
+                    if (bsModal) bsModal.hide();
+
+                    // Actualizar el botón de la tarjeta en la interfaz (Feedback UI)
+                    if (currentLoteId) {
+                        const targetCardBtn = document.getElementById(`btn-manifestar-interes-${currentLoteId}`);
+                        if (targetCardBtn) {
+                            targetCardBtn.className = 'btn btn-outline-success btn-sm px-3 fw-semibold disabled';
+                            targetCardBtn.innerHTML = '<i class="bi bi-check-circle-fill me-1 text-success"></i>Interés Registrado';
+                            targetCardBtn.setAttribute('disabled', 'disabled');
+                        }
+                    }
+
+                    // Abrir modal de confirmación exitosa (SCRUM-266)
+                    const exitoModalElement = document.getElementById('modalConfirmacionInteresExito');
+                    if (exitoModalElement) {
+                        const exitoMsg = document.getElementById('modalExitoMensaje');
+                        const exitoCodigo = document.getElementById('modalExitoCodigoLote');
+                        const exitoId = document.getElementById('modalExitoId');
+
+                        if (exitoMsg && data.mensaje) exitoMsg.textContent = data.mensaje;
+                        if (exitoCodigo && data.data) exitoCodigo.textContent = data.data.lote_codigo;
+                        if (exitoId && data.data) exitoId.textContent = data.data.id;
+
+                        const bsExito = new bootstrap.Modal(exitoModalElement);
+                        bsExito.show();
+                    }
+
+                    // Limpiar formulario
+                    modalForm.reset();
+                } else {
+                    // Mostrar error
+                    const errorMsg = data.error || 'Ocurrió un error al registrar la manifestación de interés.';
+                    if (alertError) {
+                        alertError.textContent = errorMsg;
+                        alertError.classList.remove('d-none');
+                    }
+                }
+            })
+            .catch(function (err) {
+                if (alertError) {
+                    alertError.textContent = 'Error de conexión con el servidor. Intente nuevamente.';
+                    alertError.classList.remove('d-none');
+                }
+            })
+            .finally(function () {
+                if (btnEnviar) {
+                    btnEnviar.disabled = false;
+                    if (spinnerEnviar) spinnerEnviar.classList.add('d-none');
+                    if (iconEnviar) iconEnviar.classList.remove('d-none');
+                }
+            });
+        });
+    }
+});
+</script>
 {% endblock %}
