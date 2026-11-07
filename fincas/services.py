@@ -6,6 +6,8 @@ Subtarea: SCRUM-145 / HU013-ST4: Validar cantidad disponible antes de crear el l
 Subtarea: SCRUM-146 / HU013-ST5: Actualizar trazabilidad de la cosecha al crear lotes.
 Subtarea: SCRUM-155 / HU15-ST1: Implementar persistencia de características
 físicas y de calidad del lote.
+Subtarea: SCRUM-163 / HU16-ST4: Implementar reglas de transición del estado
+comercial del lote.
 Subtarea: SCRUM-248 / HU20-ST4: Definir criterios y reglas de filtrado del catálogo.
 Subtarea: SCRUM-249 / HU20-ST5: Implementar consulta de filtrado para lotes disponibles.
 """
@@ -26,6 +28,7 @@ from .models import (
     Cosecha,
     EtapaBeneficio,
     Finca,
+    HistorialEstadoLote,
     Lote,
     Municipio,
 )
@@ -468,6 +471,90 @@ def crear_lote(
         cosecha.cantidad_disponible = cosecha.cantidad_disponible - cantidad
         cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
 
+    return lote
+
+
+TRANSICIONES_ESTADO_COMERCIAL = {
+    Lote.EstadoComercial.DISPONIBLE: {
+        Lote.EstadoComercial.RESERVADO,
+    },
+    Lote.EstadoComercial.RESERVADO: {
+        Lote.EstadoComercial.DISPONIBLE,
+        Lote.EstadoComercial.NEGOCIADO,
+    },
+    Lote.EstadoComercial.NEGOCIADO: {
+        Lote.EstadoComercial.RESERVADO,
+        Lote.EstadoComercial.VENDIDO,
+    },
+    Lote.EstadoComercial.VENDIDO: {
+        Lote.EstadoComercial.CERRADO,
+    },
+    Lote.EstadoComercial.CERRADO: set(),
+}
+
+
+@transaction.atomic
+def transicionar_estado_comercial(
+    lote_o_id,
+    nuevo_estado: str,
+    *,
+    usuario_id=None,
+    usuario_correo=None,
+    motivo="",
+) -> Lote:
+    """
+    Cambia el estado comercial de un lote respetando el flujo permitido de HU16.
+
+    Se permiten cancelaciones mientras el lote está reservado o negociado,
+    pero un lote vendido solo puede cerrarse y un lote cerrado es inmutable.
+    La fila se bloquea durante la operación para evitar transiciones
+    concurrentes basadas en un estado obsoleto.
+    """
+    if isinstance(lote_o_id, Lote):
+        lote_id = lote_o_id.pk
+    else:
+        lote_id = lote_o_id
+
+    estado_nuevo = str(nuevo_estado or "").strip().upper()
+    estados_validos = set(Lote.EstadoComercial.values)
+    if estado_nuevo not in estados_validos:
+        raise ValidationError({
+            "estado_comercial": (
+                "El estado comercial debe ser uno de: "
+                + ", ".join(sorted(estados_validos))
+                + "."
+            )
+        })
+
+    try:
+        lote = Lote.objects.select_for_update().get(pk=lote_id)
+    except Lote.DoesNotExist:
+        raise ValidationError({"lote": "El lote indicado no existe."})
+
+    estado_actual = lote.estado_comercial
+    if estado_actual == estado_nuevo:
+        return lote
+
+    estados_permitidos = TRANSICIONES_ESTADO_COMERCIAL.get(estado_actual)
+    if estados_permitidos is None or estado_nuevo not in estados_permitidos:
+        raise ValidationError({
+            "estado_comercial": (
+                f"No se permite cambiar el lote de {estado_actual} "
+                f"a {estado_nuevo}."
+            )
+        })
+
+    lote.estado_comercial = estado_nuevo
+    lote.estado_comercial_actualizado_en = timezone.now()
+    lote.save(update_fields=["estado_comercial", "estado_comercial_actualizado_en"])
+    HistorialEstadoLote.objects.create(
+        lote=lote,
+        estado_anterior=estado_actual,
+        estado_nuevo=estado_nuevo,
+        usuario_responsable_id=str(usuario_id) if usuario_id is not None else None,
+        usuario_responsable_correo=usuario_correo,
+        motivo=str(motivo or "").strip(),
+    )
     return lote
 
 

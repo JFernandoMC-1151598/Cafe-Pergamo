@@ -860,6 +860,39 @@ def api_crear_lote_view(request):
     return Response(LoteSerializer(lote).data, status=status.HTTP_201_CREATED)
 
 
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_consultar_lote_view(request, pk):
+    """Consulta el estado comercial actual y su última actualización."""
+    try:
+        lote = (
+            Lote.objects.select_related("cosecha__finca", "proceso_beneficio", "estado_lote")
+            .prefetch_related("historial_estados_comerciales")
+            .get(pk=pk)
+        )
+    except Lote.DoesNotExist:
+        return Response(
+            {"error": "El lote indicado no existe."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    data = LoteSerializer(lote).data
+    ultimo_historial = lote.historial_estados_comerciales.first()
+    data["ultimo_cambio_estado"] = (
+        {
+            "estado_anterior": ultimo_historial.estado_anterior,
+            "estado_nuevo": ultimo_historial.estado_nuevo,
+            "fecha": ultimo_historial.creado_en,
+            "usuario_responsable_id": ultimo_historial.usuario_responsable_id,
+            "usuario_responsable_correo": ultimo_historial.usuario_responsable_correo,
+            "motivo": ultimo_historial.motivo,
+        }
+        if ultimo_historial
+        else None
+    )
+    return Response(data, status=status.HTTP_200_OK)
+
+
 @api_view(["GET", "POST", "PUT", "PATCH"])
 def api_caracteristicas_calidad_view(request, lote_id):
     """

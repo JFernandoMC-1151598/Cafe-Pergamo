@@ -254,6 +254,8 @@ class LoteSerializer(serializers.ModelSerializer):
             "activo",
             "proceso_beneficio",
             "estado_lote",
+            "estado_comercial",
+            "estado_comercial_actualizado_en",
             "creado_en",
         ]
         read_only_fields = fields
@@ -610,4 +612,3 @@ class CatalogoLoteSerializer(serializers.ModelSerializer):
     def get_perfil_sensorial(self, obj):
         calidad = self._calidad(obj)
         return calidad.perfil_sensorial if calidad else ""
-

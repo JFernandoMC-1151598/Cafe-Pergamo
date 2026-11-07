@@ -53,6 +53,7 @@ urlpatterns = [
 
     # API REST de Lotes (HU-13 / SCRUM-142, HU-15 / SCRUM-155, HU-19 / SCRUM-239)
     path('api/lotes/', views.api_crear_lote_view, name='api_lote_crear'),
+    path('api/lotes/<int:pk>/', views.api_consultar_lote_view, name='api_lote_detalle'),
     path(
         'api/lotes/<int:lote_id>/calidad/',
         views.api_caracteristicas_calidad_view,

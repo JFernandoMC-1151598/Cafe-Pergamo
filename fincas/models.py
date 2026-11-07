@@ -35,6 +35,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.utils import timezone
 
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from usuarios.models import Usuario
@@ -392,6 +393,25 @@ class Lote(models.Model):
         verbose_name="Estado del lote",
     )
 
+    class EstadoComercial(models.TextChoices):
+        DISPONIBLE = "DISPONIBLE", "Disponible"
+        RESERVADO = "RESERVADO", "Reservado"
+        NEGOCIADO = "NEGOCIADO", "Negociado"
+        VENDIDO = "VENDIDO", "Vendido"
+        CERRADO = "CERRADO", "Cerrado"
+
+    estado_comercial = models.CharField(
+        max_length=20,
+        choices=EstadoComercial.choices,
+        default=EstadoComercial.DISPONIBLE,
+        verbose_name="Estado comercial",
+        help_text="Estado actual del lote dentro del proceso de comercialización.",
+    )
+    estado_comercial_actualizado_en = models.DateTimeField(
+        default=timezone.now,
+        verbose_name="Última actualización del estado comercial",
+    )
+
     cantidad = models.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -433,6 +453,64 @@ class Lote(models.Model):
     def __str__(self):
         estado_cat = " [Publicado]" if self.publicado_en_catalogo else ""
         return f"Lote {self.codigo} ({self.cantidad} kg){estado_cat} de {self.cosecha}"
+
+
+class HistorialEstadoLote(models.Model):
+    """Auditoría de cambios del estado comercial de un lote (HU16-ST3)."""
+
+    lote = models.ForeignKey(
+        Lote,
+        on_delete=models.CASCADE,
+        related_name="historial_estados_comerciales",
+        verbose_name="Lote",
+    )
+    estado_anterior = models.CharField(
+        max_length=20,
+        choices=Lote.EstadoComercial.choices,
+        verbose_name="Estado comercial anterior",
+    )
+    estado_nuevo = models.CharField(
+        max_length=20,
+        choices=Lote.EstadoComercial.choices,
+        verbose_name="Estado comercial nuevo",
+    )
+    usuario_responsable_id = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        verbose_name="ID del usuario responsable",
+    )
+    usuario_responsable_correo = models.EmailField(
+        null=True,
+        blank=True,
+        verbose_name="Correo del usuario responsable",
+    )
+    motivo = models.TextField(
+        blank=True,
+        default="",
+        verbose_name="Motivo del cambio",
+    )
+    creado_en = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Fecha del cambio",
+    )
+
+    class Meta:
+        managed = True
+        db_table = "fincas_historial_estado_lote"
+        ordering = ["-creado_en", "-id"]
+        indexes = [
+            models.Index(
+                fields=["lote", "-creado_en"],
+                name="idx_hist_estado_lote_fecha",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.lote.codigo}: {self.estado_anterior} -> "
+            f"{self.estado_nuevo} ({self.creado_en})"
+        )
 
 
 class CaracteristicasCalidad(models.Model):
@@ -775,5 +853,3 @@ class BitacoraFichaDigital(models.Model):
 
     def __str__(self):
         return f"{self.tipo_evento} - Lote {self.lote.codigo} ({self.creado_en:%Y-%m-%d %H:%M})"
-
-

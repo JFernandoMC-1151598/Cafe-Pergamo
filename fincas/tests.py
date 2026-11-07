@@ -51,6 +51,7 @@ from fincas.models import (
     Cosecha,
     EtapaBeneficio,
     Finca,
+    HistorialEstadoLote,
     Lote,
     Municipio,
 )
@@ -71,6 +72,7 @@ from fincas.services import (
     obtener_opciones_filtro_catalogo,
     publicar_lote_en_catalogo,
     registrar_etapa_beneficio,
+    transicionar_estado_comercial,
     validar_lote_para_publicacion,
 )
 from fincas.serializers import FichaDigitalSerializer
@@ -3420,6 +3422,281 @@ class CaracteristicasCalidadApiTests(TestCase):
         editar_caracteristicas_calidad(registro, observaciones="")
         registro.refresh_from_db()
         self.assertEqual(registro.observaciones, "")
+
+
+class HU16EstadoComercialModelTests(TestCase):
+    """Pruebas del modelo y catálogo de estados comerciales de HU16-ST1."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(
+            codigo="HU16_ST1_MUN",
+            nombre="Mutiscua (HU16-ST1)",
+        )
+        finca = Finca.objects.create(
+            nombre="Finca HU16-ST1",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST1-001",
+            cosecha=cosecha,
+            cantidad=Decimal("25.00"),
+        )
+
+    def test_estado_comercial_inicia_disponible(self):
+        self.assertEqual(
+            self.lote.estado_comercial,
+            Lote.EstadoComercial.DISPONIBLE,
+        )
+        self.assertEqual(
+            self.lote.get_estado_comercial_display(),
+            "Disponible",
+        )
+
+    def test_estado_comercial_expone_los_cinco_estados_validos(self):
+        self.assertEqual(
+            set(Lote.EstadoComercial.values),
+            {"DISPONIBLE", "RESERVADO", "NEGOCIADO", "VENDIDO", "CERRADO"},
+        )
+
+    def test_estado_comercial_rechaza_valores_no_definidos(self):
+        self.lote.estado_comercial = "INEXISTENTE"
+        with self.assertRaises(ValidationError):
+            self.lote.full_clean()
+
+
+class HU16TransicionesEstadoComercialTests(TestCase):
+    """Pruebas de las reglas de transición comercial de HU16-ST4."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(
+            codigo="HU16_ST4_MUN",
+            nombre="Mutiscua (HU16-ST4)",
+        )
+        finca = Finca.objects.create(
+            nombre="Finca HU16-ST4",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST4-001",
+            cosecha=cosecha,
+            cantidad=Decimal("25.00"),
+        )
+
+    def test_permite_avanzar_por_el_flujo_comercial(self):
+        for estado in (
+            Lote.EstadoComercial.RESERVADO,
+            Lote.EstadoComercial.NEGOCIADO,
+            Lote.EstadoComercial.VENDIDO,
+            Lote.EstadoComercial.CERRADO,
+        ):
+            lote = transicionar_estado_comercial(self.lote, estado)
+            self.assertEqual(lote.estado_comercial, estado)
+
+    def test_permite_cancelar_reserva_o_negociacion(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.DISPONIBLE,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.NEGOCIADO,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+        )
+        self.lote.refresh_from_db()
+        self.assertEqual(
+            self.lote.estado_comercial,
+            Lote.EstadoComercial.RESERVADO,
+        )
+
+    def test_rechaza_salto_de_estado_y_reapertura_de_lote_cerrado(self):
+        with self.assertRaises(ValidationError):
+            transicionar_estado_comercial(
+                self.lote,
+                Lote.EstadoComercial.VENDIDO,
+            )
+
+        self.lote.estado_comercial = Lote.EstadoComercial.CERRADO
+        self.lote.save(update_fields=["estado_comercial"])
+        with self.assertRaises(ValidationError):
+            transicionar_estado_comercial(
+                self.lote,
+                Lote.EstadoComercial.DISPONIBLE,
+            )
+
+    def test_rechaza_estado_comercial_invalido(self):
+        with self.assertRaises(ValidationError):
+            transicionar_estado_comercial(self.lote, "INEXISTENTE")
+
+
+class HU16HistorialEstadoComercialTests(TestCase):
+    """Pruebas del historial de cambios de estado comercial de HU16-ST3."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(
+            codigo="HU16_ST3_MUN",
+            nombre="Mutiscua (HU16-ST3)",
+        )
+        finca = Finca.objects.create(
+            nombre="Finca HU16-ST3",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST3-001",
+            cosecha=cosecha,
+            cantidad=Decimal("25.00"),
+        )
+
+    def test_transicion_crea_historial_con_estado_fecha_y_usuario(self):
+        lote = transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+            usuario_id="usuario-hu16",
+            usuario_correo="productor@example.com",
+            motivo="Reserva confirmada por el comprador",
+        )
+
+        historial = HistorialEstadoLote.objects.get(lote=lote)
+        self.assertEqual(historial.estado_anterior, "DISPONIBLE")
+        self.assertEqual(historial.estado_nuevo, "RESERVADO")
+        self.assertEqual(historial.usuario_responsable_id, "usuario-hu16")
+        self.assertEqual(
+            historial.usuario_responsable_correo,
+            "productor@example.com",
+        )
+        self.assertEqual(
+            historial.motivo,
+            "Reserva confirmada por el comprador",
+        )
+        self.assertIsNotNone(historial.creado_en)
+
+    def test_cada_transicion_genera_un_registro_en_orden_inverso(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.NEGOCIADO,
+        )
+
+        historial = list(
+            HistorialEstadoLote.objects.filter(lote=self.lote)
+        )
+        self.assertEqual(len(historial), 2)
+        self.assertEqual(
+            [(registro.estado_anterior, registro.estado_nuevo) for registro in historial],
+            [("RESERVADO", "NEGOCIADO"), ("DISPONIBLE", "RESERVADO")],
+        )
+
+    def test_no_crea_historial_si_no_hay_cambio_real(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.DISPONIBLE,
+        )
+        self.assertFalse(
+            HistorialEstadoLote.objects.filter(lote=self.lote).exists()
+        )
+
+
+class HU16EstadoComercialApiTests(TestCase):
+    """Pruebas del endpoint de consulta de estado comercial de HU16-ST5."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(
+            codigo="HU16_ST5_MUN",
+            nombre="Mutiscua (HU16-ST5)",
+        )
+        finca = Finca.objects.create(
+            nombre="Finca HU16-ST5",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST5-001",
+            cosecha=cosecha,
+            cantidad=Decimal("25.00"),
+        )
+        self.url = reverse("api_lote_detalle", kwargs={"pk": self.lote.pk})
+
+    def test_get_retorna_estado_comercial_y_fecha_de_actualizacion(self):
+        respuesta = self.client.get(self.url)
+
+        self.assertEqual(respuesta.status_code, 200)
+        data = respuesta.json()
+        self.assertEqual(data["estado_comercial"], "DISPONIBLE")
+        self.assertIsNotNone(data["estado_comercial_actualizado_en"])
+        self.assertIsNone(data["ultimo_cambio_estado"])
+
+    def test_get_retorna_ultimo_cambio_y_su_responsable(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+            usuario_id="usuario-api",
+            usuario_correo="comprador@example.com",
+            motivo="Reserva registrada",
+        )
+
+        respuesta = self.client.get(self.url)
+
+        self.assertEqual(respuesta.status_code, 200)
+        data = respuesta.json()
+        self.assertEqual(data["estado_comercial"], "RESERVADO")
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["estado_anterior"],
+            "DISPONIBLE",
+        )
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["estado_nuevo"],
+            "RESERVADO",
+        )
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["usuario_responsable_id"],
+            "usuario-api",
+        )
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["usuario_responsable_correo"],
+            "comprador@example.com",
+        )
+
+    def test_get_lote_inexistente_retorna_404(self):
+        respuesta = self.client.get(
+            reverse("api_lote_detalle", kwargs={"pk": 999999})
+        )
+        self.assertEqual(respuesta.status_code, 404)
 
 
 # =============================================================================
@@ -6968,5 +7245,3 @@ class FichaDigitalActualizacionTiempoRealTests(TestCase):
         ficha_natural = obtener_ficha_consolidada_lote(self.lote.codigo)
         self.assertEqual(ficha_natural["proceso_beneficio"]["codigo"], "NATURAL")
         self.assertEqual(ficha_natural["proceso_beneficio"]["nombre"], "Natural Clásico")
-
-
