@@ -56,6 +56,23 @@
                         <div class="col-sm-6"><strong>Variedad:</strong> {{ lote.cosecha.variedad.nombre|default:"Sin variedad" }}</div>
                         <div class="col-sm-6"><strong>Proceso de beneficio:</strong> {{ lote.proceso_beneficio.nombre|default:"Sin proceso" }}</div>
                         <div class="col-sm-6"><strong>Cantidad:</strong> {{ lote.cantidad }} kg</div>
+                        <div class="col-sm-6">
+                            <strong>Estado comercial:</strong>
+                            {% if lote.estado_comercial == 'DISPONIBLE' %}
+                                <span class="badge bg-success text-white">Disponible</span>
+                            {% elif lote.estado_comercial == 'RESERVADO' %}
+                                <span class="badge bg-warning text-dark">Reservado</span>
+                            {% elif lote.estado_comercial == 'NEGOCIADO' %}
+                                <span class="badge bg-info text-dark">Negociado</span>
+                            {% elif lote.estado_comercial == 'VENDIDO' %}
+                                <span class="badge bg-primary text-white">Vendido</span>
+                            {% else %}
+                                <span class="badge bg-secondary text-white">Cerrado</span>
+                            {% endif %}
+                            <small class="d-block text-muted mt-1">
+                                Actualizado: {{ lote.estado_comercial_actualizado_en|date:"d/m/Y H:i" }}
+                            </small>
+                        </div>
                     </div>
                 </div>
             </div>

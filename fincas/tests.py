@@ -4072,6 +4072,68 @@ class MisLotesViewTests(TestCase):
         self.assertTrue(any("filtro de finca" in m.lower() for m in mensajes))
 
 
+class HU16EstadoComercialWebTests(TestCase):
+    """Pruebas de visualización del estado comercial de HU16-ST2."""
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.create(
+            codigo="HU16_ST2_MUN",
+            nombre="Mutiscua (HU16-ST2)",
+        )
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca HU16-ST2",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST2-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("25.00"),
+        )
+        _iniciar_sesion_productor(self.client, self.productor_id)
+
+    def test_listado_muestra_badge_del_estado_comercial(self):
+        respuesta = self.client.get(reverse("mis_lotes"))
+
+        self.assertEqual(respuesta.status_code, 200)
+        contenido = respuesta.content.decode("utf-8")
+        self.assertIn("Estado comercial", contenido)
+        self.assertIn("Disponible", contenido)
+
+    def test_detalle_muestra_estado_comercial_y_fecha(self):
+        respuesta = self.client.get(
+            reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        contenido = respuesta.content.decode("utf-8")
+        self.assertIn("Estado comercial:", contenido)
+        self.assertIn("Disponible", contenido)
+        self.assertIn("Actualizado:", contenido)
+
+    def test_listado_refleja_un_estado_distinto_despues_de_transicion(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.NEGOCIADO,
+        )
+
+        respuesta = self.client.get(reverse("mis_lotes"))
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn("Negociado", respuesta.content.decode("utf-8"))
+
+
 # ==============================================================================
 # HU-12 (SCRUM-16): Registro de Cosechas para controlar la producción de café
 # Subtareas:
@@ -9545,6 +9607,4 @@ class TestScrum267PruebasRegistroYNotificacionInteres(TestCase):
             )
             self.assertEqual(resultado["fecha_registro"], ahora_fijo.isoformat())
             self.assertTrue(resultado["notificado"])
-
-
 

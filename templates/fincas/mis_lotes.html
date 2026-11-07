@@ -63,6 +63,7 @@
                     <th>Finca y Variedad</th>
                     <th>Proceso y Calidad</th>
                     <th>Cantidad</th>
+                    <th>Estado comercial</th>
                     <th>Catálogo Público</th>
                     <th class="text-end">Acciones</th>
                 </tr>
@@ -137,6 +138,32 @@
                         </span>
                         <div class="text-muted small mt-1">
                             Saldo cosecha: {{ lote.cosecha.cantidad_disponible }} kg
+                        </div>
+                    </td>
+                    <td class="small">
+                        {% if lote.estado_comercial == 'DISPONIBLE' %}
+                            <span class="badge bg-success text-white px-2 py-1">
+                                <i class="bi bi-check-circle me-1"></i>Disponible
+                            </span>
+                        {% elif lote.estado_comercial == 'RESERVADO' %}
+                            <span class="badge bg-warning text-dark px-2 py-1">
+                                <i class="bi bi-bookmark-fill me-1"></i>Reservado
+                            </span>
+                        {% elif lote.estado_comercial == 'NEGOCIADO' %}
+                            <span class="badge bg-info text-dark px-2 py-1">
+                                <i class="bi bi-chat-dots-fill me-1"></i>Negociado
+                            </span>
+                        {% elif lote.estado_comercial == 'VENDIDO' %}
+                            <span class="badge bg-primary text-white px-2 py-1">
+                                <i class="bi bi-cart-check-fill me-1"></i>Vendido
+                            </span>
+                        {% else %}
+                            <span class="badge bg-secondary text-white px-2 py-1">
+                                <i class="bi bi-lock-fill me-1"></i>Cerrado
+                            </span>
+                        {% endif %}
+                        <div class="text-muted small mt-1">
+                            {{ lote.estado_comercial_actualizado_en|date:"d/m/Y H:i" }}
                         </div>
                     </td>
                     <td class="small">
