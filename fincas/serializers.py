@@ -256,6 +256,8 @@ class LoteSerializer(serializers.ModelSerializer):
             "activo",
             "proceso_beneficio",
             "estado_lote",
+            "estado_comercial",
+            "estado_comercial_actualizado_en",
             "tiene_codigo_qr",
             "identificador_qr",
             "creado_en",
@@ -394,8 +396,6 @@ class CosechaCreateSerializer(serializers.Serializer):
     cantidad_total = serializers.DecimalField(
         max_digits=10, decimal_places=2, min_value=Decimal("0.01"), required=True
     )
-
-
 # =============================================================================
 # SERIALIZADORES PARA FICHA DIGITAL CONSOLIDADA POR LOTE (HU-17 / SCRUM-169)
 # =============================================================================
@@ -666,6 +666,4 @@ class ManifestacionInteresInputSerializer(serializers.Serializer):
         default="",
         help_text="Teléfono o canal de contacto directo para agilizar la negociación.",
     )
-
-
 
