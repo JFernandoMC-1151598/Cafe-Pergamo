@@ -3728,6 +3728,81 @@ class HU16EstadoComercialApiTests(TestCase):
         self.assertEqual(respuesta.status_code, 404)
 
 
+class HU16PruebasIntegradasEstadoComercialTests(TestCase):
+    """Pruebas integradas de transiciones, historial y consulta de HU16-ST6."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(
+            codigo="HU16_ST6_MUN",
+            nombre="Mutiscua (HU16-ST6)",
+        )
+        finca = Finca.objects.create(
+            nombre="Finca HU16-ST6",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST6-001",
+            cosecha=cosecha,
+            cantidad=Decimal("25.00"),
+        )
+        self.url = reverse("api_lote_detalle", kwargs={"pk": self.lote.pk})
+
+    def test_transicion_legal_actualiza_estado_y_guarda_historial(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+            usuario_id="usuario-st6",
+            motivo="Reserva confirmada",
+        )
+
+        self.lote.refresh_from_db()
+        historial = HistorialEstadoLote.objects.get(lote=self.lote)
+        self.assertEqual(self.lote.estado_comercial, "RESERVADO")
+        self.assertEqual(historial.estado_anterior, "DISPONIBLE")
+        self.assertEqual(historial.estado_nuevo, "RESERVADO")
+        self.assertEqual(historial.usuario_responsable_id, "usuario-st6")
+
+    def test_transicion_ilegal_rechaza_el_cambio_y_conserva_el_estado(self):
+        with self.assertRaises(ValidationError):
+            transicionar_estado_comercial(
+                self.lote,
+                Lote.EstadoComercial.VENDIDO,
+            )
+
+        self.lote.refresh_from_db()
+        self.assertEqual(self.lote.estado_comercial, "DISPONIBLE")
+        self.assertFalse(
+            HistorialEstadoLote.objects.filter(lote=self.lote).exists()
+        )
+
+    def test_api_consulta_estado_actual_y_ultimo_cambio(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+            usuario_id="usuario-api-st6",
+        )
+
+        respuesta = self.client.get(self.url)
+
+        self.assertEqual(respuesta.status_code, 200)
+        data = respuesta.json()
+        self.assertEqual(data["estado_comercial"], "RESERVADO")
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["estado_nuevo"],
+            "RESERVADO",
+        )
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["usuario_responsable_id"],
+            "usuario-api-st6",
+        )
+
+
 # =============================================================================
 # SUITE HU-13: FORMULARIOS WEB DE REGISTRO DE COSECHAS Y LOTES
 # (SCRUM-144 / "Crear formulario o pantalla de registro de lotes";
@@ -9607,4 +9682,3 @@ class TestScrum267PruebasRegistroYNotificacionInteres(TestCase):
             )
             self.assertEqual(resultado["fecha_registro"], ahora_fijo.isoformat())
             self.assertTrue(resultado["notificado"])
-
