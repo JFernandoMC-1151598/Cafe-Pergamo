@@ -292,9 +292,50 @@
                                 <span class="badge bg-light text-secondary border">A convenir</span>
                             {% endif %}
                         </div>
-                        <a href="mailto:comercial@cafepergamo.co?subject=Inter%C3%A9s%20en%20Lote%20{{ lote.codigo }}%20({{ lote.cosecha.finca.nombre }})" class="btn btn-outline-primary btn-sm px-3 fw-semibold">
-                            <i class="bi bi-chat-dots me-1"></i>Contactar
+                        {% if user.is_authenticated %}
+                        <button type="button" class="btn btn-primary bg-primary btn-sm px-3 fw-semibold" data-bs-toggle="modal" data-bs-target="#modalInteres{{ lote.pk }}">
+                            <i class="bi bi-hand-thumbs-up me-1"></i>Me interesa
+                        </button>
+
+                        <!-- HU-22 (SCRUM-231): manifestar interes sobre este lote -->
+                        <div class="modal fade" id="modalInteres{{ lote.pk }}" tabindex="-1" aria-hidden="true">
+                            <div class="modal-dialog modal-dialog-centered">
+                                <form method="post" action="{% url 'lote_manifestar_interes' lote.pk %}" class="modal-content">
+                                    {% csrf_token %}
+                                    <div class="modal-header">
+                                        <h5 class="modal-title">Manifestar interes</h5>
+                                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                    </div>
+                                    <div class="modal-body">
+                                        <p class="small text-muted mb-3">
+                                            Lote <strong>{{ lote.codigo }}</strong> &middot; {{ lote.cosecha.finca.nombre }}.
+                                            El productor verá tu interés de inmediato en su panel.
+                                        </p>
+                                        <div class="mb-3">
+                                            <label class="form-label small fw-semibold">Cantidad de interés (kg) &mdash; opcional</label>
+                                            <input type="number" step="0.01" min="0.01" max="{{ lote.cantidad }}" name="cantidad_kg" class="form-control" placeholder="Ej: 20">
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label small fw-semibold">Mensaje para el productor &mdash; opcional</label>
+                                            <textarea name="mensaje" class="form-control" rows="2" maxlength="1000" placeholder="¿Sigue disponible? Me interesa este lote..."></textarea>
+                                        </div>
+                                        <div class="mb-1">
+                                            <label class="form-label small fw-semibold">Teléfono de contacto &mdash; opcional</label>
+                                            <input type="text" name="telefono_contacto" class="form-control" maxlength="30" placeholder="Ej: 3001234567">
+                                        </div>
+                                    </div>
+                                    <div class="modal-footer">
+                                        <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
+                                        <button type="submit" class="btn btn-primary bg-primary btn-sm fw-semibold">Enviar interés</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                        {% else %}
+                        <a href="{% url 'login' %}?next={% url 'catalogo' %}" class="btn btn-outline-primary btn-sm px-3 fw-semibold">
+                            <i class="bi bi-box-arrow-in-right me-1"></i>Inicia sesión para manifestar interés
                         </a>
+                        {% endif %}
                     </div>
                 </div>
 

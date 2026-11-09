@@ -80,6 +80,7 @@ from .services import (
     publicar_lote_en_catalogo,
     reactivar_municipio,
     registrar_etapa_beneficio,
+    registrar_manifestacion_interes,
     toggle_estado_municipio,
     validar_lote_para_publicacion,
 )
@@ -1429,6 +1430,55 @@ def publicar_lote_web_view(request, pk):
             messages.error(request, f"No se pudo publicar el lote: {exc}")
 
     return redirect("mis_lotes")
+
+
+def manifestar_interes_lote_web_view(request, pk):
+    """
+    Accion web para que un comprador manifieste interes sobre un lote
+    publicado en el catalogo comercial (HU-22 / SCRUM-231).
+
+    Reutiliza _resolver_productor_id / _resolver_usuario_correo (igual que
+    el resto de vistas de este modulo) para identificar al comprador, sin
+    importar si llego por sesion web o por JWT -- ver el docstring de
+    _resolver_productor_id: a pesar del nombre, resuelve el id del perfil
+    de negocio (usuarios.Usuario) de quien hace la peticion, sea cual sea
+    su rol.
+    """
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    comprador_id = _resolver_productor_id(request)
+    if not comprador_id:
+        messages.error(request, "Debe iniciar sesión con su cuenta de comprador para manifestar interés.")
+        return redirect(f"{reverse('login')}?next={reverse('catalogo')}")
+
+    correo = _resolver_usuario_correo(request)
+    cantidad_raw = request.POST.get("cantidad_kg", "").strip()
+    mensaje = request.POST.get("mensaje", "").strip()
+    telefono_contacto = request.POST.get("telefono_contacto", "").strip()
+
+    try:
+        registrar_manifestacion_interes(
+            lote_o_id=pk,
+            comprador_id=comprador_id,
+            comprador_correo=correo or "",
+            cantidad_kg=cantidad_raw or None,
+            mensaje=mensaje,
+            telefono_contacto=telefono_contacto,
+        )
+        messages.success(
+            request,
+            "Listo, tu interés fue registrado y el productor ya puede verlo. Te contactará pronto."
+        )
+    except ValidationError as exc:
+        msg_dict = exc.message_dict if hasattr(exc, "message_dict") else {}
+        if msg_dict:
+            primer_error = next(iter(msg_dict.values()))[0]
+            messages.error(request, primer_error)
+        else:
+            messages.error(request, f"No se pudo registrar tu interés: {exc}")
+
+    return redirect("catalogo")
 
 
 def despublicar_lote_web_view(request, pk):
