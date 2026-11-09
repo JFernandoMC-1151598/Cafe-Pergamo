@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% load static %}
+{% load rbac_tags %}
 
 {% block title %}Catálogo Comercial de Café — Café Pérgamo{% endblock %}
 
@@ -198,7 +199,7 @@
                 {% endif %}
             </p>
         </div>
-        {% if user.is_authenticated %}
+        {% if rol_actual|tiene_permiso:"lotes.consultar" %}
         <a href="{% url 'mis_lotes' %}" class="btn btn-outline-primary btn-sm">
             <i class="bi bi-boxes me-1"></i>Gestionar Mis Lotes
         </a>

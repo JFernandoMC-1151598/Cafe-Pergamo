@@ -89,11 +89,14 @@
                         <span>Hola, {{ user.first_name|default:user.username }}</span>
                     </span>
 
-                    <!-- Botón de acceso a Mi Panel (HU06-ST6 / SCRUM-92: muestra las fincas del productor autenticado) -->
+                    <!-- Botón de acceso a Mi Panel (HU06-ST6 / SCRUM-92: muestra las fincas del productor autenticado). -->
+                    <!-- HU22: solo para roles con fincas.consultar -- un comprador no tiene fincas que ver. -->
+                    {% if rol_actual|tiene_permiso:"fincas.consultar" %}
                     <a href="{% url 'mis_fincas' %}" class="btn btn-outline-pergamo btn-sm me-2"
                         title="Ver mis fincas registradas">
                         <i class="bi bi-speedometer2 me-1"></i> Mi Panel
                     </a>
+                    {% endif %}
 
                     <!-- Formulario Seguro POST para Cerrar Sesión (Protección CSRF) -->
                     <form id="logoutForm" action="{% url 'logout' %}" method="POST" class="d-inline m-0">
