@@ -354,6 +354,8 @@ def login_view(request: HttpRequest) -> HttpResponse:
     Alias API: /api/auth/login
     """
     if request.user.is_authenticated and request.method == "GET":
+        if request.session.get("rol") == "COMPRADOR":
+            return redirect("catalogo")
         return redirect("home")
 
     if request.method == "GET":
@@ -524,7 +526,12 @@ def login_view(request: HttpRequest) -> HttpResponse:
             status=200,
         )
 
-    next_url = request.GET.get("next") or request.POST.get("next") or "home"
+    next_url = request.GET.get("next") or request.POST.get("next")
+    if not next_url:
+        # HU22: el comprador cae directo en el catalogo comercial (vista tipo
+        # marketplace) en lugar del home generico; el resto de roles sigue
+        # entrando al home de siempre.
+        next_url = "catalogo" if usuario.rol.codigo == "COMPRADOR" else "home"
     return redirect(next_url)
 
 
