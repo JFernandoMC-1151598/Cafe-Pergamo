@@ -55,3 +55,6 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 .venv/
+
+# Documentos personales de seguimiento (no se suben al repo compartido)
+AVANCE-HU22-DAVID.md
