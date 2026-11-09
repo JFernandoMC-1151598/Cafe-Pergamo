@@ -293,7 +293,7 @@
                                 <span class="badge bg-light text-secondary border">A convenir</span>
                             {% endif %}
                         </div>
-                        {% if user.is_authenticated %}
+                        {% if rol_actual|tiene_permiso:"manifestaciones_interes.crear" %}
                         <button type="button" class="btn btn-primary bg-primary btn-sm px-3 fw-semibold" data-bs-toggle="modal" data-bs-target="#modalInteres{{ lote.pk }}">
                             <i class="bi bi-hand-thumbs-up me-1"></i>Me interesa
                         </button>
@@ -332,7 +332,7 @@
                                 </form>
                             </div>
                         </div>
-                        {% else %}
+                        {% elif not user.is_authenticated %}
                         <a href="{% url 'login' %}?next={% url 'catalogo' %}" class="btn btn-outline-primary btn-sm px-3 fw-semibold">
                             <i class="bi bi-box-arrow-in-right me-1"></i>Inicia sesión para manifestar interés
                         </a>
@@ -377,11 +377,11 @@
                 <p class="text-muted mx-auto mb-4" style="max-width: 540px;">
                     {{ mensaje_catalogo_vacio }}
                 </p>
-                {% if user.is_authenticated %}
+                {% if rol_actual|tiene_permiso:"lotes.consultar" %}
                 <a href="{% url 'mis_lotes' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
                     <i class="bi bi-boxes me-1"></i>Ir a Mis Lotes para Publicar
                 </a>
-                {% else %}
+                {% elif not user.is_authenticated %}
                 <a href="{% url 'login' %}" class="btn btn-primary bg-primary px-4 fw-semibold">
                     <i class="bi bi-box-arrow-in-right me-1"></i>Iniciar Sesión como Productor
                 </a>
