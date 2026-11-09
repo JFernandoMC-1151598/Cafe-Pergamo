@@ -25,6 +25,7 @@ from .models import (
     EtapaBeneficio,
     Finca,
     Lote,
+    ManifestacionInteres,
     Municipio,
 )
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
@@ -958,3 +959,188 @@ def registrar_etapa_beneficio(
         nueva.full_clean(exclude=["activo"])
         nueva.save()
         return nueva
+
+
+# ==============================================================================
+# MANIFESTACIÓN DE INTERÉS SOBRE UN LOTE ESPECÍFICO (HU-22 / SCRUM-231)
+# ==============================================================================
+#
+# HU22-ST2 (SCRUM-261): persistencia real -- reemplaza el stub en memoria que
+# traía la rama francisco-epi6-hu22 (HU22-ST5 / SCRUM-264), cuya propia
+# prueba `test_mock_disparo_notificacion_externa` ya admitía que era un
+# simulacro. Esta versión guarda de verdad en `ManifestacionInteres` y
+# conserva EXACTAMENTE el mismo contrato de diccionario que ST5/ST6/ST7/ST8
+# ya consumen (mismas claves, mismo formato de `id` con prefijo "INT-",
+# mismos mensajes de error por campo), para no romper ese trabajo al
+# integrarlo.
+#
+# HU22-ST1 (SCRUM-260): la notificación al productor es in-app (no hay
+# backend de correo configurado en el proyecto -- ver ManifestacionInteres
+# en fincas/models.py). `notificado_en` queda fijado al registrar, y el
+# productor la ve en su panel de "Mis Lotes" (fincas.views) hasta que la
+# marca como vista con `ManifestacionInteres.marcar_vista_por_productor()`.
+#
+# HU22-ST4 (SCRUM-263): valida que el comprador esté identificado y que el
+# lote exista, esté activo y publicado en el catálogo antes de guardar.
+
+
+def registrar_manifestacion_interes(
+    *,
+    lote_o_id,
+    comprador_id,
+    comprador_correo="",
+    cantidad_kg=None,
+    mensaje="",
+    telefono_contacto="",
+) -> dict:
+    """
+    Registra la manifestación de interés de un comprador sobre un lote
+    publicado en el catálogo comercial (HU-22 / SCRUM-231) y la deja
+    disponible de inmediato para el productor del lote.
+
+    Validaciones (HU22-ST4 / SCRUM-263, aplicadas siempre en backend,
+    RNF-09, sin depender de la vista que llame a este servicio):
+      - El lote debe existir (por id numérico o por código).
+      - El lote debe estar activo y publicado en el catálogo comercial.
+      - Se requiere la identificación del comprador.
+      - Un productor no puede manifestar interés sobre su propio lote.
+      - Si se indica cantidad, debe ser positiva y no superar el stock
+        disponible del lote (`lote.cantidad`).
+      - El mensaje no puede superar 1000 caracteres.
+
+    Lanza `ValidationError` con errores por campo (`lote`, `comprador`,
+    `cantidad_kg`, `mensaje`) si alguna regla no se cumple. Operación
+    atómica: si algo falla no queda información parcial.
+
+    Retorna un diccionario con los datos de la manifestación ya persistida.
+    """
+    with transaction.atomic():
+        if isinstance(lote_o_id, Lote):
+            lote = lote_o_id
+        elif isinstance(lote_o_id, int) or (isinstance(lote_o_id, str) and lote_o_id.isdigit()):
+            try:
+                lote = Lote.objects.select_related("cosecha__finca").get(pk=int(lote_o_id))
+            except Lote.DoesNotExist:
+                raise ValidationError({"lote": "El lote indicado no existe."})
+        elif isinstance(lote_o_id, str):
+            try:
+                lote = Lote.objects.select_related("cosecha__finca").get(codigo=lote_o_id.strip())
+            except Lote.DoesNotExist:
+                raise ValidationError({"lote": "El lote indicado no existe."})
+        else:
+            lote = _resolver_lote(lote_o_id)
+
+        if not lote.activo:
+            raise ValidationError({"lote": "El lote especificado no se encuentra activo."})
+
+        if not lote.publicado_en_catalogo:
+            raise ValidationError(
+                {"lote": "El lote no se encuentra disponible en el catálogo comercial para recibir manifestaciones de interés."}
+            )
+
+        if not comprador_id:
+            raise ValidationError({"comprador": "Se requiere la identificación del comprador interesado."})
+
+        productor_id = lote.cosecha.finca.productor_id
+        if productor_id and str(productor_id) == str(comprador_id):
+            raise ValidationError(
+                {"comprador": "Un productor no puede manifestar interés de compra sobre su propio lote."}
+            )
+
+        cantidad_decimal = None
+        if cantidad_kg is not None and str(cantidad_kg).strip() != "":
+            try:
+                cantidad_decimal = Decimal(str(cantidad_kg))
+            except Exception:
+                raise ValidationError({"cantidad_kg": "La cantidad especificada debe ser un valor numérico válido."})
+
+            if cantidad_decimal <= Decimal("0.00"):
+                raise ValidationError({"cantidad_kg": "La cantidad de interés debe ser mayor a cero (0 kg)."})
+
+            if cantidad_decimal > lote.cantidad:
+                raise ValidationError(
+                    {"cantidad_kg": f"La cantidad solicitada ({cantidad_decimal} kg) no puede superar el stock disponible del lote ({lote.cantidad} kg)."}
+                )
+
+        mensaje_limpio = (mensaje or "").strip()
+        if len(mensaje_limpio) > 1000:
+            raise ValidationError({"mensaje": "El mensaje no puede superar los 1000 caracteres."})
+
+        telefono_limpio = (telefono_contacto or "").strip()
+        if telefono_limpio and len(telefono_limpio) > 30:
+            raise ValidationError({"telefono_contacto": "El teléfono de contacto no puede superar los 30 caracteres."})
+
+        ahora = timezone.now()
+
+        manifestacion = ManifestacionInteres(
+            lote=lote,
+            comprador_id=comprador_id,
+            comprador_correo=(comprador_correo or "").strip(),
+            cantidad_kg=cantidad_decimal,
+            mensaje=mensaje_limpio,
+            telefono_contacto=telefono_limpio,
+            notificado_en=ahora,
+        )
+        manifestacion.full_clean(exclude=["comprador"])  # Usuario es managed=False: no tiene fila real en la BD de pruebas
+        manifestacion.save()
+
+        productor_correo = ""
+        try:
+            productor = getattr(lote.cosecha.finca, "productor", None)
+            if productor:
+                productor_correo = getattr(productor, "correo", "")
+        except Exception:
+            productor_correo = ""
+
+        productor_nombre = f"Productor Finca {lote.cosecha.finca.nombre}"
+
+        return {
+            "id": f"INT-{manifestacion.pk:06d}",
+            "lote_id": lote.id,
+            "lote_codigo": lote.codigo,
+            "finca_nombre": lote.cosecha.finca.nombre,
+            "productor_id": str(productor_id) if productor_id else "",
+            "productor_nombre": productor_nombre,
+            "productor_correo": productor_correo,
+            "comprador_id": str(comprador_id),
+            "comprador_correo": manifestacion.comprador_correo,
+            "cantidad_kg": str(cantidad_decimal) if cantidad_decimal is not None else None,
+            "mensaje": manifestacion.mensaje,
+            "telefono_contacto": manifestacion.telefono_contacto,
+            "fecha_registro": manifestacion.creado_en.isoformat() if manifestacion.creado_en else ahora.isoformat(),
+            "estado": manifestacion.estado,
+            "notificado": manifestacion.notificado_en is not None,
+        }
+
+
+def listar_manifestaciones_interes_productor(*, productor_id, solo_no_vistas=False):
+    """
+    HU22-ST1 (SCRUM-260): lista las manifestaciones de interés recibidas
+    sobre los lotes de un productor, más recientes primero -- es el
+    mecanismo real por el que el productor "se entera" (no hay correo).
+    """
+    qs = ManifestacionInteres.objects.select_related(
+        "lote", "lote__cosecha__finca"
+    ).filter(lote__cosecha__finca__productor_id=productor_id)
+    if solo_no_vistas:
+        qs = qs.filter(vista_por_productor=False)
+    return qs
+
+
+def marcar_manifestacion_interes_vista(*, manifestacion_id, productor_id):
+    """
+    HU22-ST1 (SCRUM-260): marca una notificación como vista, solo si el
+    lote pertenece de verdad al productor que la está abriendo.
+    """
+    try:
+        manifestacion = ManifestacionInteres.objects.select_related(
+            "lote__cosecha__finca"
+        ).get(pk=manifestacion_id)
+    except ManifestacionInteres.DoesNotExist:
+        raise ValidationError({"manifestacion": "La manifestación de interés indicada no existe."})
+
+    if str(manifestacion.lote.cosecha.finca.productor_id) != str(productor_id):
+        raise ValidationError({"permiso": "No tiene permiso para ver esta manifestación de interés."})
+
+    manifestacion.marcar_vista_por_productor()
+    return manifestacion
