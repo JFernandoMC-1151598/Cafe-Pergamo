@@ -79,6 +79,8 @@ from .services import (
     normalizar_filtros_catalogo,
     publicar_lote_en_catalogo,
     reactivar_municipio,
+    listar_manifestaciones_interes_productor,
+    marcar_manifestacion_interes_vista,
     registrar_etapa_beneficio,
     registrar_manifestacion_interes,
     toggle_estado_municipio,
@@ -1088,8 +1090,65 @@ def mis_lotes_view(request):
             "fincas": fincas_productor,
             "finca_seleccionada": finca_seleccionada,
             "finca_id_filtro": finca_id_raw,
+            "total_interes_sin_ver": listar_manifestaciones_interes_productor(
+                productor_id=productor_id, solo_no_vistas=True
+            ).count(),
         },
     )
+
+
+@permiso_requerido_sesion("lotes.consultar")
+def manifestaciones_interes_productor_view(request):
+    """
+    HU22-ST1 (SCRUM-260): panel del productor para ver las manifestaciones
+    de interes que ha recibido sobre sus lotes -- el mecanismo real de
+    notificacion in-app, ya que el proyecto no tiene correo (EMAIL_BACKEND)
+    configurado. Usa el mismo permiso que 'Mis Lotes' (lotes.consultar): ver
+    quien se interesa en tus lotes es parte de consultar tus propios lotes.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(
+            request,
+            "Debe iniciar sesión con su cuenta de productor para ver sus manifestaciones de interés."
+        )
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    manifestaciones = listar_manifestaciones_interes_productor(productor_id=productor_id)
+
+    return render(
+        request,
+        "fincas/manifestaciones_interes.html",
+        {"manifestaciones": manifestaciones},
+    )
+
+
+@permiso_requerido_sesion("lotes.consultar")
+def marcar_manifestacion_interes_vista_web_view(request, pk):
+    """
+    Acción web para que el productor marque una manifestación de interés
+    como vista (HU22-ST1 / SCRUM-260), validando siempre que el lote sea
+    realmente suyo antes de permitirlo (lo hace el propio servicio).
+    """
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(request, "Debe iniciar sesión para realizar esta acción.")
+        return redirect("login")
+
+    try:
+        marcar_manifestacion_interes_vista(manifestacion_id=pk, productor_id=productor_id)
+    except ValidationError as exc:
+        msg_dict = exc.message_dict if hasattr(exc, "message_dict") else {}
+        if msg_dict:
+            primer_error = next(iter(msg_dict.values()))[0]
+            messages.error(request, primer_error)
+        else:
+            messages.error(request, f"No se pudo actualizar la manifestación: {exc}")
+
+    return redirect("mis_manifestaciones_interes")
 
 
 def _resolver_usuario_correo(request) -> Optional[str]:

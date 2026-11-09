@@ -6210,3 +6210,204 @@ class RestriccionRolComercioHU22Tests(TestCase):
         respuesta_home = self.client.get(reverse("home"))
         self.assertContains(respuesta_home, "Mi Panel")
         self.assertContains(respuesta_home, "Registrar Finca")
+
+
+class PanelManifestacionesInteresProductorHU22Tests(TestCase):
+    """
+    HU22 (SCRUM-231): el productor necesita un lugar real donde ver las
+    manifestaciones de interes que recibio sobre sus lotes publicados (el
+    mecanismo de notificacion in-app de ST1/SCRUM-260). Cubre:
+
+    - El boton "Interesados" en Mis Lotes solo lo ve quien tiene permiso de
+      'lotes.consultar' (productor), nunca un comprador.
+    - El panel de manifestaciones solo muestra las de los lotes del
+      productor que inicio sesion, nunca las de otro productor.
+    - Marcar una manifestacion como vista funciona de verdad (POST real) y
+      queda reflejado tanto en el detalle como en el contador de "sin ver".
+    - El boton "Me interesa" del catalogo ahora se oculta para quien no
+      tiene el permiso 'manifestaciones_interes.crear' (p.ej. un productor
+      autenticado), no solo para los anonimos.
+    """
+
+    def setUp(self):
+        self.client = Client()
+
+        from usuarios.tests import _mockear_matriz_real
+        self._parche_matriz = patch("usuarios.models.RolPermiso")
+        mock_rol_permiso = self._parche_matriz.start()
+        self.addCleanup(self._parche_matriz.stop)
+        _mockear_matriz_real(mock_rol_permiso)
+
+        self.municipio = Municipio.objects.create(
+            nombre="Toledo HU22P", departamento="Norte de Santander"
+        )
+        self.productor_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Finca Panel HU22",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca, fecha_cosecha="2026-09-01", cantidad_total=Decimal("300.00")
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTEPANELHU22",
+            cosecha=self.cosecha,
+            cantidad=Decimal("100.00"),
+            publicado_en_catalogo=True,
+        )
+
+        self.finca_ajena = Finca.objects.create(
+            nombre="Finca Ajena HU22",
+            productor_id=self.otro_productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha_ajena = Cosecha.objects.create(
+            finca=self.finca_ajena, fecha_cosecha="2026-09-01", cantidad_total=Decimal("100.00")
+        )
+        self.lote_ajeno = Lote.objects.create(
+            codigo="LOTEAJENOHU22",
+            cosecha=self.cosecha_ajena,
+            cantidad=Decimal("50.00"),
+            publicado_en_catalogo=True,
+        )
+
+    # ------------------------ boton "Interesados" en Mis Lotes ------------------------
+
+    def test_productor_ve_el_boton_interesados_en_mis_lotes(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("mis_lotes"))
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(respuesta, reverse("mis_manifestaciones_interes"))
+        self.assertContains(respuesta, "Interesados")
+
+    def test_comprador_no_puede_acceder_al_panel_de_manifestaciones(self):
+        _iniciar_sesion_comprador(self.client)
+        respuesta = self.client.get(reverse("mis_manifestaciones_interes"))
+        self.assertEqual(respuesta.status_code, 302)
+        self.assertEqual(respuesta.url, reverse("home"))
+
+    def test_anonimo_redirige_a_login_al_entrar_al_panel(self):
+        respuesta = self.client.get(reverse("mis_manifestaciones_interes"))
+        self.assertEqual(respuesta.status_code, 302)
+        self.assertIn(reverse("login"), respuesta.url)
+
+    # ------------------------ el productor ve sus propias manifestaciones ------------------------
+
+    def test_productor_ve_la_manifestacion_real_que_le_mandaron(self):
+        comprador_id = uuid.uuid4()
+        registrar_manifestacion_interes(
+            lote_o_id=self.lote.pk,
+            comprador_id=comprador_id,
+            comprador_correo="comprador.panel@example.com",
+            mensaje="Quiero este cafe",
+            cantidad_kg=Decimal("20.00"),
+        )
+
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("mis_manifestaciones_interes"))
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(respuesta, "LOTEPANELHU22")
+        self.assertContains(respuesta, "comprador.panel@example.com")
+        self.assertContains(respuesta, "Quiero este cafe")
+        self.assertContains(respuesta, "Nuevo")
+
+    def test_productor_no_ve_manifestaciones_de_lotes_ajenos(self):
+        registrar_manifestacion_interes(
+            lote_o_id=self.lote_ajeno.pk,
+            comprador_id=uuid.uuid4(),
+            comprador_correo="otro.comprador@example.com",
+        )
+
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("mis_manifestaciones_interes"))
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertNotContains(respuesta, "LOTEAJENOHU22")
+        self.assertNotContains(respuesta, "otro.comprador@example.com")
+
+    def test_panel_vacio_muestra_mensaje_de_estado_vacio(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("mis_manifestaciones_interes"))
+        self.assertContains(respuesta, "Todavía no has recibido manifestaciones de interés")
+
+    def test_contador_de_sin_ver_aparece_en_mis_lotes(self):
+        registrar_manifestacion_interes(
+            lote_o_id=self.lote.pk,
+            comprador_id=uuid.uuid4(),
+            comprador_correo="contador@example.com",
+        )
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("mis_lotes"))
+        self.assertContains(respuesta, "1")
+
+    # ------------------------ marcar como vista ------------------------
+
+    def test_productor_puede_marcar_su_manifestacion_como_vista(self):
+        registrar_manifestacion_interes(
+            lote_o_id=self.lote.pk,
+            comprador_id=uuid.uuid4(),
+            comprador_correo="marcar@example.com",
+        )
+        manifestacion_id = ManifestacionInteres.objects.get(
+            lote=self.lote, comprador_correo="marcar@example.com"
+        ).pk
+
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.post(
+            reverse("manifestacion_interes_marcar_vista", kwargs={"pk": manifestacion_id})
+        )
+        self.assertEqual(respuesta.status_code, 302)
+        self.assertEqual(respuesta.url, reverse("mis_manifestaciones_interes"))
+
+        manifestacion = ManifestacionInteres.objects.get(pk=manifestacion_id)
+        self.assertTrue(manifestacion.vista_por_productor)
+
+    def test_otro_productor_no_puede_marcar_como_vista_una_manifestacion_ajena(self):
+        registrar_manifestacion_interes(
+            lote_o_id=self.lote.pk,
+            comprador_id=uuid.uuid4(),
+            comprador_correo="ajena@example.com",
+        )
+        manifestacion_id = ManifestacionInteres.objects.get(
+            lote=self.lote, comprador_correo="ajena@example.com"
+        ).pk
+
+        _iniciar_sesion_productor(self.client, usuario_id=self.otro_productor_id)
+        self.client.post(
+            reverse("manifestacion_interes_marcar_vista", kwargs={"pk": manifestacion_id})
+        )
+
+        manifestacion = ManifestacionInteres.objects.get(pk=manifestacion_id)
+        self.assertFalse(manifestacion.vista_por_productor)
+
+    def test_marcar_como_vista_rechaza_metodo_get(self):
+        registrar_manifestacion_interes(
+            lote_o_id=self.lote.pk,
+            comprador_id=uuid.uuid4(),
+            comprador_correo="getmetodo@example.com",
+        )
+        manifestacion_id = ManifestacionInteres.objects.get(
+            lote=self.lote, comprador_correo="getmetodo@example.com"
+        ).pk
+
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(
+            reverse("manifestacion_interes_marcar_vista", kwargs={"pk": manifestacion_id})
+        )
+        self.assertEqual(respuesta.status_code, 405)
+
+    # ------------------------ "Me interesa" ahora oculto tambien para el productor ------------------------
+
+    def test_boton_me_interesa_oculto_para_productor_en_el_catalogo(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("catalogo"))
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertNotContains(respuesta, "Me interesa")
+
+    def test_boton_me_interesa_visible_para_comprador_en_el_catalogo(self):
+        _iniciar_sesion_comprador(self.client)
+        respuesta = self.client.get(reverse("catalogo"))
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(respuesta, "Me interesa")
