@@ -94,9 +94,11 @@ from .services import (
     obtener_ficha_consolidada_lote,
     publicar_lote_en_catalogo,
     reactivar_municipio,
-    registrar_manifestacion_interes,
+    listar_manifestaciones_interes_productor,
+    marcar_manifestacion_interes_vista,
     registrar_auditoria_ficha_digital,
     registrar_etapa_beneficio,
+    registrar_manifestacion_interes,
     resolver_lote_desde_qr,
     sanitizar_ficha_por_visibilidad,
     sincronizar_o_generar_qr_lote,
@@ -105,6 +107,7 @@ from .services import (
     verificar_permiso_visibilidad_qr,
 )
 from usuarios.models import Usuario
+from usuarios import permissions as usuarios_permissions
 from usuarios.permissions import permiso_requerido_sesion
 
 
@@ -178,6 +181,7 @@ def _puede_modificar_calidad(request, lote) -> bool:
     return bool(perfil and str(perfil.id) == str(lote.cosecha.finca.productor_id))
 
 
+@permiso_requerido_sesion("fincas.crear")
 def registrar_finca_view(request):
     """
     Vista web para captura y persistencia de fincas (SCRUM-96 / HU06-ST3).
@@ -691,6 +695,7 @@ def alternar_estado_municipio_web_view(request, pk):
     return redirect("admin_municipios")
 
 
+@permiso_requerido_sesion("fincas.consultar")
 def mis_fincas_view(request):
     """
     Vista web "Mis Fincas" (SCRUM-92 / HU06-ST6).
@@ -966,6 +971,7 @@ def api_caracteristicas_calidad_view(request, lote_id):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@permiso_requerido_sesion("cosechas.crear")
 def registrar_cosecha_view(request):
     """
     Vista web de registro de cosechas (complemento de HU-13, ver nota en
@@ -1021,6 +1027,7 @@ def registrar_cosecha_view(request):
     )
 
 
+@permiso_requerido_sesion("lotes.crear")
 def registrar_lote_view(request):
     """
     Vista web de registro de lotes (HU13-ST4 / SCRUM-144): formulario
@@ -1106,6 +1113,7 @@ def registrar_lote_view(request):
     )
 
 
+@permiso_requerido_sesion("lotes.consultar")
 def mis_lotes_view(request):
     """
     Vista web de listado de lotes del productor autenticado, con filtro
@@ -1183,10 +1191,65 @@ def mis_lotes_view(request):
             "fincas": fincas_productor,
             "finca_seleccionada": finca_seleccionada,
             "finca_id_filtro": finca_id_raw,
+            "total_interes_sin_ver": listar_manifestaciones_interes_productor(
+                productor_id=productor_id, solo_no_vistas=True
+            ).count(),
         },
     )
 
 
+@permiso_requerido_sesion("lotes.consultar")
+def manifestaciones_interes_productor_view(request):
+    """
+    HU22-ST1 (SCRUM-260): panel del productor para ver las manifestaciones
+    de interes que ha recibido sobre sus lotes -- el mecanismo real de
+    notificacion in-app, ya que el proyecto no tiene correo (EMAIL_BACKEND)
+    configurado. Usa el mismo permiso que 'Mis Lotes' (lotes.consultar): ver
+    quien se interesa en tus lotes es parte de consultar tus propios lotes.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(
+            request,
+            "Debe iniciar sesión con su cuenta de productor para ver sus manifestaciones de interés."
+        )
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    manifestaciones = listar_manifestaciones_interes_productor(productor_id=productor_id)
+
+    return render(
+        request,
+        "fincas/manifestaciones_interes.html",
+        {"manifestaciones": manifestaciones},
+    )
+
+
+@permiso_requerido_sesion("lotes.consultar")
+def marcar_manifestacion_interes_vista_web_view(request, pk):
+    """
+    Acción web para que el productor marque una manifestación de interés
+    como vista (HU22-ST1 / SCRUM-260), validando siempre que el lote sea
+    realmente suyo antes de permitirlo (lo hace el propio servicio).
+    """
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(request, "Debe iniciar sesión para realizar esta acción.")
+        return redirect("login")
+
+    try:
+        marcar_manifestacion_interes_vista(manifestacion_id=pk, productor_id=productor_id)
+    except ValidationError as exc:
+        msg_dict = exc.message_dict if hasattr(exc, "message_dict") else {}
+        if msg_dict:
+            primer_error = next(iter(msg_dict.values()))[0]
+            messages.error(request, primer_error)
+        else:
+            messages.error(request, f"No se pudo actualizar la manifestación: {exc}")
+
+    return redirect("mis_manifestaciones_interes")
 # =============================================================================
 # API REST FICHA DIGITAL CONSOLIDADA POR LOTE (HU-17 / SCRUM-167)
 # =============================================================================
@@ -2005,6 +2068,7 @@ def registrar_calidad_lote_view(request, pk):
     )
 
 
+@permiso_requerido_sesion("trazabilidad.registrar_etapa")
 def registrar_etapa_beneficio_view(request, pk):
     """
     Formulario web para registrar una nueva etapa de beneficio sobre un
@@ -2071,6 +2135,7 @@ def registrar_etapa_beneficio_view(request, pk):
 # VISTAS WEB DE PUBLICACIÓN Y DESPUBLICACIÓN EN CATÁLOGO (HU-19 / SCRUM-228)
 # ==============================================================================
 
+@permiso_requerido_sesion("catalogo.publicar_lote")
 def publicar_lote_web_view(request, pk):
     """
     Acción web para publicar un lote desde la pantalla 'Mis Lotes'
@@ -2120,6 +2185,7 @@ def publicar_lote_web_view(request, pk):
     return redirect("mis_lotes")
 
 
+@permiso_requerido_sesion("catalogo.publicar_lote")
 def despublicar_lote_web_view(request, pk):
     """
     Acción web para retirar un lote del catálogo público
@@ -2218,6 +2284,13 @@ def manifestar_interes_lote_web_view(request, pk):
     Controlador web para que un comprador manifieste interés formal sobre un lote
     específico publicado en el catálogo o desde su ficha de detalle (HU22-ST5 / SCRUM-264).
 
+    HU22 (seguimiento): valida el permiso RBAC real (manifestaciones_interes.crear)
+    -- antes solo exigia comprador_id resuelto, asi que cualquier usuario
+    autenticado (incluido un productor) podia manifestar interes. Se valida
+    aqui dentro (en vez de con el decorador generico @permiso_requerido_sesion,
+    que siempre redirige) porque esta vista tambien debe responder 401/403 en
+    JSON a peticiones AJAX, no solo redirigir como el resto de vistas web.
+
     Soporta peticiones POST estándar de formularios HTML y peticiones asíncronas
     AJAX / Fetch devolviendo JSON con formato estandarizado.
     """
@@ -2240,6 +2313,16 @@ def manifestar_interes_lote_web_view(request, pk):
         messages.error(request, "Debe iniciar sesión como comprador para manifestar interés en este lote.")
         next_url = request.POST.get("next") or request.META.get("HTTP_REFERER") or reverse("catalogo")
         return redirect(f"{reverse('login')}?next={next_url}")
+
+    rol_actual = request.session.get("rol", "")
+    if not usuarios_permissions.usuario_tiene_permiso(rol_actual, "manifestaciones_interes.crear"):
+        if es_ajax:
+            return JsonResponse(
+                {"ok": False, "error": "Su cuenta no tiene permiso para manifestar interés en lotes."},
+                status=403,
+            )
+        messages.error(request, "Su cuenta no tiene permiso para manifestar interés en lotes.")
+        return redirect("home")
 
     comprador_correo = _resolver_usuario_correo(request)
 

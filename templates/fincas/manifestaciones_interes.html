@@ -1,0 +1,95 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Manifestaciones de Interés — Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <!-- Encabezado -->
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
+        <div>
+            <h1 class="h3 fw-bold text-dark mb-1">Manifestaciones de Interés</h1>
+            <p class="text-muted mb-0">
+                Compradores que han manifestado interés en tus lotes publicados (HU-22).
+            </p>
+        </div>
+        <a href="{% url 'mis_lotes' %}" class="btn btn-outline-pergamo px-4 fw-semibold">
+            <i class="bi bi-arrow-left me-1"></i> Volver a Mis Lotes
+        </a>
+    </div>
+
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+    {% endif %}
+
+    {% if manifestaciones %}
+    <div class="row g-3">
+        {% for m in manifestaciones %}
+        <div class="col-12">
+            <div class="card border-0 shadow-sm rounded-4 {% if not m.vista_por_productor %}border-start border-4 border-warning{% endif %}">
+                <div class="card-body p-4">
+                    <div class="d-flex flex-wrap align-items-start justify-content-between gap-3">
+                        <div>
+                            <div class="d-flex align-items-center gap-2 mb-1">
+                                <h5 class="fw-bold text-dark mb-0">Lote {{ m.lote.codigo }}</h5>
+                                {% if not m.vista_por_productor %}
+                                <span class="badge bg-warning text-dark">Nuevo</span>
+                                {% endif %}
+                            </div>
+                            <p class="text-muted small mb-2">
+                                <i class="bi bi-geo-alt text-danger me-1"></i>{{ m.lote.cosecha.finca.nombre }}
+                                &middot; recibida el {{ m.creado_en|date:"d M Y, H:i" }}
+                            </p>
+                            <div class="small">
+                                <div><span class="text-muted">Comprador:</span> <span class="fw-semibold">{{ m.comprador_correo|default:"(sin correo registrado)" }}</span></div>
+                                {% if m.telefono_contacto %}
+                                <div><span class="text-muted">Teléfono:</span> <span class="fw-semibold">{{ m.telefono_contacto }}</span></div>
+                                {% endif %}
+                                {% if m.cantidad_kg %}
+                                <div><span class="text-muted">Cantidad de interés:</span> <span class="fw-semibold">{{ m.cantidad_kg }} kg</span></div>
+                                {% endif %}
+                            </div>
+                            {% if m.mensaje %}
+                            <p class="small text-secondary fst-italic bg-light rounded p-2 mt-2 mb-0">
+                                "{{ m.mensaje }}"
+                            </p>
+                            {% endif %}
+                        </div>
+                        <div class="text-end">
+                            {% if not m.vista_por_productor %}
+                            <form method="post" action="{% url 'manifestacion_interes_marcar_vista' m.pk %}">
+                                {% csrf_token %}
+                                <button type="submit" class="btn btn-outline-primary btn-sm fw-semibold">
+                                    <i class="bi bi-check2 me-1"></i>Marcar como vista
+                                </button>
+                            </form>
+                            {% else %}
+                            <span class="badge bg-light text-success border">
+                                <i class="bi bi-check2-all me-1"></i>Vista el {{ m.vista_en|date:"d M Y" }}
+                            </span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="card border-0 shadow-sm rounded-4 text-center py-5">
+        <div class="card-body">
+            <i class="bi bi-bell-slash display-4 text-muted mb-3 d-block"></i>
+            <h4 class="fw-bold text-dark mb-2">Todavía no has recibido manifestaciones de interés</h4>
+            <p class="text-muted mx-auto mb-0" style="max-width: 480px;">
+                Cuando un comprador manifieste interés en alguno de tus lotes publicados en el catálogo, lo verás aquí de inmediato.
+            </p>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

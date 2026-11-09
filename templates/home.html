@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% load static %}
+{% load rbac_tags %}
 
 {% block title %}Café Pérgamo — Trazabilidad y Comercialización del Café de Origen{% endblock %}
 
@@ -31,10 +32,12 @@
                         <i class="bi bi-grid-3x3-gap-fill me-2"></i>Explorar Catálogo de Lotes
                     </a>
                     {% if user.is_authenticated %}
-                    <a href="{% url 'finca_registro' %}" class="btn btn-outline-pergamo btn-lg px-4"
-                        id="btnRegistroProductor">
-                        <i class="bi bi-pin-map-fill me-2"></i>Registrar Finca
-                    </a>
+                        {% if rol_actual|tiene_permiso:"fincas.crear" %}
+                        <a href="{% url 'finca_registro' %}" class="btn btn-outline-pergamo btn-lg px-4"
+                            id="btnRegistroProductor">
+                            <i class="bi bi-pin-map-fill me-2"></i>Registrar Finca
+                        </a>
+                        {% endif %}
                     {% else %}
                     <a href="{% url 'registro' %}" class="btn btn-outline-pergamo btn-lg px-4"
                         id="btnRegistroProductor">

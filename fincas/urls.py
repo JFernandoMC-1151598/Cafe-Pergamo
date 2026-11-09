@@ -30,6 +30,12 @@ urlpatterns = [
     path('lotes/<int:pk>/manifestar-interes/', views.manifestar_interes_lote_web_view, name='lote_manifestar_interes_web'),
     path('lotes/<int:pk>/publicar/', views.publicar_lote_web_view, name='lote_publicar'),
     path('lotes/<int:pk>/despublicar/', views.despublicar_lote_web_view, name='lote_despublicar'),
+    path('mis-lotes/interes/', views.manifestaciones_interes_productor_view, name='mis_manifestaciones_interes'),
+    path(
+        'mis-lotes/interes/<int:pk>/marcar-vista/',
+        views.marcar_manifestacion_interes_vista_web_view,
+        name='manifestacion_interes_marcar_vista',
+    ),
     path('lotes/<str:codigo>/ficha/', views.ficha_digital_web_view, name='lote_ficha_digital_web'),
     path('trazabilidad/lote/<str:codigo>/', views.ficha_digital_web_view, name='trazabilidad_lote_publica'),
     path('trazabilidad/qr/<str:identificador>/', views.escanear_qr_web_view, name='trazabilidad_qr_web'),

@@ -58,6 +58,7 @@ from fincas.models import (
     Finca,
     HistorialEstadoLote,
     Lote,
+    ManifestacionInteres,
     Municipio,
 )
 from fincas.services import (
@@ -72,7 +73,9 @@ from fincas.services import (
     filtrar_catalogo_lotes,
     generar_codigo_lote,
     generar_snapshot_trazabilidad,
+    listar_manifestaciones_interes_productor,
     lotes_disponibles_en_catalogo,
+    marcar_manifestacion_interes_vista,
     normalizar_filtros_catalogo,
     obtener_opciones_filtro_catalogo,
     publicar_lote_en_catalogo,
@@ -117,21 +120,45 @@ from fincas.validators import (
 )
 
 
-def _iniciar_sesion_productor(client, usuario_id=None):
+def _iniciar_sesion_con_rol(client, rol, usuario_id=None):
     """
     Simula, para pruebas, el mismo estado de sesión que deja `login_view`
-    al autenticar a un productor real (`request.session['usuario_id']` --
-    ver usuarios/views.py:492). `usuarios.Usuario` es `managed=False` y no
-    existe en la base de datos de pruebas (sqlite), así que aquí no se
-    crea una fila real: basta con la clave de sesión, que es justo lo que
-    `_resolver_productor_id` (fincas/views.py) necesita para identificar
-    al productor sin inventar un UUID al azar.
+    al autenticar a un usuario real: tanto `request.session['usuario_id']`
+    y `request.session['rol']` (ver usuarios/views.py:492) como el login
+    real de Django (`django.contrib.auth.login`), del que depende
+    `request.user.is_authenticated` -- lo exige `permiso_requerido_sesion`
+    (HU04-ST3 / HU22) antes de mirar siquiera el rol. `usuarios.Usuario` es
+    `managed=False` y no existe en la base de datos de pruebas (sqlite), así
+    que aquí no se crea una fila real de ese modelo: solo la fila "espejo"
+    en `auth_user` (igual que hace login_view) y las claves de sesión, que
+    es justo lo que `_resolver_productor_id` necesita para identificar al
+    usuario sin inventar un UUID al azar.
     """
+    from django.contrib.auth.models import User
+
     usuario_id = usuario_id or uuid.uuid4()
+    django_user, _creado = User.objects.get_or_create(username=str(usuario_id))
+    client.force_login(django_user)
     session = client.session
     session["usuario_id"] = str(usuario_id)
+    session["rol"] = rol
     session.save()
     return str(usuario_id)
+
+
+def _iniciar_sesion_productor(client, usuario_id=None):
+    """Atajo de `_iniciar_sesion_con_rol` para el rol PRODUCTOR."""
+    return _iniciar_sesion_con_rol(client, "PRODUCTOR", usuario_id=usuario_id)
+
+
+def _iniciar_sesion_comprador(client, usuario_id=None):
+    """
+    Atajo de `_iniciar_sesion_con_rol` para el rol COMPRADOR (HU22): sirve
+    para probar que las vistas de gestión de fincas/lotes/cosechas
+    (exclusivas del productor) le quedan vedadas, y que las suyas propias
+    (manifestar interés) sí funcionan.
+    """
+    return _iniciar_sesion_con_rol(client, "COMPRADOR", usuario_id=usuario_id)
 
 
 def _jwt_bearer_headers(correo="productor.prueba@cafepergamo.test"):
@@ -531,6 +558,28 @@ class TestGeorreferenciacionInterfazWeb(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
+        _iniciar_sesion_productor(self.client)
         self.url = reverse("finca_registro")
 
     def test_renderizado_exitoso_vista_registro(self):
@@ -591,6 +640,27 @@ class TestGuardarGeorreferenciacionBackend(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.url_registro = reverse("finca_registro")
         self.url_api = reverse("api_finca_crear")
         self.municipio = Municipio.objects.filter(nombre="Toledo").first() or Municipio.objects.create(
@@ -740,6 +810,27 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.url_registro = reverse("finca_registro")
 
     def test_dod_guardado_con_valores_validos(self):
@@ -778,6 +869,7 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
 
     def test_dod_rechazo_por_coordenadas_erroneas_textos_no_numericos(self):
         """DoD Escenario 3a: Rechazo por textos no numéricos en coordenadas."""
+        _iniciar_sesion_productor(self.client)
         conteo_previo = Finca.objects.count()
         response = self.client.post(self.url_registro, {
             "nombre": "Finca Error Texto",
@@ -791,6 +883,7 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
 
     def test_dod_rechazo_por_coordenadas_erroneas_latitud_fuera_de_limites(self):
         """DoD Escenario 3b: Rechazo por latitud fuera de rango [-90, 90]."""
+        _iniciar_sesion_productor(self.client)
         conteo_previo = Finca.objects.count()
         response = self.client.post(self.url_registro, {
             "nombre": "Finca Latitud Invalida",
@@ -804,6 +897,7 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
 
     def test_dod_rechazo_por_coordenadas_erroneas_longitud_fuera_de_limites(self):
         """DoD Escenario 3c: Rechazo por longitud fuera de rango [-180, 180]."""
+        _iniciar_sesion_productor(self.client)
         conteo_previo = Finca.objects.count()
         response = self.client.post(self.url_registro, {
             "nombre": "Finca Longitud Invalida",
@@ -817,6 +911,7 @@ class TestScrum99PruebasGeorreferenciacion(TestCase):
 
     def test_dod_rechazo_por_coordenadas_erroneas_par_incompleto(self):
         """DoD Escenario 3d: Rechazo cuando solo se provee una coordenada."""
+        _iniciar_sesion_productor(self.client)
         conteo_previo = Finca.objects.count()
         response = self.client.post(self.url_registro, {
             "nombre": "Finca Par Incompleto",
@@ -998,6 +1093,28 @@ class ValidacionCamposObligatoriosRegistroTests(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
+        _iniciar_sesion_productor(self.client)
         self.url_registro = reverse("finca_registro")
         self.url_api = reverse("api_finca_crear")
         self.municipio_valido = Municipio.objects.get(codigo="TOLEDO")
@@ -1099,6 +1216,27 @@ class ListadoMisFincasTests(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.url_mis_fincas = reverse("mis_fincas")
         self.municipio = Municipio.objects.create(
             codigo="TEST_MISFINCAS", nombre="Toledo (prueba mis fincas)"
@@ -3816,6 +3954,27 @@ class RegistrarCosechaViewTests(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.url = reverse("cosecha_registro")
         self.municipio = Municipio.objects.create(codigo="TEST_COSECHA_VW_MUN", nombre="Toledo (prueba)")
 
@@ -3897,6 +4056,27 @@ class RegistrarLoteViewTests(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.url = reverse("lote_registro")
         self.municipio = Municipio.objects.create(codigo="TEST_LOTE_VIEW_MUN", nombre="Herrán (prueba)")
         self.proceso = ProcesoBeneficio.objects.create(
@@ -4069,6 +4249,27 @@ class MisLotesViewTests(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.url = reverse("mis_lotes")
         self.municipio = Municipio.objects.create(codigo="TEST_MISLOTES_MUN", nombre="Chinácota (prueba)")
 
@@ -4147,10 +4348,35 @@ class MisLotesViewTests(TestCase):
         self.assertTrue(any("filtro de finca" in m.lower() for m in mensajes))
 
 
+# ==============================================================================
+# HU-12 (SCRUM-16): Registro de Cosechas para controlar la producción de café
+# Subtareas:
+# - SCRUM-136: Crear el modelo y la persistencia de cosechas
+# - SCRUM-137: Desarrollar el servicio o endpoint para registrar cosechas
+# - SCRUM-138: Diseñar el formulario de registro de cosechas
+# - SCRUM-139: Agregar pruebas del registro de cosechas
+# - SCRUM-140: Implementar la validación de finca y variedad contra el catálogo
+# Criterios de Aceptación:
+# 1. La finca y la variedad deben ser válidas.
+# 2. Las cantidades deben ser mayores a cero.
+# 3. Se debe inicializar cantidad_disponible = cantidad_total.
+# ==============================================================================
+
+
 class HU16EstadoComercialWebTests(TestCase):
     """Pruebas de visualización del estado comercial de HU16-ST2."""
 
     def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.client = Client()
         self.municipio = Municipio.objects.create(
             codigo="HU16_ST2_MUN",
@@ -4546,6 +4772,27 @@ class CosechaWebFormViewTests(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.url = reverse("cosecha_registro")
         self.municipio = Municipio.objects.create(
             codigo="MUN-WEB-TEST",
@@ -5140,6 +5387,27 @@ class TestScrum242VistasWebPublicacionYCatalogo(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.municipio = Municipio.objects.create(
             codigo="MUN-WEB-HU19",
             nombre="Chinácota (Web)",
@@ -5739,6 +6007,27 @@ class EtapasBeneficioHU14Tests(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.municipio = Municipio.objects.filter(
             nombre="Toledo", departamento="Norte de Santander"
         ).first()
@@ -5894,6 +6183,27 @@ class ReglasRegistroEtapasHU14ST3ST4Tests(TestCase):
 
     def setUp(self):
         self.client = Client()
+        # HU22: estas vistas ahora exigen el permiso RBAC real (ver
+        # permiso_requerido_sesion en fincas/views.py). La matriz de roles
+        # vive en Supabase (tabla rol_permisos, managed=False), asi que no
+        # existe en la BD de pruebas -- se simula que el productor de estas
+        # pruebas SI tiene los permisos de su rol (coherente con
+        # MATRIZ_RBAC_VIGENTE en usuarios/tests.py), igual que ya hacen las
+        # pruebas de admin_municipios_view con usuario_tiene_permiso.
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        # El filtro de plantilla {{ rol_actual|tiene_permiso:... }} (nav de
+        # base.html) importa la funcion por nombre dentro de rbac_tags, asi
+        # que necesita su propio parche (igual que ya hace
+        # fincas.tests.TestScrum242VistasWebPublicacionYCatalogo mas abajo).
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.municipio = Municipio.objects.filter(
             nombre="Toledo", departamento="Norte de Santander"
         ).first()
@@ -6081,11 +6391,6 @@ class ReglasRegistroEtapasHU14ST3ST4Tests(TestCase):
             self.lote.delete()
         self.assertTrue(Lote.objects.filter(pk=self.lote.pk).exists())
         self.assertEqual(EtapaBeneficio.objects.count(), 1)
-
-
-# =============================================================================
-# SUITE HU-17 (SCRUM-169 / SCRUM-170): ESTRUCTURA Y CONSOLIDACIÓN DE FICHA DIGITAL
-# =============================================================================
 
 
 class FichaDigitalStructureTests(TestCase):
@@ -6761,6 +7066,16 @@ class FichaDigitalAuditoriaTests(TestCase):
     """
 
     def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.productor_uuid = uuid.uuid4()
         self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
         if not self.municipio:
@@ -8280,6 +8595,16 @@ class CodigoQRControlVisibilidadTests(TestCase):
     """
 
     def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.client = Client()
         self.municipio = Municipio.objects.filter(
             nombre="Toledo", departamento="Norte de Santander"
@@ -8560,6 +8885,16 @@ class CodigoQRVisualizacionGestionTests(TestCase):
     """
 
     def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.client = Client()
         self.municipio = Municipio.objects.filter(
             nombre="Toledo", departamento="Norte de Santander"
@@ -8694,6 +9029,16 @@ class CodigoQRDescargaImpresionTests(TestCase):
     """
 
     def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.client = Client()
         self.municipio = Municipio.objects.filter(
             nombre="Toledo", departamento="Norte de Santander"
@@ -8895,6 +9240,16 @@ class CodigoQRCertificacionUnicidadE2ETests(TestCase):
     """
 
     def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.client = Client()
         self.municipio = Municipio.objects.filter(
             nombre="Toledo", departamento="Norte de Santander"
@@ -9090,6 +9445,16 @@ class TestScrum264EndpointManifestarInteres(TestCase):
 
     def setUp(self):
         self.client = Client()
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.municipio = Municipio.objects.filter(
             nombre="Toledo", departamento="Norte de Santander"
         ).first()
@@ -9364,6 +9729,16 @@ class TestScrum265InterfazManifestarInteresYCatalogo(TestCase):
 
     def setUp(self):
         self.client = Client()
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
         self.municipio = Municipio.objects.filter(
             nombre="Toledo", departamento="Norte de Santander"
         ).first()
@@ -9671,10 +10046,12 @@ class TestScrum267PruebasRegistroYNotificacionInteres(TestCase):
 
     def test_mock_disparo_notificacion_externa(self):
         """Simula y verifica que el flujo dispara correctamente el mecanismo de notificación."""
-        with patch("fincas.services.timezone.now") as mock_now:
-            ahora_fijo = timezone.now()
-            mock_now.return_value = ahora_fijo
-
+        # Se captura 'ahora_fijo' ANTES de iniciar el parche: con persistencia
+        # real (ManifestacionInteres.full_clean/save), notificado_en debe ser
+        # un datetime de verdad, no el MagicMock que devolvia timezone.now()
+        # si se le llamaba ya con el parche activo pero sin return_value fijo.
+        ahora_fijo = timezone.now()
+        with patch("fincas.services.timezone.now", return_value=ahora_fijo):
             resultado = registrar_manifestacion_interes(
                 lote_id=self.lote_a.id,
                 comprador_id=self.comprador_1_id,
@@ -9682,3 +10059,571 @@ class TestScrum267PruebasRegistroYNotificacionInteres(TestCase):
             )
             self.assertEqual(resultado["fecha_registro"], ahora_fijo.isoformat())
             self.assertTrue(resultado["notificado"])
+
+
+class ManifestacionInteresHU22Tests(TestCase):
+    """
+    HU-22 (SCRUM-231): Manifestar interés sobre un lote específico.
+
+    Subtareas propias (DT):
+    - SCRUM-260 / HU22-ST1: Definir el mecanismo de notificación al
+      productor/comercializador (in-app, sin correo -- RNF: el proyecto
+      no tiene EMAIL_BACKEND configurado).
+    - SCRUM-261 / HU22-ST2: Modelar y persistir la manifestación de
+      interés.
+    - SCRUM-262 / HU22-ST3: Diseñar el flujo de manifestación de interés
+      para un lote (comprador -> servicio -> persistencia -> notificación
+      in-app -> panel del productor).
+    - SCRUM-263 / HU22-ST4: Validar permisos y existencia del lote antes
+      de registrar el interés.
+
+    Estas pruebas también protegen el "contrato" de datos (claves del
+    diccionario que retorna `registrar_manifestacion_interes`) del que
+    ya dependen las subtareas ST5-ST8 de Luis Francisco
+    (rama francisco-epi6-hu22, commits b5ce830/e440b53/1211c21).
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca El Mirador", productor_id=self.productor_id, municipio=self.municipio
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca, fecha_cosecha="2026-09-01", cantidad_total=Decimal("300.00")
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTEHU22",
+            cosecha=self.cosecha,
+            cantidad=Decimal("100.00"),
+            publicado_en_catalogo=True,
+        )
+
+    def _datos(self, **extra):
+        datos = {
+            "lote_id": self.lote,
+            "comprador_id": self.comprador_id,
+            "comprador_correo": "comprador@example.com",
+            "cantidad_kg": "20.00",
+            "mensaje": "Me interesa este lote, ¿sigue disponible?",
+            "telefono_contacto": "3001234567",
+        }
+        datos.update(extra)
+        return datos
+
+    # --------------------------- ST2: persistencia ---------------------------
+
+    def test_la_manifestacion_queda_persistida_en_base_de_datos(self):
+        resultado = registrar_manifestacion_interes(**self._datos())
+        self.assertEqual(ManifestacionInteres.objects.count(), 1)
+        manifestacion = ManifestacionInteres.objects.get()
+        self.assertEqual(manifestacion.lote_id, self.lote.pk)
+        self.assertEqual(str(manifestacion.comprador_id), str(self.comprador_id))
+        self.assertEqual(manifestacion.cantidad_kg, Decimal("20.00"))
+        self.assertEqual(manifestacion.mensaje, "Me interesa este lote, ¿sigue disponible?")
+        self.assertEqual(resultado["id"], f"INT-{manifestacion.pk:06d}")
+
+    def test_se_pueden_registrar_varias_manifestaciones_sobre_el_mismo_lote(self):
+        registrar_manifestacion_interes(**self._datos())
+        otro_comprador = uuid.uuid4()
+        registrar_manifestacion_interes(**self._datos(comprador_id=otro_comprador, cantidad_kg="5.00"))
+        self.assertEqual(ManifestacionInteres.objects.filter(lote=self.lote).count(), 2)
+
+    def test_el_contrato_de_respuesta_mantiene_las_claves_que_ya_usan_las_subtareas_st5_st8(self):
+        resultado = registrar_manifestacion_interes(**self._datos())
+        claves_esperadas = {
+            "id", "lote_id", "lote_codigo", "finca_nombre", "productor_id",
+            "productor_nombre", "productor_correo", "comprador_id", "comprador_correo",
+            "cantidad_kg", "mensaje", "telefono_contacto", "fecha_registro",
+            "estado", "notificado",
+        }
+        self.assertEqual(set(resultado.keys()), claves_esperadas)
+        self.assertEqual(resultado["lote_codigo"], "LOTEHU22")
+        self.assertEqual(resultado["estado"], ManifestacionInteres.EstadoManifestacion.REGISTRADO)
+
+    def test_acepta_identificar_el_lote_por_codigo_en_lugar_del_objeto(self):
+        resultado = registrar_manifestacion_interes(**self._datos(lote_id="LOTEHU22"))
+        self.assertEqual(resultado["lote_id"], self.lote.pk)
+
+    def test_la_cantidad_de_interes_es_opcional(self):
+        resultado = registrar_manifestacion_interes(**self._datos(cantidad_kg=None))
+        self.assertIsNone(resultado["cantidad_kg"])
+        self.assertIsNone(ManifestacionInteres.objects.get().cantidad_kg)
+
+    # --------------------------- ST1: notificación in-app ---------------------------
+
+    def test_al_registrarse_queda_notificado_de_inmediato_sin_usar_correo(self):
+        resultado = registrar_manifestacion_interes(**self._datos())
+        manifestacion = ManifestacionInteres.objects.get()
+        self.assertTrue(resultado["notificado"])
+        self.assertIsNotNone(manifestacion.notificado_en)
+
+    def test_el_productor_puede_listar_las_manifestaciones_recibidas_sobre_sus_lotes(self):
+        registrar_manifestacion_interes(**self._datos())
+        otro_productor_id = uuid.uuid4()
+        otra_finca = Finca.objects.create(
+            nombre="Finca Ajena", productor_id=otro_productor_id, municipio=self.municipio
+        )
+        otra_cosecha = Cosecha.objects.create(
+            finca=otra_finca, fecha_cosecha="2026-09-02", cantidad_total=Decimal("50.00")
+        )
+        otro_lote = Lote.objects.create(
+            codigo="LOTEAJENO", cosecha=otra_cosecha, cantidad=Decimal("50.00"), publicado_en_catalogo=True
+        )
+        registrar_manifestacion_interes(**self._datos(lote_id=otro_lote, comprador_id=uuid.uuid4()))
+
+        recibidas = listar_manifestaciones_interes_productor(productor_id=self.productor_id)
+        self.assertEqual(recibidas.count(), 1)
+        self.assertEqual(recibidas.first().lote_id, self.lote.pk)
+
+    def test_marcar_como_vista_actualiza_estado_y_fecha(self):
+        registrar_manifestacion_interes(**self._datos())
+        manifestacion = ManifestacionInteres.objects.get()
+        self.assertFalse(manifestacion.vista_por_productor)
+
+        marcar_manifestacion_interes_vista(manifestacion_id=manifestacion.pk, productor_id=self.productor_id)
+
+        manifestacion.refresh_from_db()
+        self.assertTrue(manifestacion.vista_por_productor)
+        self.assertIsNotNone(manifestacion.vista_en)
+
+    def test_listar_solo_no_vistas_excluye_las_ya_marcadas(self):
+        registrar_manifestacion_interes(**self._datos())
+        manifestacion = ManifestacionInteres.objects.get()
+        marcar_manifestacion_interes_vista(manifestacion_id=manifestacion.pk, productor_id=self.productor_id)
+
+        pendientes = listar_manifestaciones_interes_productor(productor_id=self.productor_id, solo_no_vistas=True)
+        self.assertEqual(pendientes.count(), 0)
+
+    # --------------------------- ST4: permisos y existencia del lote ---------------------------
+
+    def test_rechaza_marcar_como_vista_una_manifestacion_de_un_lote_que_no_es_del_productor(self):
+        registrar_manifestacion_interes(**self._datos())
+        manifestacion = ManifestacionInteres.objects.get()
+        productor_ajeno = uuid.uuid4()
+        with self.assertRaises(ValidationError) as ctx:
+            marcar_manifestacion_interes_vista(manifestacion_id=manifestacion.pk, productor_id=productor_ajeno)
+        self.assertIn("permiso", ctx.exception.message_dict)
+        manifestacion.refresh_from_db()
+        self.assertFalse(manifestacion.vista_por_productor)
+
+    def test_rechaza_lote_inexistente(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(lote_id=999999))
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertEqual(ManifestacionInteres.objects.count(), 0)
+
+    def test_rechaza_lote_inactivo(self):
+        self.lote.activo = False
+        self.lote.save(update_fields=["activo"])
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos())
+        self.assertIn("lote", ctx.exception.message_dict)
+
+    def test_rechaza_lote_no_publicado_en_catalogo(self):
+        self.lote.publicado_en_catalogo = False
+        self.lote.save(update_fields=["publicado_en_catalogo"])
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos())
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertEqual(ManifestacionInteres.objects.count(), 0)
+
+    def test_rechaza_sin_comprador_identificado(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(comprador_id=None))
+        self.assertIn("comprador", ctx.exception.message_dict)
+
+    def test_rechaza_que_el_propio_productor_manifieste_interes_sobre_su_lote(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(comprador_id=self.productor_id))
+        self.assertIn("comprador", ctx.exception.message_dict)
+        self.assertEqual(ManifestacionInteres.objects.count(), 0)
+
+    def test_rechaza_cantidad_no_positiva(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(cantidad_kg="0"))
+        self.assertIn("cantidad_kg", ctx.exception.message_dict)
+
+    def test_rechaza_cantidad_mayor_al_stock_disponible_del_lote(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(cantidad_kg="500.00"))
+        self.assertIn("cantidad_kg", ctx.exception.message_dict)
+        self.assertEqual(ManifestacionInteres.objects.count(), 0)
+
+    def test_rechaza_mensaje_demasiado_largo(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(mensaje="x" * 1001))
+        self.assertIn("mensaje", ctx.exception.message_dict)
+
+    def test_operacion_atomica_no_guarda_nada_si_falla_una_validacion(self):
+        with self.assertRaises(ValidationError):
+            registrar_manifestacion_interes(**self._datos(cantidad_kg="500.00"))
+        self.assertFalse(ManifestacionInteres.objects.exists())
+
+    def test_no_se_puede_borrar_un_lote_con_manifestaciones_de_interes(self):
+        registrar_manifestacion_interes(**self._datos())
+        with self.assertRaises(ProtectedError):
+            self.lote.delete()
+        self.assertTrue(Lote.objects.filter(pk=self.lote.pk).exists())
+
+
+class RestriccionRolComercioHU22Tests(TestCase):
+    """
+    HU22: restringir las vistas de gestion comercial por rol -- "quien es
+    comprador tiene las vistas de comprador y quien es productor tiene las
+    vistas de productor" (pedido explicito del usuario). Un comprador no
+    debe poder crear/consultar fincas, lotes o cosechas, ni publicar lotes
+    ni registrar etapas de beneficio (exclusivas del productor); y, a la
+    inversa, un productor no debe poder manifestar interes sobre un lote
+    (exclusiva del comprador).
+
+    Se valida contra la matriz RBAC real tal como esta sembrada en
+    Supabase (MATRIZ_RBAC_VIGENTE, en usuarios/tests.py), simulada de
+    punta a punta con la misma tecnica que ya usa HU04-ST6
+    (usuarios.tests.MatrizPermisosSecurityTests /
+    _mockear_matriz_real), en vez de solo confiar en que cada vista por
+    separado llama al decorador correcto.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca HU22 Restriccion", productor_id=self.productor_id, municipio=self.municipio
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca, fecha_cosecha="2026-09-01", cantidad_total=Decimal("300.00")
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTERESTR", cosecha=self.cosecha, cantidad=Decimal("100.00"),
+            publicado_en_catalogo=True,
+        )
+
+        from usuarios.tests import _mockear_matriz_real
+
+        parche = patch("usuarios.models.RolPermiso")
+        mock_rol_permiso = parche.start()
+        self.addCleanup(parche.stop)
+        _mockear_matriz_real(mock_rol_permiso)
+
+    # ------------------------ COMPRADOR: vistas vedadas ------------------------
+
+    def test_comprador_no_puede_ver_el_formulario_de_registrar_finca(self):
+        _iniciar_sesion_comprador(self.client)
+        response = self.client.get(reverse("finca_registro"))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("home"))
+
+    def test_comprador_no_puede_ver_mis_fincas(self):
+        _iniciar_sesion_comprador(self.client)
+        response = self.client.get(reverse("mis_fincas"))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("home"))
+
+    def test_comprador_no_puede_ver_el_formulario_de_registrar_cosecha(self):
+        _iniciar_sesion_comprador(self.client)
+        response = self.client.get(reverse("cosecha_registro"))
+        self.assertEqual(response.status_code, 302)
+
+    def test_comprador_no_puede_ver_el_formulario_de_registrar_lote(self):
+        _iniciar_sesion_comprador(self.client)
+        response = self.client.get(reverse("lote_registro"))
+        self.assertEqual(response.status_code, 302)
+
+    def test_comprador_no_puede_ver_mis_lotes(self):
+        _iniciar_sesion_comprador(self.client)
+        response = self.client.get(reverse("mis_lotes"))
+        self.assertEqual(response.status_code, 302)
+
+    def test_comprador_no_puede_registrar_etapa_de_beneficio(self):
+        _iniciar_sesion_comprador(self.client)
+        response = self.client.get(reverse("lote_etapa_registro", kwargs={"pk": self.lote.pk}))
+        self.assertEqual(response.status_code, 302)
+
+    def test_comprador_no_puede_publicar_un_lote(self):
+        _iniciar_sesion_comprador(self.client)
+        response = self.client.post(reverse("lote_publicar", kwargs={"pk": self.lote.pk}))
+        self.assertEqual(response.status_code, 302)
+
+    def test_comprador_anonimo_sin_sesion_redirige_a_login(self):
+        response = self.client.get(reverse("mis_fincas"))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("login"), response.url)
+
+    # ------------------------ PRODUCTOR: sigue pudiendo como siempre ------------------------
+
+    def test_productor_si_puede_ver_el_formulario_de_registrar_finca(self):
+        _iniciar_sesion_productor(self.client)
+        response = self.client.get(reverse("finca_registro"))
+        self.assertEqual(response.status_code, 200)
+
+    def test_productor_si_puede_ver_mis_fincas(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(reverse("mis_fincas"))
+        self.assertEqual(response.status_code, 200)
+
+    def test_productor_si_puede_ver_mis_lotes(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(reverse("mis_lotes"))
+        self.assertEqual(response.status_code, 200)
+
+    def test_productor_si_puede_ver_el_formulario_de_registrar_lote(self):
+        # self.productor_id es dueno de self.finca/self.cosecha (con saldo
+        # disponible), para ejercitar el 200 real y no la redireccion de
+        # negocio "debe tener una cosecha con saldo" (ajena al permiso RBAC).
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        response = self.client.get(reverse("lote_registro"))
+        self.assertEqual(response.status_code, 200)
+
+    # ------------------------ manifestar interes: solo el comprador ------------------------
+
+    def test_comprador_si_puede_manifestar_interes(self):
+        _iniciar_sesion_comprador(self.client)
+        response = self.client.post(
+            reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote.pk}),
+            {"mensaje": "Interesado en este lote"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("catalogo"))
+
+        from fincas.models import ManifestacionInteres
+        self.assertTrue(ManifestacionInteres.objects.filter(lote=self.lote).exists())
+
+    def test_productor_no_puede_manifestar_interes(self):
+        _iniciar_sesion_productor(self.client)
+        response = self.client.post(
+            reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote.pk}),
+            {"mensaje": "Interesado en este lote"},
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, reverse("home"))
+
+        from fincas.models import ManifestacionInteres
+        self.assertFalse(ManifestacionInteres.objects.filter(lote=self.lote).exists())
+
+    # ------------------------ navegacion: botones ocultos segun el rol ------------------------
+
+    def test_comprador_no_ve_el_boton_mi_panel_ni_registrar_finca_en_el_home(self):
+        _iniciar_sesion_comprador(self.client)
+        respuesta_home = self.client.get(reverse("home"))
+        # No basta con buscar el texto "Mi Panel": tambien aparece dentro de
+        # un comentario HTML del template. Lo que de verdad importa es que no
+        # exista el enlace clickeable (su href real).
+        self.assertNotContains(respuesta_home, reverse("mis_fincas"))
+        self.assertNotContains(respuesta_home, reverse("finca_registro"))
+
+        respuesta_catalogo = self.client.get(reverse("catalogo"))
+        self.assertNotContains(respuesta_catalogo, reverse("mis_lotes"))
+
+    def test_productor_si_ve_el_boton_mi_panel_y_registrar_finca_en_el_home(self):
+        _iniciar_sesion_productor(self.client)
+        respuesta_home = self.client.get(reverse("home"))
+        self.assertContains(respuesta_home, "Mi Panel")
+        self.assertContains(respuesta_home, "Registrar Finca")
+
+
+class PanelManifestacionesInteresProductorHU22Tests(TestCase):
+    """
+    HU22 (SCRUM-231): el productor necesita un lugar real donde ver las
+    manifestaciones de interes que recibio sobre sus lotes publicados (el
+    mecanismo de notificacion in-app de ST1/SCRUM-260). Cubre:
+
+    - El boton "Interesados" en Mis Lotes solo lo ve quien tiene permiso de
+      'lotes.consultar' (productor), nunca un comprador.
+    - El panel de manifestaciones solo muestra las de los lotes del
+      productor que inicio sesion, nunca las de otro productor.
+    - Marcar una manifestacion como vista funciona de verdad (POST real) y
+      queda reflejado tanto en el detalle como en el contador de "sin ver".
+    - El boton "Manifestar Interés" del catalogo ahora se oculta para quien no
+      tiene el permiso 'manifestaciones_interes.crear' (p.ej. un productor
+      autenticado), no solo para los anonimos.
+    """
+
+    def setUp(self):
+        self.client = Client()
+
+        from usuarios.tests import _mockear_matriz_real
+        self._parche_matriz = patch("usuarios.models.RolPermiso")
+        mock_rol_permiso = self._parche_matriz.start()
+        self.addCleanup(self._parche_matriz.stop)
+        _mockear_matriz_real(mock_rol_permiso)
+
+        self.municipio = Municipio.objects.create(
+            nombre="Toledo HU22P", departamento="Norte de Santander"
+        )
+        self.productor_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Finca Panel HU22",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca, fecha_cosecha="2026-09-01", cantidad_total=Decimal("300.00")
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTEPANELHU22",
+            cosecha=self.cosecha,
+            cantidad=Decimal("100.00"),
+            publicado_en_catalogo=True,
+        )
+
+        self.finca_ajena = Finca.objects.create(
+            nombre="Finca Ajena HU22",
+            productor_id=self.otro_productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha_ajena = Cosecha.objects.create(
+            finca=self.finca_ajena, fecha_cosecha="2026-09-01", cantidad_total=Decimal("100.00")
+        )
+        self.lote_ajeno = Lote.objects.create(
+            codigo="LOTEAJENOHU22",
+            cosecha=self.cosecha_ajena,
+            cantidad=Decimal("50.00"),
+            publicado_en_catalogo=True,
+        )
+
+    # ------------------------ boton "Interesados" en Mis Lotes ------------------------
+
+    def test_productor_ve_el_boton_interesados_en_mis_lotes(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("mis_lotes"))
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(respuesta, reverse("mis_manifestaciones_interes"))
+        self.assertContains(respuesta, "Interesados")
+
+    def test_comprador_no_puede_acceder_al_panel_de_manifestaciones(self):
+        _iniciar_sesion_comprador(self.client)
+        respuesta = self.client.get(reverse("mis_manifestaciones_interes"))
+        self.assertEqual(respuesta.status_code, 302)
+        self.assertEqual(respuesta.url, reverse("home"))
+
+    def test_anonimo_redirige_a_login_al_entrar_al_panel(self):
+        respuesta = self.client.get(reverse("mis_manifestaciones_interes"))
+        self.assertEqual(respuesta.status_code, 302)
+        self.assertIn(reverse("login"), respuesta.url)
+
+    # ------------------------ el productor ve sus propias manifestaciones ------------------------
+
+    def test_productor_ve_la_manifestacion_real_que_le_mandaron(self):
+        comprador_id = uuid.uuid4()
+        registrar_manifestacion_interes(
+            lote_id=self.lote.pk,
+            comprador_id=comprador_id,
+            comprador_correo="comprador.panel@example.com",
+            mensaje="Quiero este cafe",
+            cantidad_kg=Decimal("20.00"),
+        )
+
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("mis_manifestaciones_interes"))
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(respuesta, "LOTEPANELHU22")
+        self.assertContains(respuesta, "comprador.panel@example.com")
+        self.assertContains(respuesta, "Quiero este cafe")
+        self.assertContains(respuesta, "Nuevo")
+
+    def test_productor_no_ve_manifestaciones_de_lotes_ajenos(self):
+        registrar_manifestacion_interes(
+            lote_id=self.lote_ajeno.pk,
+            comprador_id=uuid.uuid4(),
+            comprador_correo="otro.comprador@example.com",
+        )
+
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("mis_manifestaciones_interes"))
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertNotContains(respuesta, "LOTEAJENOHU22")
+        self.assertNotContains(respuesta, "otro.comprador@example.com")
+
+    def test_panel_vacio_muestra_mensaje_de_estado_vacio(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("mis_manifestaciones_interes"))
+        self.assertContains(respuesta, "Todavía no has recibido manifestaciones de interés")
+
+    def test_contador_de_sin_ver_aparece_en_mis_lotes(self):
+        registrar_manifestacion_interes(
+            lote_id=self.lote.pk,
+            comprador_id=uuid.uuid4(),
+            comprador_correo="contador@example.com",
+        )
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("mis_lotes"))
+        self.assertContains(respuesta, "1")
+
+    # ------------------------ marcar como vista ------------------------
+
+    def test_productor_puede_marcar_su_manifestacion_como_vista(self):
+        registrar_manifestacion_interes(
+            lote_id=self.lote.pk,
+            comprador_id=uuid.uuid4(),
+            comprador_correo="marcar@example.com",
+        )
+        manifestacion_id = ManifestacionInteres.objects.get(
+            lote=self.lote, comprador_correo="marcar@example.com"
+        ).pk
+
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.post(
+            reverse("manifestacion_interes_marcar_vista", kwargs={"pk": manifestacion_id})
+        )
+        self.assertEqual(respuesta.status_code, 302)
+        self.assertEqual(respuesta.url, reverse("mis_manifestaciones_interes"))
+
+        manifestacion = ManifestacionInteres.objects.get(pk=manifestacion_id)
+        self.assertTrue(manifestacion.vista_por_productor)
+
+    def test_otro_productor_no_puede_marcar_como_vista_una_manifestacion_ajena(self):
+        registrar_manifestacion_interes(
+            lote_id=self.lote.pk,
+            comprador_id=uuid.uuid4(),
+            comprador_correo="ajena@example.com",
+        )
+        manifestacion_id = ManifestacionInteres.objects.get(
+            lote=self.lote, comprador_correo="ajena@example.com"
+        ).pk
+
+        _iniciar_sesion_productor(self.client, usuario_id=self.otro_productor_id)
+        self.client.post(
+            reverse("manifestacion_interes_marcar_vista", kwargs={"pk": manifestacion_id})
+        )
+
+        manifestacion = ManifestacionInteres.objects.get(pk=manifestacion_id)
+        self.assertFalse(manifestacion.vista_por_productor)
+
+    def test_marcar_como_vista_rechaza_metodo_get(self):
+        registrar_manifestacion_interes(
+            lote_id=self.lote.pk,
+            comprador_id=uuid.uuid4(),
+            comprador_correo="getmetodo@example.com",
+        )
+        manifestacion_id = ManifestacionInteres.objects.get(
+            lote=self.lote, comprador_correo="getmetodo@example.com"
+        ).pk
+
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(
+            reverse("manifestacion_interes_marcar_vista", kwargs={"pk": manifestacion_id})
+        )
+        self.assertEqual(respuesta.status_code, 405)
+
+    # ------------------------ "Manifestar Interés" ahora oculto tambien para el productor ------------------------
+
+    def test_boton_me_interesa_oculto_para_productor_en_el_catalogo(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        respuesta = self.client.get(reverse("catalogo"))
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertNotContains(respuesta, "Manifestar Interés")
+
+    def test_boton_me_interesa_visible_para_comprador_en_el_catalogo(self):
+        _iniciar_sesion_comprador(self.client)
+        respuesta = self.client.get(reverse("catalogo"))
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(respuesta, "Manifestar Interés")
