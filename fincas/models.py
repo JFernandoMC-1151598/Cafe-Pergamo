@@ -35,6 +35,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.utils import timezone
 
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 from usuarios.models import Usuario
@@ -695,3 +696,124 @@ class BitacoraPublicacionLote(models.Model):
     def __str__(self):
         return f"{self.accion} - Lote {self.lote.codigo} ({self.creado_en})"
 
+
+class ManifestacionInteres(models.Model):
+    """
+    Manifestación de interés de un Comprador sobre un Lote publicado en el
+    catálogo comercial (HU-22 / SCRUM-231).
+
+    HU22-ST2 (SCRUM-261): persistencia real de la manifestación. Antes de
+    esta subtarea, `fincas.services.registrar_manifestacion_interes()`
+    (HU22-ST5 / SCRUM-264, rama francisco-epi6-hu22) devolvía un
+    diccionario en memoria con un id simulado (uuid) y nunca lo guardaba
+    en base de datos -- su propia prueba `test_mock_disparo_notificacion_externa`
+    así lo admite. Este modelo es lo que ese servicio usa ahora para
+    persistir de verdad, manteniendo exactamente el mismo "contrato" de
+    datos que ST5/ST6/ST7/ST8 ya esperan (ver registrar_manifestacion_interes).
+
+    HU22-ST1 (SCRUM-260): el mecanismo de notificación al productor es
+    in-app, no por correo -- este proyecto no tiene ningún backend de
+    correo (EMAIL_BACKEND) configurado en cafe_pergamo/settings.py. La
+    manifestación queda disponible de inmediato (`notificado_en`) para
+    que el productor la vea desde su panel de "Mis Lotes", y se marca
+    como vista (`vista_por_productor` / `vista_en`) cuando la abre.
+
+    No se usa eliminación física (consistente con RNF-14 en el resto del
+    dominio de fincas): el campo `lote` usa on_delete=PROTECT, así que un
+    lote con manifestaciones de interés no puede borrarse.
+    """
+
+    class EstadoManifestacion(models.TextChoices):
+        REGISTRADO = "REGISTRADO", "Registrado"
+
+    lote = models.ForeignKey(
+        Lote,
+        on_delete=models.PROTECT,
+        related_name="manifestaciones_interes",
+        verbose_name="Lote",
+        help_text="Lote comercial sobre el que se manifiesta interés.",
+    )
+
+    comprador = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        db_constraint=False,
+        related_name="manifestaciones_interes",
+        verbose_name="Comprador interesado",
+        help_text="Perfil de negocio (usuarios.Usuario, rol COMPRADOR) que manifiesta el interés.",
+    )
+
+    comprador_correo = models.EmailField(
+        blank=True,
+        default="",
+        verbose_name="Correo de contacto del comprador",
+    )
+
+    cantidad_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        verbose_name="Cantidad de interés (kg)",
+        help_text="Cantidad orientativa de interés, en kilogramos (opcional; no puede superar el stock del lote).",
+    )
+
+    mensaje = models.TextField(
+        blank=True,
+        default="",
+        verbose_name="Mensaje del comprador",
+        help_text="Mensaje libre del comprador para el productor (máximo 1000 caracteres).",
+    )
+
+    telefono_contacto = models.CharField(
+        max_length=30,
+        blank=True,
+        default="",
+        verbose_name="Teléfono de contacto",
+    )
+
+    estado = models.CharField(
+        max_length=20,
+        choices=EstadoManifestacion.choices,
+        default=EstadoManifestacion.REGISTRADO,
+        verbose_name="Estado de la manifestación",
+    )
+
+    # ------------------------------------------------------------------
+    # HU22-ST1 (SCRUM-260): mecanismo de notificación in-app.
+    # ------------------------------------------------------------------
+    notificado_en = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Notificado al productor en",
+        help_text="Momento en que la notificación quedó disponible para el productor del lote.",
+    )
+    vista_por_productor = models.BooleanField(
+        default=False,
+        verbose_name="Vista por el productor",
+    )
+    vista_en = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Vista por el productor en",
+    )
+
+    creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de registro")
+
+    class Meta:
+        managed = True
+        db_table = "fincas_manifestacion_interes"
+        verbose_name = "Manifestación de interés"
+        verbose_name_plural = "Manifestaciones de interés"
+        ordering = ["-creado_en", "-id"]
+
+    def __str__(self):
+        return f"Interés de {self.comprador_id} en lote {self.lote.codigo} ({self.creado_en})"
+
+    def marcar_vista_por_productor(self):
+        """HU22-ST1: marca la notificación como vista/leída por el productor."""
+        if not self.vista_por_productor:
+            self.vista_por_productor = True
+            self.vista_en = timezone.now()
+            self.save(update_fields=["vista_por_productor", "vista_en"])
