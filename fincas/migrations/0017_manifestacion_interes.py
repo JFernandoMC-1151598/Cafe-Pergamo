@@ -9,7 +9,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('fincas', '0011_etapabeneficio_validaciones_activo'),
+        ('fincas', '0016_merge_20261106'),
         ('usuarios', '0002_bitacoracambiorol'),
     ]
 

@@ -6,8 +6,10 @@ Subtarea: SCRUM-98 / HU07-ST5 (Georreferenciación).
 
 from django.contrib import admin
 from .models import (
+    BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
+    CodigoQRLote,
     Cosecha,
     Finca,
     Lote,
@@ -94,3 +96,48 @@ class BitacoraPublicacionLoteAdmin(admin.ModelAdmin):
     search_fields = ("lote__codigo", "realizado_por_correo")
     ordering = ("-creado_en",)
     readonly_fields = ("creado_en",)
+
+
+@admin.register(BitacoraFichaDigital)
+class BitacoraFichaDigitalAdmin(admin.ModelAdmin):
+    list_display = (
+        "lote",
+        "tipo_evento",
+        "completitud_porcentaje",
+        "es_consistente",
+        "usuario_identificador",
+        "ip_address",
+        "creado_en",
+    )
+    list_filter = ("tipo_evento", "es_consistente", "creado_en")
+    search_fields = ("lote__codigo", "usuario_identificador", "ip_address")
+    ordering = ("-creado_en",)
+    readonly_fields = (
+        "lote",
+        "tipo_evento",
+        "completitud_porcentaje",
+        "es_consistente",
+        "ip_address",
+        "user_agent",
+        "usuario_identificador",
+        "detalles",
+        "creado_en",
+    )
+
+
+@admin.register(CodigoQRLote)
+class CodigoQRLoteAdmin(admin.ModelAdmin):
+    list_display = (
+        "identificador",
+        "lote",
+        "nivel_visibilidad",
+        "activo",
+        "creado_en",
+        "actualizado_en",
+    )
+    list_filter = ("nivel_visibilidad", "activo", "creado_en")
+    search_fields = ("identificador", "lote__codigo")
+    ordering = ("-creado_en",)
+    readonly_fields = ("identificador", "payload_url", "creado_en", "actualizado_en")
+
+

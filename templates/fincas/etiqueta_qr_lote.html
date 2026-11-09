@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Etiqueta QR Lote {{ lote.codigo }} — Café Pérgamo</title>
+
+    <!-- Bootstrap 5 CSS CDN -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
+        integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+
+    <!-- Bootstrap Icons CDN -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+    <!-- Tipografía Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+
+    <style>
+        body {
+            font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+            background-color: #f8f9fa;
+            color: #212529;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+        }
+
+        .font-mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .etiqueta-contenedor {
+            max-width: 650px;
+            margin: 2rem auto;
+            background: #ffffff;
+            border: 2px dashed #bfa58a;
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .etiqueta-header {
+            background: linear-gradient(135deg, #2B1810 0%, #4A2C2A 100%) !important;
+            color: #ffffff !important;
+            padding: 1.25rem 1.5rem;
+        }
+
+        .qr-box {
+            background: #ffffff;
+            border: 2px solid #e9ecef;
+            border-radius: 12px;
+            display: inline-block;
+            padding: 0.75rem;
+        }
+
+        .dato-item {
+            border-bottom: 1px solid #f0f0f0;
+            padding: 0.45rem 0;
+        }
+
+        .dato-item:last-child {
+            border-bottom: none;
+        }
+
+        /* Estilos específicos para impresión */
+        @media print {
+            body {
+                background: #ffffff !important;
+                margin: 0 !important;
+                padding: 0 !important;
+            }
+
+            .no-print {
+                display: none !important;
+            }
+
+            .etiqueta-contenedor {
+                max-width: 100% !important;
+                margin: 0 !important;
+                border: 2px solid #2B1810 !important;
+                box-shadow: none !important;
+                border-radius: 8px !important;
+                page-break-inside: avoid !important;
+            }
+
+            .etiqueta-header {
+                background: #2B1810 !important;
+                color: #ffffff !important;
+            }
+        }
+
+        @page {
+            size: auto;
+            margin: 10mm;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Barra de acciones en pantalla (Oculta al imprimir) -->
+    <div class="container py-3 no-print">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 max-w-650 mx-auto" style="max-width: 650px;">
+            <a href="{% url 'lote_detalle' lote.pk %}" class="btn btn-outline-secondary btn-sm rounded-pill px-3">
+                <i class="bi bi-arrow-left me-1"></i>Volver al Lote
+            </a>
+            <div class="d-flex gap-2">
+                <a href="{% url 'lote_qr_descargar' lote.pk %}" class="btn btn-outline-primary btn-sm rounded-pill px-3 fw-semibold">
+                    <i class="bi bi-download me-1"></i>Descargar PNG
+                </a>
+                <button type="button" onclick="window.print()" class="btn btn-primary btn-sm rounded-pill px-4 fw-semibold shadow-sm">
+                    <i class="bi bi-printer me-1"></i>Imprimir Etiqueta
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Etiqueta imprimible de trazabilidad -->
+    <div class="container">
+        <article class="etiqueta-contenedor">
+            <!-- Encabezado Institucional -->
+            <header class="etiqueta-header d-flex justify-content-between align-items-center">
+                <div class="d-flex align-items-center gap-2">
+                    <i class="bi bi-patch-check-fill fs-3 text-warning"></i>
+                    <div>
+                        <h1 class="h6 mb-0 fw-bold text-uppercase tracking-wider">Café Pérgamo</h1>
+                        <p class="small mb-0 opacity-75">Trazabilidad de Origen Cafetero</p>
+                    </div>
+                </div>
+                <div class="text-end">
+                    <span class="badge bg-light text-dark fw-bold font-mono px-2 py-1">
+                        {{ lote.codigo }}
+                    </span>
+                </div>
+            </header>
+
+            <div class="p-4">
+                <div class="row align-items-center g-4">
+                    <!-- Código QR Central -->
+                    <div class="col-sm-5 text-center">
+                        <div class="qr-box mb-2">
+                            {% if codigo_qr and codigo_qr.imagen_base64 %}
+                                <img src="{{ codigo_qr.imagen_base64 }}" alt="QR {{ lote.codigo }}" class="img-fluid" style="width: 180px; height: 180px;">
+                            {% endif %}
+                        </div>
+                        <div class="small fw-bold font-mono text-dark">
+                            {{ codigo_qr.identificador }}
+                        </div>
+                        <div class="mt-1">
+                            {% if codigo_qr.nivel_visibilidad == 'PUBLICA' %}
+                                <span class="badge bg-success-subtle text-success border border-success-subtle small px-2 py-1">
+                                    <i class="bi bi-globe me-1"></i>Ficha Pública
+                                </span>
+                            {% else %}
+                                <span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle small px-2 py-1">
+                                    <i class="bi bi-lock-fill me-1"></i>Ficha Privada
+                                </span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <!-- Especificaciones Agronómicas del Lote -->
+                    <div class="col-sm-7 small">
+                        <div class="dato-item d-flex justify-content-between">
+                            <span class="text-muted fw-semibold">Finca:</span>
+                            <span class="fw-bold text-dark text-end">{{ lote.cosecha.finca.nombre }}</span>
+                        </div>
+                        <div class="dato-item d-flex justify-content-between">
+                            <span class="text-muted fw-semibold">Municipio:</span>
+                            <span class="text-dark text-end">{{ lote.cosecha.finca.municipio.nombre|default:"Norte de Santander" }}</span>
+                        </div>
+                        <div class="dato-item d-flex justify-content-between">
+                            <span class="text-muted fw-semibold">Variedad:</span>
+                            <span class="text-dark text-end">{{ lote.cosecha.variedad.nombre|default:"Variedad local" }}</span>
+                        </div>
+                        <div class="dato-item d-flex justify-content-between">
+                            <span class="text-muted fw-semibold">Beneficio:</span>
+                            <span class="text-dark text-end">{{ lote.proceso_beneficio.nombre|default:"Tradicional" }}</span>
+                        </div>
+                        <div class="dato-item d-flex justify-content-between">
+                            <span class="text-muted fw-semibold">Cosecha:</span>
+                            <span class="text-dark text-end">{{ lote.cosecha.fecha_cosecha|date:"d/m/Y" }}</span>
+                        </div>
+                        <div class="dato-item d-flex justify-content-between">
+                            <span class="text-muted fw-semibold">Cantidad Lote:</span>
+                            <span class="fw-bold text-success text-end">{{ lote.cantidad }} kg</span>
+                        </div>
+                        {% if lote.caracteristicas_calidad and lote.caracteristicas_calidad.puntaje_taza %}
+                        <div class="dato-item d-flex justify-content-between">
+                            <span class="text-muted fw-semibold">Puntaje SCA:</span>
+                            <span class="fw-bold text-warning text-end">{{ lote.caracteristicas_calidad.puntaje_taza }} pts</span>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <!-- Mensaje de Instrucción para Escaneo -->
+                <div class="alert alert-light border border-secondary-subtle rounded-3 mt-4 mb-0 py-2 px-3 small text-center text-muted">
+                    <i class="bi bi-camera me-1 text-primary"></i>
+                    Escanee este código QR con cualquier dispositivo móvil para consultar la ficha digital de trazabilidad completa de este lote.
+                </div>
+            </div>
+
+            <!-- Pie de Etiqueta -->
+            <footer class="bg-light px-4 py-2 border-top d-flex justify-content-between align-items-center text-muted small" style="font-size: 0.75rem;">
+                <span>Universidad Francisco de Paula Santander (UFPS)</span>
+                <span>Emisión: {% now "d/m/Y H:i" %}</span>
+            </footer>
+        </article>
+    </div>
+
+    <!-- Bootstrap 5 Bundle JS CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz"
+        crossorigin="anonymous"></script>
+</body>
+
+</html>
+

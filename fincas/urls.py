@@ -20,21 +20,30 @@ urlpatterns = [
     path('registro/', views.registrar_finca_view, name='finca_registro'),
     path('mis-fincas/', views.mis_fincas_view, name='mis_fincas'),
 
-    # Interfaz Web de Cosechas y Lotes (HU-13 / HU-19)
+    # Interfaz Web de Cosechas y Lotes (HU-13 / HU-14 / HU-17 / HU-19)
     path('cosechas/registro/', views.registrar_cosecha_view, name='cosecha_registro'),
     path('lotes/registro/', views.registrar_lote_view, name='lote_registro'),
     path('mis-lotes/', views.mis_lotes_view, name='mis_lotes'),
     path('lotes/<int:pk>/', views.detalle_lote_view, name='lote_detalle'),
+    path('lotes/<int:pk>/calidad/', views.registrar_calidad_lote_view, name='lote_calidad'),
     path('lotes/<int:pk>/etapas/nueva/', views.registrar_etapa_beneficio_view, name='lote_etapa_registro'),
+    path('lotes/<int:pk>/manifestar-interes/', views.manifestar_interes_lote_web_view, name='lote_manifestar_interes_web'),
     path('lotes/<int:pk>/publicar/', views.publicar_lote_web_view, name='lote_publicar'),
     path('lotes/<int:pk>/despublicar/', views.despublicar_lote_web_view, name='lote_despublicar'),
-    path('lotes/<int:pk>/manifestar-interes/', views.manifestar_interes_lote_web_view, name='lote_manifestar_interes'),
     path('mis-lotes/interes/', views.manifestaciones_interes_productor_view, name='mis_manifestaciones_interes'),
     path(
         'mis-lotes/interes/<int:pk>/marcar-vista/',
         views.marcar_manifestacion_interes_vista_web_view,
         name='manifestacion_interes_marcar_vista',
     ),
+    path('lotes/<str:codigo>/ficha/', views.ficha_digital_web_view, name='lote_ficha_digital_web'),
+    path('trazabilidad/lote/<str:codigo>/', views.ficha_digital_web_view, name='trazabilidad_lote_publica'),
+    path('trazabilidad/qr/<str:identificador>/', views.escanear_qr_web_view, name='trazabilidad_qr_web'),
+    path('qr/<str:identificador>/', views.escanear_qr_web_view, name='escanear_qr_web_directo'),
+    path('lotes/<int:pk>/qr/visibilidad/', views.cambiar_visibilidad_qr_web_view, name='lote_qr_visibilidad_web'),
+    path('lotes/<int:pk>/qr/descargar/', views.descargar_qr_lote_view, name='lote_qr_descargar'),
+    path('qr/<str:identificador>/descargar/', views.descargar_qr_lote_view, name='qr_descargar_directo'),
+    path('lotes/<int:pk>/qr/imprimir/', views.imprimir_etiqueta_qr_view, name='lote_qr_imprimir'),
 
     # Interfaz Web de Catálogo de Municipios (HU-09 / SCRUM-111)
     path('municipios/', views.admin_municipios_view, name='admin_municipios'),
@@ -57,6 +66,7 @@ urlpatterns = [
 
     # API REST de Lotes (HU-13 / SCRUM-142, HU-15 / SCRUM-155, HU-19 / SCRUM-239)
     path('api/lotes/', views.api_crear_lote_view, name='api_lote_crear'),
+    path('api/lotes/<int:pk>/', views.api_consultar_lote_view, name='api_lote_detalle'),
     path(
         'api/lotes/<int:lote_id>/calidad/',
         views.api_caracteristicas_calidad_view,
@@ -78,7 +88,21 @@ urlpatterns = [
         name='api_lote_validar_publicacion',
     ),
 
+    # API REST de Ficha Digital Consolidada por Lote (HU-17 / SCRUM-167)
+    path('api/lotes/<str:codigo>/ficha/', views.api_consultar_ficha_digital_view, name='api_lote_ficha_digital'),
+    path('api/v1/lotes/<str:codigo>/ficha/', views.api_consultar_ficha_digital_view, name='api_v1_lote_ficha_digital'),
+
+    # API REST de Consulta de Ficha Digital vía Código QR (HU-18 / SCRUM-177)
+    path('api/qr/<str:identificador>/', views.api_consultar_ficha_desde_qr_view, name='api_consultar_ficha_desde_qr'),
+    path('api/v1/qr/<str:identificador>/', views.api_consultar_ficha_desde_qr_view, name='api_v1_consultar_ficha_desde_qr'),
+    path('api/qr/<str:identificador>/ficha/', views.api_consultar_ficha_desde_qr_view, name='api_consultar_ficha_desde_qr_alias'),
+
+    # API REST de Control de Visibilidad del Código QR (HU-18 / SCRUM-178)
+    path('api/lotes/<int:pk>/qr/visibilidad/', views.api_actualizar_visibilidad_qr_view, name='api_lote_qr_visibilidad'),
+
     # API REST pública del catálogo con filtros combinados (HU-20 / SCRUM-250)
     path('api/catalogo/', views.api_catalogo_view, name='api_catalogo'),
-]
 
+    # API REST de Manifestación de Interés en un Lote (HU-22 / SCRUM-264)
+    path('api/lotes/<int:pk>/interes/', views.api_manifestar_interes_lote_view, name='api_lote_manifestar_interes'),
+]

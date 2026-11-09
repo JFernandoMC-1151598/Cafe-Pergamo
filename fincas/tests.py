@@ -13,14 +13,19 @@ Integración de:
   cosechas (complemento) y de lotes (SCRUM-144); y cobertura de pruebas de código único, restricción de
   cantidad y flujo exitoso de registro (ST6 / SCRUM-147).
 - HU-15-ST1 (SCRUM-155): Persistencia API de características físicas y de calidad del lote.
+- HU-15-ST6 (SCRUM-159): Autorización de edición para productor dueño o catador.
 """
 
+import base64
+import json
 import uuid
+from datetime import date
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from django import forms as forms_module
 from django.contrib.auth.models import User
+from django.contrib.messages import get_messages
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
@@ -29,10 +34,12 @@ from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse, JsonResponse
 from django.test import Client, RequestFactory, SimpleTestCase, TestCase
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
 
 
 from fincas.forms import (
+    CaracteristicasCalidadForm,
     CosechaRegistroForm,
     EtapaBeneficioForm,
     FincaModelForm,
@@ -42,11 +49,14 @@ from fincas.forms import (
     MunicipioForm,
 )
 from fincas.models import (
+    BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
+    CodigoQRLote,
     Cosecha,
     EtapaBeneficio,
     Finca,
+    HistorialEstadoLote,
     Lote,
     ManifestacionInteres,
     Municipio,
@@ -57,6 +67,9 @@ from fincas.services import (
     crear_lote,
     despublicar_lote_de_catalogo,
     editar_caracteristicas_calidad,
+    evaluar_consistencia_y_completitud_lote,
+    obtener_ficha_consolidada_lote,
+    registrar_auditoria_ficha_digital,
     filtrar_catalogo_lotes,
     generar_codigo_lote,
     generar_snapshot_trazabilidad,
@@ -67,8 +80,33 @@ from fincas.services import (
     obtener_opciones_filtro_catalogo,
     publicar_lote_en_catalogo,
     registrar_etapa_beneficio,
+    transicionar_estado_comercial,
     registrar_manifestacion_interes,
     validar_lote_para_publicacion,
+    actualizar_visibilidad_codigo_qr,
+    actualizar_lote,
+    asociar_codigo_qr_a_lote,
+    construir_payload_qr_lote,
+    extraer_codigo_lote_desde_qr,
+    extraer_codigo_lote_normalizado,
+    generar_identificador_qr_lote,
+    generar_matriz_qr_lote,
+    generar_qr_base64_lote,
+    obtener_codigo_qr_lote,
+    obtener_bytes_descarga_qr_lote,
+    obtener_estructura_qr_lote,
+    resolver_lote_desde_qr,
+    sanitizar_ficha_por_visibilidad,
+    sincronizar_o_generar_qr_lote,
+    validar_estructura_identificador_qr,
+    verificar_permiso_visibilidad_qr,
+    PREFIJO_IDENTIFICADOR_QR,
+    VISIBILIDAD_QR_PUBLICA,
+    VISIBILIDAD_QR_PRIVADA,
+)
+from fincas.serializers import (
+    EstructuraCodigoQRSerializer,
+    FichaDigitalSerializer,
 )
 from fincas.views import (
     MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO,
@@ -3377,6 +3415,13 @@ class CaracteristicasCalidadApiTests(TestCase):
         self.url = reverse("api_lote_calidad", kwargs={"lote_id": self.lote.pk})
         self.client = Client()
 
+    def _quality_headers(self, role_code="CATADOR"):
+        user = User.objects.create_user(username=f"calidad_{uuid.uuid4().hex[:8]}")
+        token = AccessToken.for_user(user)
+        token["role_code"] = role_code
+        token["email"] = f"{user.username}@test.local"
+        return {"HTTP_AUTHORIZATION": f"Bearer {token}"}
+
     def test_crea_consulta_y_actualiza_caracteristicas(self):
         datos = {
             "humedad": "11.50",
@@ -3389,14 +3434,14 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             datos,
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 201, respuesta.content)
         self.assertIn("lote_id", respuesta.json(), respuesta.content)
         self.assertEqual(respuesta.json()["lote_id"], self.lote.pk)
         self.assertEqual(respuesta.json()["puntaje_taza"], "84.50")
 
-        consulta = self.client.get(self.url, **_jwt_bearer_headers())
+        consulta = self.client.get(self.url, **self._quality_headers("PRODUCTOR"))
         self.assertEqual(consulta.status_code, 200)
         self.assertEqual(consulta.json()["lote_codigo"], "CALIDAD01")
 
@@ -3404,7 +3449,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"puntaje_taza": "86.00"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(actualizacion.status_code, 200)
         self.assertEqual(actualizacion.json()["puntaje_taza"], "86.00")
@@ -3416,7 +3461,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"humedad": "12.00"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn("lote", respuesta.json())
@@ -3426,7 +3471,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"puntaje_taza": "101.00"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn("puntaje_taza", respuesta.json())
@@ -3437,7 +3482,7 @@ class CaracteristicasCalidadApiTests(TestCase):
                 self.url,
                 {campo: valor},
                 content_type="application/json",
-                **_jwt_bearer_headers(),
+                **self._quality_headers(),
             )
             self.assertEqual(respuesta.status_code, 400)
             self.assertIn(campo, respuesta.json())
@@ -3447,7 +3492,7 @@ class CaracteristicasCalidadApiTests(TestCase):
             self.url,
             {"humedad": "once coma cinco"},
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 400)
         self.assertIn("humedad", respuesta.json())
@@ -3463,11 +3508,77 @@ class CaracteristicasCalidadApiTests(TestCase):
                 "observaciones": "  Muestra válida  ",
             },
             content_type="application/json",
-            **_jwt_bearer_headers(),
+            **self._quality_headers(),
         )
         self.assertEqual(respuesta.status_code, 201, respuesta.content)
         self.assertEqual(respuesta.json()["perfil_sensorial"], "Chocolate")
         self.assertEqual(respuesta.json()["observaciones"], "Muestra válida")
+
+    def test_productor_dueno_puede_modificar_con_sesion(self):
+        productor_id = self.lote.cosecha.finca.productor_id
+        _iniciar_sesion_productor(self.client, productor_id)
+        respuesta = self.client.post(
+            self.url,
+            {"humedad": "12.00"},
+            content_type="application/json",
+            **self._quality_headers("PRODUCTOR"),
+        )
+        self.assertEqual(respuesta.status_code, 201, respuesta.content)
+
+    def test_administrador_puede_modificar_calidad(self):
+        respuesta = self.client.post(
+            self.url,
+            {"humedad": "12.00"},
+            content_type="application/json",
+            **self._quality_headers("ADMINISTRADOR"),
+        )
+        self.assertEqual(respuesta.status_code, 201, respuesta.content)
+
+    def test_productor_ajeno_y_otro_rol_no_pueden_modificar(self):
+        _iniciar_sesion_productor(self.client, uuid.uuid4())
+        for role_code in ("PRODUCTOR", "COMPRADOR"):
+            respuesta = self.client.post(
+                self.url,
+                {"humedad": "12.00"},
+                content_type="application/json",
+                **self._quality_headers(role_code),
+            )
+            self.assertEqual(respuesta.status_code, 403)
+
+    def test_formulario_web_guarda_calidad_del_lote(self):
+        productor_id = self.lote.cosecha.finca.productor_id
+        _iniciar_sesion_productor(self.client, productor_id)
+        session = self.client.session
+        session["rol"] = "PRODUCTOR"
+        session.save()
+
+        respuesta = self.client.post(
+            reverse("lote_calidad", kwargs={"pk": self.lote.pk}),
+            {
+                "humedad": "12.25",
+                "merma": "1.50",
+                "puntaje_taza": "85.00",
+                "perfil_sensorial": "  Chocolate  ",
+                "observaciones": "  Registro web  ",
+            },
+        )
+        self.assertEqual(respuesta.status_code, 302)
+        calidad = CaracteristicasCalidad.objects.get(lote=self.lote)
+        self.assertEqual(calidad.humedad, Decimal("12.25"))
+        self.assertEqual(calidad.perfil_sensorial, "Chocolate")
+
+    def test_formulario_web_rechaza_usuario_sin_permiso(self):
+        _iniciar_sesion_productor(self.client, uuid.uuid4())
+        session = self.client.session
+        session["rol"] = "COMPRADOR"
+        session.save()
+        respuesta = self.client.get(reverse("lote_calidad", kwargs={"pk": self.lote.pk}))
+        self.assertEqual(respuesta.status_code, 403)
+
+    def test_formulario_expone_campos_de_calidad(self):
+        form = CaracteristicasCalidadForm()
+        for campo in ("humedad", "merma", "puntaje_taza", "perfil_sensorial", "observaciones"):
+            self.assertIn(campo, form.fields)
 
     def test_servicio_actualiza_y_puede_limpiar_un_campo_de_texto(self):
         registro = crear_caracteristicas_calidad(
@@ -3478,6 +3589,356 @@ class CaracteristicasCalidadApiTests(TestCase):
         editar_caracteristicas_calidad(registro, observaciones="")
         registro.refresh_from_db()
         self.assertEqual(registro.observaciones, "")
+
+
+class HU16EstadoComercialModelTests(TestCase):
+    """Pruebas del modelo y catálogo de estados comerciales de HU16-ST1."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(
+            codigo="HU16_ST1_MUN",
+            nombre="Mutiscua (HU16-ST1)",
+        )
+        finca = Finca.objects.create(
+            nombre="Finca HU16-ST1",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST1-001",
+            cosecha=cosecha,
+            cantidad=Decimal("25.00"),
+        )
+
+    def test_estado_comercial_inicia_disponible(self):
+        self.assertEqual(
+            self.lote.estado_comercial,
+            Lote.EstadoComercial.DISPONIBLE,
+        )
+        self.assertEqual(
+            self.lote.get_estado_comercial_display(),
+            "Disponible",
+        )
+
+    def test_estado_comercial_expone_los_cinco_estados_validos(self):
+        self.assertEqual(
+            set(Lote.EstadoComercial.values),
+            {"DISPONIBLE", "RESERVADO", "NEGOCIADO", "VENDIDO", "CERRADO"},
+        )
+
+    def test_estado_comercial_rechaza_valores_no_definidos(self):
+        self.lote.estado_comercial = "INEXISTENTE"
+        with self.assertRaises(ValidationError):
+            self.lote.full_clean()
+
+
+class HU16TransicionesEstadoComercialTests(TestCase):
+    """Pruebas de las reglas de transición comercial de HU16-ST4."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(
+            codigo="HU16_ST4_MUN",
+            nombre="Mutiscua (HU16-ST4)",
+        )
+        finca = Finca.objects.create(
+            nombre="Finca HU16-ST4",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST4-001",
+            cosecha=cosecha,
+            cantidad=Decimal("25.00"),
+        )
+
+    def test_permite_avanzar_por_el_flujo_comercial(self):
+        for estado in (
+            Lote.EstadoComercial.RESERVADO,
+            Lote.EstadoComercial.NEGOCIADO,
+            Lote.EstadoComercial.VENDIDO,
+            Lote.EstadoComercial.CERRADO,
+        ):
+            lote = transicionar_estado_comercial(self.lote, estado)
+            self.assertEqual(lote.estado_comercial, estado)
+
+    def test_permite_cancelar_reserva_o_negociacion(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.DISPONIBLE,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.NEGOCIADO,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+        )
+        self.lote.refresh_from_db()
+        self.assertEqual(
+            self.lote.estado_comercial,
+            Lote.EstadoComercial.RESERVADO,
+        )
+
+    def test_rechaza_salto_de_estado_y_reapertura_de_lote_cerrado(self):
+        with self.assertRaises(ValidationError):
+            transicionar_estado_comercial(
+                self.lote,
+                Lote.EstadoComercial.VENDIDO,
+            )
+
+        self.lote.estado_comercial = Lote.EstadoComercial.CERRADO
+        self.lote.save(update_fields=["estado_comercial"])
+        with self.assertRaises(ValidationError):
+            transicionar_estado_comercial(
+                self.lote,
+                Lote.EstadoComercial.DISPONIBLE,
+            )
+
+    def test_rechaza_estado_comercial_invalido(self):
+        with self.assertRaises(ValidationError):
+            transicionar_estado_comercial(self.lote, "INEXISTENTE")
+
+
+class HU16HistorialEstadoComercialTests(TestCase):
+    """Pruebas del historial de cambios de estado comercial de HU16-ST3."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(
+            codigo="HU16_ST3_MUN",
+            nombre="Mutiscua (HU16-ST3)",
+        )
+        finca = Finca.objects.create(
+            nombre="Finca HU16-ST3",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST3-001",
+            cosecha=cosecha,
+            cantidad=Decimal("25.00"),
+        )
+
+    def test_transicion_crea_historial_con_estado_fecha_y_usuario(self):
+        lote = transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+            usuario_id="usuario-hu16",
+            usuario_correo="productor@example.com",
+            motivo="Reserva confirmada por el comprador",
+        )
+
+        historial = HistorialEstadoLote.objects.get(lote=lote)
+        self.assertEqual(historial.estado_anterior, "DISPONIBLE")
+        self.assertEqual(historial.estado_nuevo, "RESERVADO")
+        self.assertEqual(historial.usuario_responsable_id, "usuario-hu16")
+        self.assertEqual(
+            historial.usuario_responsable_correo,
+            "productor@example.com",
+        )
+        self.assertEqual(
+            historial.motivo,
+            "Reserva confirmada por el comprador",
+        )
+        self.assertIsNotNone(historial.creado_en)
+
+    def test_cada_transicion_genera_un_registro_en_orden_inverso(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.NEGOCIADO,
+        )
+
+        historial = list(
+            HistorialEstadoLote.objects.filter(lote=self.lote)
+        )
+        self.assertEqual(len(historial), 2)
+        self.assertEqual(
+            [(registro.estado_anterior, registro.estado_nuevo) for registro in historial],
+            [("RESERVADO", "NEGOCIADO"), ("DISPONIBLE", "RESERVADO")],
+        )
+
+    def test_no_crea_historial_si_no_hay_cambio_real(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.DISPONIBLE,
+        )
+        self.assertFalse(
+            HistorialEstadoLote.objects.filter(lote=self.lote).exists()
+        )
+
+
+class HU16EstadoComercialApiTests(TestCase):
+    """Pruebas del endpoint de consulta de estado comercial de HU16-ST5."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(
+            codigo="HU16_ST5_MUN",
+            nombre="Mutiscua (HU16-ST5)",
+        )
+        finca = Finca.objects.create(
+            nombre="Finca HU16-ST5",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST5-001",
+            cosecha=cosecha,
+            cantidad=Decimal("25.00"),
+        )
+        self.url = reverse("api_lote_detalle", kwargs={"pk": self.lote.pk})
+
+    def test_get_retorna_estado_comercial_y_fecha_de_actualizacion(self):
+        respuesta = self.client.get(self.url)
+
+        self.assertEqual(respuesta.status_code, 200)
+        data = respuesta.json()
+        self.assertEqual(data["estado_comercial"], "DISPONIBLE")
+        self.assertIsNotNone(data["estado_comercial_actualizado_en"])
+        self.assertIsNone(data["ultimo_cambio_estado"])
+
+    def test_get_retorna_ultimo_cambio_y_su_responsable(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+            usuario_id="usuario-api",
+            usuario_correo="comprador@example.com",
+            motivo="Reserva registrada",
+        )
+
+        respuesta = self.client.get(self.url)
+
+        self.assertEqual(respuesta.status_code, 200)
+        data = respuesta.json()
+        self.assertEqual(data["estado_comercial"], "RESERVADO")
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["estado_anterior"],
+            "DISPONIBLE",
+        )
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["estado_nuevo"],
+            "RESERVADO",
+        )
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["usuario_responsable_id"],
+            "usuario-api",
+        )
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["usuario_responsable_correo"],
+            "comprador@example.com",
+        )
+
+    def test_get_lote_inexistente_retorna_404(self):
+        respuesta = self.client.get(
+            reverse("api_lote_detalle", kwargs={"pk": 999999})
+        )
+        self.assertEqual(respuesta.status_code, 404)
+
+
+class HU16PruebasIntegradasEstadoComercialTests(TestCase):
+    """Pruebas integradas de transiciones, historial y consulta de HU16-ST6."""
+
+    def setUp(self):
+        municipio = Municipio.objects.create(
+            codigo="HU16_ST6_MUN",
+            nombre="Mutiscua (HU16-ST6)",
+        )
+        finca = Finca.objects.create(
+            nombre="Finca HU16-ST6",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST6-001",
+            cosecha=cosecha,
+            cantidad=Decimal("25.00"),
+        )
+        self.url = reverse("api_lote_detalle", kwargs={"pk": self.lote.pk})
+
+    def test_transicion_legal_actualiza_estado_y_guarda_historial(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+            usuario_id="usuario-st6",
+            motivo="Reserva confirmada",
+        )
+
+        self.lote.refresh_from_db()
+        historial = HistorialEstadoLote.objects.get(lote=self.lote)
+        self.assertEqual(self.lote.estado_comercial, "RESERVADO")
+        self.assertEqual(historial.estado_anterior, "DISPONIBLE")
+        self.assertEqual(historial.estado_nuevo, "RESERVADO")
+        self.assertEqual(historial.usuario_responsable_id, "usuario-st6")
+
+    def test_transicion_ilegal_rechaza_el_cambio_y_conserva_el_estado(self):
+        with self.assertRaises(ValidationError):
+            transicionar_estado_comercial(
+                self.lote,
+                Lote.EstadoComercial.VENDIDO,
+            )
+
+        self.lote.refresh_from_db()
+        self.assertEqual(self.lote.estado_comercial, "DISPONIBLE")
+        self.assertFalse(
+            HistorialEstadoLote.objects.filter(lote=self.lote).exists()
+        )
+
+    def test_api_consulta_estado_actual_y_ultimo_cambio(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+            usuario_id="usuario-api-st6",
+        )
+
+        respuesta = self.client.get(self.url)
+
+        self.assertEqual(respuesta.status_code, 200)
+        data = respuesta.json()
+        self.assertEqual(data["estado_comercial"], "RESERVADO")
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["estado_nuevo"],
+            "RESERVADO",
+        )
+        self.assertEqual(
+            data["ultimo_cambio_estado"]["usuario_responsable_id"],
+            "usuario-api-st6",
+        )
 
 
 # =============================================================================
@@ -3885,6 +4346,93 @@ class MisLotesViewTests(TestCase):
         self.assertIn(lote_propio, list(response.context["lotes"]))
         mensajes = [str(m) for m in response.context["messages"]]
         self.assertTrue(any("filtro de finca" in m.lower() for m in mensajes))
+
+
+# ==============================================================================
+# HU-12 (SCRUM-16): Registro de Cosechas para controlar la producción de café
+# Subtareas:
+# - SCRUM-136: Crear el modelo y la persistencia de cosechas
+# - SCRUM-137: Desarrollar el servicio o endpoint para registrar cosechas
+# - SCRUM-138: Diseñar el formulario de registro de cosechas
+# - SCRUM-139: Agregar pruebas del registro de cosechas
+# - SCRUM-140: Implementar la validación de finca y variedad contra el catálogo
+# Criterios de Aceptación:
+# 1. La finca y la variedad deben ser válidas.
+# 2. Las cantidades deben ser mayores a cero.
+# 3. Se debe inicializar cantidad_disponible = cantidad_total.
+# ==============================================================================
+
+
+class HU16EstadoComercialWebTests(TestCase):
+    """Pruebas de visualización del estado comercial de HU16-ST2."""
+
+    def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
+        self.client = Client()
+        self.municipio = Municipio.objects.create(
+            codigo="HU16_ST2_MUN",
+            nombre="Mutiscua (HU16-ST2)",
+        )
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca HU16-ST2",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha="2026-11-01",
+            cantidad_total=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="HU16ST2-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("25.00"),
+        )
+        _iniciar_sesion_productor(self.client, self.productor_id)
+
+    def test_listado_muestra_badge_del_estado_comercial(self):
+        respuesta = self.client.get(reverse("mis_lotes"))
+
+        self.assertEqual(respuesta.status_code, 200)
+        contenido = respuesta.content.decode("utf-8")
+        self.assertIn("Estado comercial", contenido)
+        self.assertIn("Disponible", contenido)
+
+    def test_detalle_muestra_estado_comercial_y_fecha(self):
+        respuesta = self.client.get(
+            reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        contenido = respuesta.content.decode("utf-8")
+        self.assertIn("Estado comercial:", contenido)
+        self.assertIn("Disponible", contenido)
+        self.assertIn("Actualizado:", contenido)
+
+    def test_listado_refleja_un_estado_distinto_despues_de_transicion(self):
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.RESERVADO,
+        )
+        transicionar_estado_comercial(
+            self.lote,
+            Lote.EstadoComercial.NEGOCIADO,
+        )
+
+        respuesta = self.client.get(reverse("mis_lotes"))
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn("Negociado", respuesta.content.decode("utf-8"))
 
 
 # ==============================================================================
@@ -4659,7 +5207,7 @@ class TestScrum240ServiciosPublicacionYBitacora(TestCase):
         self.assertFalse(lote_retirado.publicado_en_catalogo)
 
         # La bitácora debe tener 2 eventos: PUBLICAR y DESPUBLICAR
-        historial = BitacoraPublicacionLote.objects.filter(lote=self.lote).order_by("creado_en")
+        historial = BitacoraPublicacionLote.objects.filter(lote=self.lote).order_by("creado_en", "id")
         self.assertEqual(historial.count(), 2)
         ultimo_evento = historial.last()
         self.assertEqual(ultimo_evento.accion, "DESPUBLICAR")
@@ -5845,6 +6393,3674 @@ class ReglasRegistroEtapasHU14ST3ST4Tests(TestCase):
         self.assertEqual(EtapaBeneficio.objects.count(), 1)
 
 
+class FichaDigitalStructureTests(TestCase):
+    """
+    Pruebas unitarias para HU17-ST4 (SCRUM-169): Definir la estructura y campos de la ficha digital.
+    Verifica el contrato de datos formal, la lógica de consolidación y el criterio de aceptación
+    de actualización automática en tiempo real.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-ARB-TEST",
+                nombre="Arboledas",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca La Esperanza",
+            vereda="El Helechal",
+            municipio=self.municipio,
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.865432"),
+            longitud=Decimal("-72.765432"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Castillo Típico",
+            defaults={
+                "especie": "Arábica",
+                "descripcion": "Variedad de alta resistencia y perfil cítrico.",
+                "activo": True,
+            },
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-15",
+            cantidad_total=Decimal("800.00"),
+            cantidad_disponible=Decimal("600.00"),
+            activo=True,
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={
+                "nombre": "Lavado Tradicional",
+                "descripcion": "Fermentación en tanque y lavado con agua de manantial.",
+                "activo": True,
+            },
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={
+                "nombre": "Disponible para Venta",
+                "descripcion": "Lote apto para comercialización.",
+                "activo": True,
+            },
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-ESP-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("200.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_estructura_campos_ficha_digital_completa(self):
+        """
+        SCRUM-169: Verifica que la ficha digital generada contenga todas las secciones,
+        campos y estructuras esperadas por el contrato de datos FichaDigitalSerializer.
+        """
+        ficha = obtener_ficha_consolidada_lote(self.lote)
+
+        # 1. Campos del Lote
+        self.assertEqual(ficha["id"], self.lote.id)
+        self.assertEqual(ficha["codigo"], "LOTE-ESP-001")
+        self.assertEqual(ficha["cantidad_kg"], Decimal("200.00"))
+        self.assertTrue(ficha["activo"])
+        self.assertIsNotNone(ficha["creado_en"])
+
+        # 2. Sección Productor
+        self.assertIn("productor", ficha)
+        self.assertEqual(ficha["productor"]["id"], str(self.productor_uuid))
+        self.assertIn("nombre_completo", ficha["productor"])
+
+        # 3. Sección Finca y Georreferenciación
+        self.assertIn("finca", ficha)
+        self.assertEqual(ficha["finca"]["nombre"], "Finca La Esperanza")
+        self.assertEqual(ficha["finca"]["municipio"], "Arboledas")
+        self.assertEqual(ficha["finca"]["departamento"], "Norte de Santander")
+        self.assertEqual(ficha["finca"]["latitud"], Decimal("7.865432"))
+        self.assertEqual(ficha["finca"]["longitud"], Decimal("-72.765432"))
+        self.assertTrue(ficha["finca"]["tiene_georreferenciacion"])
+
+        # 4. Sección Cosecha
+        self.assertIn("cosecha", ficha)
+        self.assertEqual(ficha["cosecha"]["cantidad_total_cosecha"], Decimal("800.00"))
+
+        # 5. Sección Variedad Botánica
+        self.assertIn("variedad", ficha)
+        self.assertEqual(ficha["variedad"]["nombre"], "Castillo Típico")
+        self.assertEqual(ficha["variedad"]["especie"], "Arábica")
+
+        # 6. Sección Proceso de Beneficio
+        self.assertIn("proceso_beneficio", ficha)
+        self.assertEqual(ficha["proceso_beneficio"]["codigo"], "LAVADO")
+        self.assertEqual(ficha["proceso_beneficio"]["nombre"], "Lavado Tradicional")
+
+        # 7. Sección Estado de Trazabilidad y Comercial
+        self.assertIn("estado_lote", ficha)
+        self.assertEqual(ficha["estado_lote"]["codigo"], "DISPONIBLE")
+        self.assertEqual(ficha["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha["disponible_para_venta"])
+
+        # 8. Metadatos de URL pública y porcentaje de completitud
+        self.assertEqual(ficha["url_publica"], "/trazabilidad/lote/LOTE-ESP-001/")
+        self.assertGreaterEqual(ficha["completitud_porcentaje"], 65)
+
+        # 9. Validación formal con FichaDigitalSerializer
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(
+            serializer.is_valid(),
+            f"El serializador de la ficha digital falló la validación: {serializer.errors}",
+        )
+
+    def test_obtener_ficha_por_codigo_y_por_pk(self):
+        """Verifica que el servicio resuelva el lote indistintamente por instancia, código o PK."""
+        ficha_por_instancia = obtener_ficha_consolidada_lote(self.lote)
+        ficha_por_codigo = obtener_ficha_consolidada_lote("LOTE-ESP-001")
+        ficha_por_pk = obtener_ficha_consolidada_lote(self.lote.pk)
+
+        self.assertEqual(ficha_por_instancia["codigo"], ficha_por_codigo["codigo"])
+        self.assertEqual(ficha_por_codigo["codigo"], ficha_por_pk["codigo"])
+
+    def test_ficha_digital_muestra_caracteristicas_de_calidad_hu15(self):
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            humedad=Decimal("11.50"),
+            merma=Decimal("2.00"),
+            puntaje_taza=Decimal("86.50"),
+            perfil_sensorial="Chocolate y frutos rojos",
+            observaciones="Evaluación de laboratorio",
+        )
+
+        ficha = obtener_ficha_consolidada_lote(self.lote)
+
+        self.assertEqual(ficha["calidad"]["humedad"], Decimal("11.50"))
+        self.assertEqual(ficha["calidad"]["merma"], Decimal("2.00"))
+        self.assertEqual(ficha["calidad"]["puntaje_taza"], Decimal("86.50"))
+        self.assertEqual(ficha["calidad"]["perfil_sensorial"], "Chocolate y frutos rojos")
+
+        respuesta = self.client.get(
+            reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        contenido = respuesta.content.decode()
+        self.assertIn("86.50", contenido)
+        self.assertIn("Chocolate y frutos rojos", contenido)
+
+    def test_actualizacion_automatica_en_tiempo_real(self):
+        """
+        Criterio de aceptación HU-17:
+        'La ficha se actualiza automáticamente al registrarse nueva información del lote'.
+        Al mutar datos del lote o cosecha en la BD, la siguiente consulta refleja los cambios al instante.
+        """
+        # Consulta inicial
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_inicial["cantidad_kg"], Decimal("200.00"))
+
+        # Mutación de información
+        self.lote.cantidad = Decimal("350.00")
+        self.lote.save(update_fields=["cantidad"])
+
+        # Consulta inmediata posterior
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_actualizada["cantidad_kg"], Decimal("350.00"))
+
+    def test_ficha_lote_con_datos_parciales(self):
+        """Verifica que un lote sin georreferenciación ni proceso asignado genere una ficha válida."""
+        finca_sin_coords = Finca.objects.create(
+            nombre="Finca Sin GPS",
+            municipio=self.municipio,
+            productor_id=uuid.uuid4(),
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        cosecha_sin_var = Cosecha.objects.create(
+            finca=finca_sin_coords,
+            fecha_cosecha="2026-10-01",
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+            activo=True,
+        )
+        lote_basico = Lote.objects.create(
+            codigo="LOTE-BASICO-99",
+            cosecha=cosecha_sin_var,
+            cantidad=Decimal("50.00"),
+            proceso_beneficio=None,
+            estado_lote=None,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote_basico)
+        self.assertFalse(ficha["finca"]["tiene_georreferenciacion"])
+        self.assertIsNone(ficha["finca"]["latitud"])
+        self.assertIsNone(ficha["proceso_beneficio"]["id"])
+
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(serializer.is_valid(), f"Errores en ficha parcial: {serializer.errors}")
+
+    def test_lote_inexistente_lanza_validation_error(self):
+        """Verifica que solicitar un lote inexistente arroje ValidationError amigable."""
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote("LOTE-NO-EXISTE-XYZ")
+
+
+# =============================================================================
+# SUITE HU-17 (SCRUM-167): ENDPOINT API REST DE FICHA DIGITAL CONSOLIDADA
+# =============================================================================
+
+
+class FichaDigitalAPITests(TestCase):
+    """
+    Pruebas de integración para el endpoint REST GET /fincas/api/lotes/<codigo>/ficha/ (HU-17 / SCRUM-167).
+    Verifica el acceso público (AllowAny), la estructura del JSON devuelto y el manejo de errores 404/400.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-ARB-API",
+                nombre="Arboledas",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca API Test",
+            vereda="La Cima",
+            municipio=self.municipio,
+            productor_id=uuid.uuid4(),
+            latitud=Decimal("7.123456"),
+            longitud=Decimal("-72.654321"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Caturra",
+            defaults={
+                "especie": "Arábica",
+                "descripcion": "Variedad tradicional.",
+                "activo": True,
+            },
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-20",
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("500.00"),
+            activo=True,
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="HONEY",
+            defaults={
+                "nombre": "Honey / Enmielado",
+                "descripcion": "Secado con mucílago.",
+                "activo": True,
+            },
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={
+                "nombre": "Disponible",
+                "descripcion": "Lote listo.",
+                "activo": True,
+            },
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-API-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("150.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_consulta_exitosa_ficha_digital_api_200_ok(self):
+        """GET /fincas/api/lotes/<codigo>/ficha/ responde 200 OK sin autenticación obligatoria."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["codigo"], "LOTE-API-001")
+        self.assertEqual(data["cantidad_kg"], "150.00")
+        self.assertTrue(data["activo"])
+
+        # Verificación de secciones anidadas
+        self.assertEqual(data["finca"]["nombre"], "Finca API Test")
+        self.assertEqual(data["finca"]["municipio"], "Arboledas")
+        self.assertEqual(data["proceso_beneficio"]["codigo"], "HONEY")
+        self.assertEqual(data["estado_lote"]["codigo"], "DISPONIBLE")
+        self.assertIn("url_publica", data)
+        self.assertIn("completitud_porcentaje", data)
+
+    def test_consulta_exitosa_por_ruta_v1_alternativa(self):
+        """GET /fincas/api/v1/lotes/<codigo>/ficha/ responde igualmente 200 OK."""
+        url = reverse("api_v1_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["codigo"], "LOTE-API-001")
+
+    def test_consulta_lote_inexistente_retorna_404(self):
+        """GET /fincas/api/lotes/<codigo_no_existe>/ficha/ responde 404 NOT FOUND con mensaje JSON."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": "LOTE-FANTASMA-999"})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("error", response.json())
+
+    def test_actualizacion_automatica_reflejada_en_la_api(self):
+        """Verifica que mutaciones previas en la BD se reflejen inmediatamente en la respuesta de la API."""
+        # 1. Primera consulta
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        resp1 = self.client.get(url)
+        self.assertEqual(resp1.json()["cantidad_kg"], "150.00")
+
+        # 2. Modificación de datos en base de datos
+        self.lote.cantidad = Decimal("275.50")
+        self.lote.save(update_fields=["cantidad"])
+
+        # 3. Segunda consulta inmediata
+        resp2 = self.client.get(url)
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.json()["cantidad_kg"], "275.50")
+
+
+# =============================================================================
+# SUITE HU-17 (SCRUM-168): VISTA Y PLANTILLA WEB DE FICHA DIGITAL CONSOLIDADA
+# =============================================================================
+
+
+class FichaDigitalWebTests(TestCase):
+    """
+    Pruebas de la interfaz web para la Ficha Digital Consolidada por Lote (HU-17 / SCRUM-168).
+    Verifica el renderizado de la plantilla HTML5, contenido de secciones y manejo de errores 404 amigable.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-ARB-WEB",
+                nombre="Arboledas",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca Web Test",
+            vereda="El Roble",
+            municipio=self.municipio,
+            productor_id=uuid.uuid4(),
+            latitud=Decimal("7.654321"),
+            longitud=Decimal("-72.123456"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Geisha Especial",
+            defaults={
+                "especie": "Arábica",
+                "descripcion": "Variedad de perfil floral.",
+                "activo": True,
+            },
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-25",
+            cantidad_total=Decimal("400.00"),
+            cantidad_disponible=Decimal("400.00"),
+            activo=True,
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="NATURAL",
+            defaults={
+                "nombre": "Natural / Seco",
+                "descripcion": "Secado en cereza completa.",
+                "activo": True,
+            },
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={
+                "nombre": "Disponible",
+                "descripcion": "Apto para venta.",
+                "activo": True,
+            },
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-WEB-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("120.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_vista_web_ficha_digital_200_ok_y_template(self):
+        """GET /fincas/lotes/<codigo>/ficha/ responde 200 OK y usa templates/fincas/ficha_digital.html."""
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+        self.assertIn("ficha", response.context)
+        self.assertEqual(response.context["ficha"]["codigo"], "LOTE-WEB-001")
+
+        # Contenido renderizado en HTML
+        content = response.content.decode("utf-8")
+        self.assertIn("LOTE-WEB-001", content)
+        self.assertIn("Finca Web Test", content)
+        self.assertIn("Arboledas", content)
+        self.assertIn("Geisha Especial", content)
+
+    def test_vista_web_por_ruta_raiz_trazabilidad(self):
+        """GET /trazabilidad/lote/<codigo>/ responde igualmente 200 OK."""
+        url = reverse("trazabilidad_lote_publica_root", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+
+    def test_vista_web_lote_inexistente_retorna_404_con_template_error(self):
+        """GET /fincas/lotes/<codigo_no_existe>/ficha/ responde 404 y muestra ficha_digital_error.html."""
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": "NO-EXISTE-LOTE-404"})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTemplateUsed(response, "fincas/ficha_digital_error.html")
+        self.assertIn("NO-EXISTE-LOTE-404", response.content.decode("utf-8"))
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-171): VALIDACIÓN DE CONSISTENCIA Y COMPLETITUD DE DATOS
+# ==============================================================================
+
+class FichaDigitalConsistenciaCompletitudTests(TestCase):
+    """
+    Pruebas automatizadas para HU17-ST6 (SCRUM-171): Validar la consistencia y
+    completitud de los datos en la Ficha Digital Consolidada.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+
+        self.finca_completa = Finca.objects.create(
+            nombre="Finca Consistencia",
+            municipio=self.municipio,
+            vereda="Siravita",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.865432"),
+            longitud=Decimal("-72.765432"),
+        )
+        self.finca_sin_gps = Finca.objects.create(
+            nombre="Finca Sin Coordenadas",
+            municipio=self.municipio,
+            vereda="Centro",
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+        )
+
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Caturra",
+            defaults={"especie": "Arábica", "descripcion": "Variedad clásica"},
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="HONEY",
+            defaults={"nombre": "Honey Amarillo", "descripcion": "Secado con mucílago"},
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Lote en venta"},
+        )
+
+        self.cosecha_normal = Cosecha.objects.create(
+            finca=self.finca_completa,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("800.00"),
+        )
+        self.lote_normal = Lote.objects.create(
+            codigo="LOTE-CONSIST-01",
+            cosecha=self.cosecha_normal,
+            cantidad=Decimal("200.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_diagnostico_completitud_lote_base_sin_gps_ni_proceso(self):
+        """Un lote con solo datos base y sin georreferenciación debe tener 40% (Básica) y campos faltantes."""
+        cosecha_base = Cosecha.objects.create(
+            finca=self.finca_sin_gps,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 5),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("500.00"),
+        )
+        lote_base = Lote.objects.create(
+            codigo="LOTE-BASE-01",
+            cosecha=cosecha_base,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=None,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote_base)
+
+        self.assertEqual(ficha["completitud_porcentaje"], 40)
+        self.assertEqual(ficha["nivel_completitud"], "Básica")
+        self.assertEqual(ficha["color_nivel"], "secondary")
+        self.assertTrue(ficha["es_consistente"])
+        self.assertIn("Coordenadas GPS (WGS84) del predio", ficha["campos_faltantes"])
+        self.assertIn("Asignación de proceso de beneficio (Lavado, Honey, Natural)", ficha["campos_faltantes"])
+
+    def test_diagnostico_completitud_lote_con_geo_y_proceso(self):
+        """Un lote con GPS y proceso de beneficio alcanza 65% y Nivel Media."""
+        ficha = obtener_ficha_consolidada_lote(self.lote_normal)
+
+        self.assertEqual(ficha["completitud_porcentaje"], 65)
+        self.assertEqual(ficha["nivel_completitud"], "Media")
+        self.assertEqual(ficha["color_nivel"], "warning")
+        self.assertTrue(ficha["es_consistente"])
+        self.assertIn("Georreferenciación WGS84", ficha["campos_completos"])
+        self.assertIn("Proceso de Beneficio (Honey Amarillo)", ficha["campos_completos"])
+        self.assertIn("Registro de etapas operativas de beneficio (fermentación, secado)", ficha["campos_faltantes"])
+        self.assertIn("Análisis físico y sensorial de calidad SCA", ficha["campos_faltantes"])
+
+    def test_evaluacion_completitud_100_por_ciento(self):
+        """Prueba unitaria de evaluar_consistencia_y_completitud_lote con etapas y calidad simuladas."""
+        etapas_simuladas = [
+            {"etapa": "Despulpado", "duracion_horas": 2},
+            {"etapa": "Fermentación Honey", "duracion_horas": 24},
+        ]
+        calidad_simulada = {
+            "humedad_pct": Decimal("11.5"),
+            "puntaje_sca": Decimal("86.5"),
+            "notas_cata": "Panela, jazmín y frutas amarillas",
+        }
+
+        evaluacion = evaluar_consistencia_y_completitud_lote(
+            lote=self.lote_normal,
+            finca=self.finca_completa,
+            cosecha=self.cosecha_normal,
+            proceso=self.proceso,
+            etapas_beneficio=etapas_simuladas,
+            calidad_info=calidad_simulada,
+        )
+
+        self.assertEqual(evaluacion["porcentaje"], 100)
+        self.assertEqual(evaluacion["nivel"], "Completa")
+        self.assertEqual(evaluacion["color_nivel"], "success")
+        self.assertTrue(evaluacion["es_consistente"])
+        self.assertEqual(len(evaluacion["campos_faltantes"]), 0)
+        self.assertEqual(len(evaluacion["advertencias"]), 0)
+
+    def test_deteccion_inconsistencia_volumenes_cosecha(self):
+        """Detecta inconsistencia cuando cantidad_disponible supera la cantidad_total o el lote tiene volumen <= 0."""
+        # 1. Validación de lote con cantidad <= 0
+        lote_cero = Lote(
+            codigo="LOTE-CERO",
+            cosecha=self.cosecha_normal,
+            cantidad=Decimal("0.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+        )
+        evaluacion_cero = evaluar_consistencia_y_completitud_lote(
+            lote=lote_cero,
+            finca=self.finca_completa,
+            cosecha=self.cosecha_normal,
+            proceso=self.proceso,
+        )
+        self.assertFalse(evaluacion_cero["es_consistente"])
+        self.assertTrue(any("debe ser mayor a cero" in adv for adv in evaluacion_cero["advertencias"]))
+
+        # 2. Validación de cosecha con saldo superior al total
+        cosecha_desfasada = Cosecha(
+            finca=self.finca_completa,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("600.00"),
+        )
+        evaluacion_cosecha = evaluar_consistencia_y_completitud_lote(
+            lote=self.lote_normal,
+            finca=self.finca_completa,
+            cosecha=cosecha_desfasada,
+            proceso=self.proceso,
+        )
+        self.assertFalse(evaluacion_cosecha["es_consistente"])
+        self.assertTrue(any("supera la cantidad total" in adv for adv in evaluacion_cosecha["advertencias"]))
+
+    def test_deteccion_inconsistencia_coordenadas_fuera_de_colombia(self):
+        """Detecta inconsistencia cuando las coordenadas decimales están fuera del territorio nacional."""
+        finca_fuera_pais = Finca.objects.create(
+            nombre="Finca Fuera de Rango",
+            municipio=self.municipio,
+            productor_id=self.productor_uuid,
+            latitud=Decimal("45.000000"),   # Latitud europea/norteamericana
+            longitud=Decimal("10.000000"),  # Fuera de Colombia (-79 a -66.5)
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca_fuera_pais,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("500.00"),
+        )
+        lote = Lote.objects.create(
+            codigo="LOTE-INV-GPS",
+            cosecha=cosecha,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote)
+
+        self.assertFalse(ficha["es_consistente"])
+        self.assertTrue(any("fuera del territorio colombiano" in adv for adv in ficha["advertencias"]))
+
+    def test_diagnostico_consistencia_y_completitud_en_api_rest(self):
+        """Verifica que el endpoint REST exponga el diagnóstico de completitud y consistencia."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote_normal.codigo})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+
+        self.assertIn("nivel_completitud", data)
+        self.assertEqual(data["nivel_completitud"], "Media")
+        self.assertIn("color_nivel", data)
+        self.assertEqual(data["color_nivel"], "warning")
+        self.assertIn("es_consistente", data)
+        self.assertTrue(data["es_consistente"])
+        self.assertIn("advertencias", data)
+        self.assertIn("campos_faltantes", data)
+        self.assertIn("campos_completos", data)
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-172): AUDITORÍA Y BITÁCORA DE LA FICHA DIGITAL
+# ==============================================================================
+
+class FichaDigitalAuditoriaTests(TestCase):
+    """
+    Pruebas automatizadas para HU17-ST7 (SCRUM-172): Registrar auditoría de
+    consultas y cambios en la Ficha Digital Consolidada.
+    """
+
+    def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+
+        self.finca = Finca.objects.create(
+            nombre="Finca Auditoria",
+            municipio=self.municipio,
+            vereda="Siravita",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.865432"),
+            longitud=Decimal("-72.765432"),
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Caturra",
+            defaults={"especie": "Arábica", "descripcion": "Variedad clásica"},
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={"nombre": "Lavado Tradicional", "descripcion": "Beneficio húmedo"},
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Lote en venta"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("800.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-AUDIT-01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("200.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_auditoria_registrada_al_consultar_vista_web(self):
+        """Al visitar la ficha digital en la web, se registra una entrada de CONSULTA_WEB en la bitácora."""
+        conteo_inicial = BitacoraFichaDigital.objects.filter(lote=self.lote).count()
+
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+
+        conteo_final = BitacoraFichaDigital.objects.filter(lote=self.lote).count()
+        self.assertEqual(conteo_final, conteo_inicial + 1)
+
+        auditoria = BitacoraFichaDigital.objects.filter(lote=self.lote).latest("creado_en")
+        self.assertEqual(auditoria.tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_WEB)
+        self.assertEqual(auditoria.usuario_identificador, "Público / Escaneo QR")
+        self.assertGreaterEqual(auditoria.completitud_porcentaje, 65)
+        self.assertTrue(auditoria.es_consistente)
+        self.assertEqual(auditoria.detalles.get("canal"), "web")
+
+    def test_auditoria_registrada_al_consultar_api_rest(self):
+        """Al consultar la ficha vía API REST (ej. app móvil / QR), se registra CONSULTA_API."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+
+        auditoria = BitacoraFichaDigital.objects.filter(
+            lote=self.lote,
+            tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API,
+        ).latest("creado_en")
+        self.assertIsNotNone(auditoria)
+        self.assertEqual(auditoria.detalles.get("canal"), "api_rest")
+
+    def test_auditoria_captura_usuario_en_sesion(self):
+        """Si un usuario autenticado consulta la ficha, se captura su identidad en la bitácora."""
+        _iniciar_sesion_productor(self.client, self.productor_uuid)
+
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+
+        auditoria = BitacoraFichaDigital.objects.filter(lote=self.lote).latest("creado_en")
+        self.assertIn(str(self.productor_uuid), auditoria.usuario_identificador)
+
+    def test_auditoria_captura_ip_y_user_agent(self):
+        """Verifica la persistencia de dirección IP y User-Agent en la auditoría."""
+        url = reverse("api_lote_ficha_digital", kwargs={"codigo": self.lote.codigo})
+        response = self.client.get(
+            url,
+            HTTP_X_FORWARDED_FOR="190.84.120.33",
+            HTTP_USER_AGENT="CaficultoresApp/1.0 (Mobile QR Reader)",
+        )
+        self.assertEqual(response.status_code, 200)
+
+        auditoria = BitacoraFichaDigital.objects.filter(lote=self.lote).latest("creado_en")
+        self.assertEqual(auditoria.ip_address, "190.84.120.33")
+        self.assertEqual(auditoria.user_agent, "CaficultoresApp/1.0 (Mobile QR Reader)")
+
+    def test_servicio_registrar_auditoria_evento_actualizacion(self):
+        """Verifica el registro programático de eventos de actualización de trazabilidad."""
+        registro = registrar_auditoria_ficha_digital(
+            lote=self.lote,
+            tipo_evento=BitacoraFichaDigital.TIPO_ACTUALIZACION,
+            completitud_porcentaje=80,
+            es_consistente=True,
+            detalles={"cambio": "Asignación de etapa de secado"},
+            usuario_identificador="operario_beneficio@pergamo.com",
+        )
+
+        self.assertEqual(registro.tipo_evento, BitacoraFichaDigital.TIPO_ACTUALIZACION)
+        self.assertEqual(registro.usuario_identificador, "operario_beneficio@pergamo.com")
+        self.assertEqual(registro.completitud_porcentaje, 80)
+        self.assertEqual(registro.detalles.get("cambio"), "Asignación de etapa de secado")
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-173): PRUEBAS INTEGRALES DE GENERACIÓN Y ACTUALIZACIÓN (E2E)
+# ==============================================================================
+
+class FichaDigitalGeneracionActualizacionE2ETests(TestCase):
+    """
+    Pruebas integrales de punta a punta (E2E) para HU17-ST8 (SCRUM-173):
+    Validar la generación y actualización automática de la Ficha Digital
+    consolidada ante eventos de ciclo de vida del lote.
+
+    Criterio de Aceptación HU-17 (SCRUM-21):
+    'La ficha se actualiza automáticamente al registrarse nueva información del lote.'
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+
+        self.finca = Finca.objects.create(
+            nombre="Finca Trazabilidad E2E",
+            municipio=self.municipio,
+            vereda="El Porvenir",
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Borbón Rosado",
+            defaults={"especie": "Arábica", "descripcion": "Variedad exótica"},
+        )
+        self.proceso_lavado, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={"nombre": "Lavado Tradicional", "descripcion": "Fermentación estándar"},
+        )
+        self.proceso_natural, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="NATURAL",
+            defaults={"nombre": "Natural Clásico", "descripcion": "Secado en cereza entera"},
+        )
+        self.estado_disponible, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Listo para venta"},
+        )
+        self.estado_vendido, _ = EstadoLote.objects.get_or_create(
+            codigo="VENDIDO",
+            defaults={"nombre": "Vendido", "descripcion": "Lote adjudicado"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 10),
+            cantidad_total=Decimal("1500.00"),
+            cantidad_disponible=Decimal("1500.00"),
+            activo=True,
+        )
+
+    def test_generacion_automatica_inmediata_al_crear_lote_con_servicio(self):
+        """
+        Al registrar un nuevo lote mediante el servicio de negocio, la ficha digital
+        se genera de forma inmediata y automática, estando disponible tanto en API como en Web.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("350.00"),
+            codigo="LOTEE2EAUTO01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        # 1. Consulta directa al servicio de dominio
+        ficha = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha["codigo"], "LOTEE2EAUTO01")
+        self.assertEqual(ficha["cantidad_kg"], Decimal("350.00"))
+        self.assertEqual(ficha["proceso_beneficio"]["codigo"], "LAVADO")
+        self.assertEqual(ficha["url_publica"], "/trazabilidad/lote/LOTEE2EAUTO01/")
+
+        # 2. Consulta inmediata por API REST
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        self.assertEqual(resp_api.status_code, 200)
+        data_api = resp_api.json()
+        self.assertEqual(data_api["codigo"], "LOTEE2EAUTO01")
+        self.assertEqual(data_api["cantidad_kg"], "350.00")
+
+        # 3. Consulta inmediata por interfaz Web HTML
+        url_web = reverse("trazabilidad_lote_publica_root", kwargs={"codigo": lote.codigo})
+        resp_web = self.client.get(url_web)
+        self.assertEqual(resp_web.status_code, 200)
+        self.assertIn("LOTEE2EAUTO01", resp_web.content.decode("utf-8"))
+        self.assertIn("Finca Trazabilidad E2E", resp_web.content.decode("utf-8"))
+
+    def test_actualizacion_automatica_en_tiempo_real_por_mutacion_en_finca(self):
+        """
+        Criterio de Aceptación HU-17:
+        Al mutar datos del predio (georreferenciación GPS), la siguiente consulta
+        a la ficha digital refleja las nuevas coordenadas y eleva el porcentaje de completitud.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("200.00"),
+            codigo="LOTEE2EMUT01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        # Estado inicial: finca sin GPS (completitud base 40 + proceso 15 = 55%)
+        ficha_inicial = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertFalse(ficha_inicial["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(ficha_inicial["completitud_porcentaje"], 55)
+
+        # Mutación en la BD: Se agregan coordenadas GPS WGS84
+        self.finca.latitud = Decimal("7.865432")
+        self.finca.longitud = Decimal("-72.765432")
+        self.finca.save()
+
+        # Consulta inmediata: Reflejo en tiempo real (+10% georreferenciación = 65%)
+        ficha_actualizada = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertTrue(ficha_actualizada["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(ficha_actualizada["finca"]["latitud"], Decimal("7.865432"))
+        self.assertEqual(ficha_actualizada["finca"]["longitud"], Decimal("-72.765432"))
+        self.assertEqual(ficha_actualizada["completitud_porcentaje"], 65)
+
+        # Reflejo inmediato en la API REST pública
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        data_api = resp_api.json()
+        self.assertTrue(data_api["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(data_api["completitud_porcentaje"], 65)
+
+    def test_actualizacion_automatica_en_tiempo_real_por_cambio_de_estado_comercial(self):
+        """
+        Al cambiar el estado del lote de DISPONIBLE a VENDIDO, la ficha digital
+        actualiza automáticamente su estado comercial y disponibilidad para venta.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("300.00"),
+            codigo="LOTEE2EEST01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        ficha_inicial = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha_inicial["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha_inicial["disponible_para_venta"])
+
+        # Mutación de negocio: Lote vendido
+        lote.estado_lote = self.estado_vendido
+        lote.save()
+
+        # Consulta inmediata a la vista web pública
+        url_web = reverse("trazabilidad_lote_publica_root", kwargs={"codigo": lote.codigo})
+        resp_web = self.client.get(url_web)
+        self.assertEqual(resp_web.status_code, 200)
+        self.assertIn("Vendido", resp_web.content.decode("utf-8"))
+
+        # Consulta inmediata a la API
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        data_api = resp_api.json()
+        self.assertEqual(data_api["estado_comercial"], "VENDIDO")
+        self.assertFalse(data_api["disponible_para_venta"])
+
+    def test_actualizacion_automatica_por_reasignacion_de_proceso(self):
+        """
+        Al reasignar el proceso de beneficio del lote (ej. de Lavado a Natural),
+        la ficha digital refleja el nuevo proceso al instante.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("180.00"),
+            codigo="LOTEE2EPROC01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        ficha_lavado = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha_lavado["proceso_beneficio"]["codigo"], "LAVADO")
+
+        # Mutación de proceso a Natural
+        lote.proceso_beneficio = self.proceso_natural
+        lote.save()
+
+        ficha_natural = obtener_ficha_consolidada_lote(lote.codigo)
+        self.assertEqual(ficha_natural["proceso_beneficio"]["codigo"], "NATURAL")
+        self.assertEqual(ficha_natural["proceso_beneficio"]["nombre"], "Natural Clásico")
+
+    def test_ciclo_completo_con_auditoria_y_consistencia(self):
+        """
+        Prueba el ciclo de vida completo: Creación de lote -> Consulta inicial ->
+        Actualización de datos -> Consulta posterior -> Verificación de bitácora cronológica.
+        """
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("500.00"),
+            codigo="LOTEE2EAUD01",
+            proceso_beneficio_id=self.proceso_lavado.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        # 1. Primera consulta por Web
+        url_web = reverse("lote_ficha_digital_web", kwargs={"codigo": lote.codigo})
+        self.client.get(url_web)
+
+        # 2. Mutación en el lote
+        lote.cantidad = Decimal("480.00")
+        lote.save()
+
+        # 3. Segunda consulta por API
+        url_api = reverse("api_lote_ficha_digital", kwargs={"codigo": lote.codigo})
+        resp_api = self.client.get(url_api)
+        self.assertEqual(resp_api.json()["cantidad_kg"], "480.00")
+
+        # 4. Verificación de bitácora
+        auditorias = list(BitacoraFichaDigital.objects.filter(lote=lote).order_by("creado_en", "id"))
+        self.assertEqual(len(auditorias), 2)
+        self.assertEqual(auditorias[0].tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_WEB)
+        self.assertEqual(auditorias[1].tipo_evento, BitacoraFichaDigital.TIPO_CONSULTA_API)
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-170): CONSOLIDACIÓN DE DATOS DEL LOTE (ST5)
+# ==============================================================================
+
+class FichaDigitalConsolidacionDatosTests(TestCase):
+    """
+    Pruebas unitarias y de integración para HU17-ST5 (SCRUM-170):
+    Implementar la lógica de consolidación de datos del lote.
+
+    Verifica la orquestación multientidad en `obtener_ficha_consolidada_lote()`:
+    resolución polimórfica (instancia, código, PK), integración de datos de
+    finca, productor, cosecha, variedad, beneficio, estado y diagnóstico.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca La Consolidación",
+            municipio=self.municipio,
+            vereda="Siravita",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.812345"),
+            longitud=Decimal("-72.712345"),
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Geisha Dorado",
+            defaults={"especie": "Arábica", "descripcion": "Perfil floral y cítrico"},
+        )
+        self.proceso, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="HONEY",
+            defaults={"nombre": "Honey Amarillo", "descripcion": "Despulpado con mucílago"},
+        )
+        self.estado, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible para Venta", "descripcion": "Lote apto"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 5),
+            cantidad_total=Decimal("1200.00"),
+            cantidad_disponible=Decimal("1200.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTECONSOLIDADO01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("400.00"),
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado,
+            activo=True,
+        )
+
+    def test_consolidacion_multientidad_datos_completos(self):
+        """
+        SCRUM-170: Verifica que la función de dominio consolide correctamente
+        la información proveniente de Lote, Finca, Productor, Cosecha,
+        Variedad y Proceso en una sola estructura unificada.
+        """
+        ficha = obtener_ficha_consolidada_lote(self.lote)
+
+        # 1. Validación de campos del lote
+        self.assertEqual(ficha["id"], self.lote.id)
+        self.assertEqual(ficha["codigo"], "LOTECONSOLIDADO01")
+        self.assertEqual(ficha["cantidad_kg"], Decimal("400.00"))
+        self.assertTrue(ficha["activo"])
+
+        # 2. Validación de datos de finca y municipio
+        self.assertEqual(ficha["finca"]["id"], self.finca.id)
+        self.assertEqual(ficha["finca"]["nombre"], "Finca La Consolidación")
+        self.assertEqual(ficha["finca"]["municipio"], "Arboledas")
+        self.assertEqual(ficha["finca"]["departamento"], "Norte de Santander")
+        self.assertTrue(ficha["finca"]["tiene_georreferenciacion"])
+
+        # 3. Validación de cosecha y variedad botánica
+        self.assertEqual(ficha["cosecha"]["id"], self.cosecha.id)
+        self.assertEqual(ficha["cosecha"]["fecha_cosecha"], date(2026, 10, 5))
+        self.assertEqual(ficha["variedad"]["nombre"], "Geisha Dorado")
+        self.assertEqual(ficha["variedad"]["especie"], "Arábica")
+
+        # 4. Validación de proceso de beneficio
+        self.assertEqual(ficha["proceso_beneficio"]["codigo"], "HONEY")
+        self.assertEqual(ficha["proceso_beneficio"]["nombre"], "Honey Amarillo")
+
+        # 5. Validación de disponibilidad comercial y URL pública
+        self.assertEqual(ficha["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha["disponible_para_venta"])
+        self.assertEqual(ficha["url_publica"], "/trazabilidad/lote/LOTECONSOLIDADO01/")
+
+        # 6. Serialización formal con FichaDigitalSerializer
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(serializer.is_valid(), f"Errores en serializador: {serializer.errors}")
+
+    def test_resolucion_polimorfica_por_instancia_codigo_y_pk(self):
+        """
+        SCRUM-170: Comprueba que obtener_ficha_consolidada_lote resuelva
+        el lote indistintamente por instancia de modelo, código alfanumérico o ID numérico.
+        """
+        ficha_por_instancia = obtener_ficha_consolidada_lote(self.lote)
+        ficha_por_codigo = obtener_ficha_consolidada_lote("LOTECONSOLIDADO01")
+        ficha_por_pk_int = obtener_ficha_consolidada_lote(self.lote.pk)
+        ficha_por_pk_str = obtener_ficha_consolidada_lote(str(self.lote.pk))
+
+        self.assertEqual(ficha_por_instancia["id"], self.lote.id)
+        self.assertEqual(ficha_por_codigo["id"], self.lote.id)
+        self.assertEqual(ficha_por_pk_int["id"], self.lote.id)
+        self.assertEqual(ficha_por_pk_str["id"], self.lote.id)
+        self.assertEqual(ficha_por_codigo["codigo"], "LOTECONSOLIDADO01")
+
+    def test_consolidacion_con_lote_parcial(self):
+        """
+        SCRUM-170: Comprueba la consolidación resiliente cuando el lote carece
+        de proceso de beneficio o la finca carece de coordenadas GPS.
+        """
+        finca_sin_gps = Finca.objects.create(
+            nombre="Finca Sin Coordenadas",
+            municipio=self.municipio,
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        cosecha_parcial = Cosecha.objects.create(
+            finca=finca_sin_gps,
+            variedad=None,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("300.00"),
+            cantidad_disponible=Decimal("300.00"),
+            activo=True,
+        )
+        lote_parcial = Lote.objects.create(
+            codigo="LOTEPARCIAL01",
+            cosecha=cosecha_parcial,
+            cantidad=Decimal("100.00"),
+            proceso_beneficio=None,
+            estado_lote=None,
+            activo=True,
+        )
+
+        ficha = obtener_ficha_consolidada_lote(lote_parcial)
+        self.assertFalse(ficha["finca"]["tiene_georreferenciacion"])
+        self.assertIsNone(ficha["finca"]["latitud"])
+        self.assertIsNone(ficha["proceso_beneficio"]["id"])
+        self.assertEqual(ficha["variedad"]["nombre"], "Mezcla tradicional / No especificada")
+
+        serializer = FichaDigitalSerializer(data=ficha)
+        self.assertTrue(serializer.is_valid(), f"Errores en serialización parcial: {serializer.errors}")
+
+    def test_consolidacion_lote_inexistente_lanza_validation_error(self):
+        """
+        SCRUM-170: Comprueba que intentar consolidar un lote inexistente o
+        con identificador no válido dispare una excepción ValidationError amigable.
+        """
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote("LOTEINEXISTENTE999")
+
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote(99999999)
+
+        with self.assertRaises(ValidationError):
+            obtener_ficha_consolidada_lote([])
+
+
+# ==============================================================================
+# SUITE HU-17 (SCRUM-166): MECANISMO DE ACTUALIZACIÓN EN TIEMPO REAL (ST1)
+# ==============================================================================
+
+class FichaDigitalActualizacionTiempoRealTests(TestCase):
+    """
+    Pruebas unitarias y de integración para HU17-ST1 (SCRUM-166):
+    Crear mecanismo de actualización automática en tiempo real.
+
+    Criterio de Aceptación HU-17 (SCRUM-21):
+    'La ficha se actualiza automáticamente al registrarse nueva información del lote.'
+
+    Verifica que la consolidación en tiempo de ejecución garantice cero persistencias
+    desfasadas ante mutaciones de volumen, estado comercial, proceso o finca.
+    """
+
+    def setUp(self):
+        self.productor_uuid = uuid.uuid4()
+        self.municipio = Municipio.objects.filter(nombre__iexact="Arboledas").first()
+        if not self.municipio:
+            self.municipio, _ = Municipio.objects.get_or_create(
+                codigo="54051",
+                defaults={"nombre": "Arboledas", "departamento": "Norte de Santander"},
+            )
+        self.finca = Finca.objects.create(
+            nombre="Finca Tiempo Real",
+            municipio=self.municipio,
+            vereda="El Suspiro",
+            productor_id=self.productor_uuid,
+            latitud=None,
+            longitud=None,
+            activo=True,
+        )
+        self.variedad, _ = VariedadCafe.objects.get_or_create(
+            nombre="Borbón Amarillo",
+            defaults={"especie": "Arábica", "descripcion": "Variedad dulce"},
+        )
+        self.proceso_lavado, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="LAVADO",
+            defaults={"nombre": "Lavado Tradicional", "descripcion": "Fermentación estándar"},
+        )
+        self.proceso_natural, _ = ProcesoBeneficio.objects.get_or_create(
+            codigo="NATURAL",
+            defaults={"nombre": "Natural Clásico", "descripcion": "Secado en cereza"},
+        )
+        self.estado_disponible, _ = EstadoLote.objects.get_or_create(
+            codigo="DISPONIBLE",
+            defaults={"nombre": "Disponible", "descripcion": "Apto para venta"},
+        )
+        self.estado_vendido, _ = EstadoLote.objects.get_or_create(
+            codigo="VENDIDO",
+            defaults={"nombre": "Vendido", "descripcion": "Lote adjudicado"},
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 12),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("1000.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTEREALTIME01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("250.00"),
+            proceso_beneficio=self.proceso_lavado,
+            estado_lote=self.estado_disponible,
+            activo=True,
+        )
+
+    def test_actualizacion_tiempo_real_mutacion_volumen_lote(self):
+        """
+        SCRUM-166: Al actualizar el volumen del lote, la siguiente consulta
+        a la ficha digital refleja el nuevo peso inmediatamente sin desfase temporal.
+        """
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_inicial["cantidad_kg"], Decimal("250.00"))
+
+        # Mutación directa de base de datos
+        self.lote.cantidad = Decimal("310.50")
+        self.lote.save(update_fields=["cantidad"])
+
+        # Reflejo inmediato en la siguiente consulta
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_actualizada["cantidad_kg"], Decimal("310.50"))
+
+    def test_actualizacion_tiempo_real_cambio_estado_disponible_a_vendido(self):
+        """
+        SCRUM-166: Al cambiar el estado de DISPONIBLE a VENDIDO, la ficha digital
+        actualiza automáticamente la disponibilidad comercial y la bandera disponible_para_venta.
+        """
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_inicial["estado_comercial"], "DISPONIBLE")
+        self.assertTrue(ficha_inicial["disponible_para_venta"])
+
+        # Transición de estado comercial
+        self.lote.estado_lote = self.estado_vendido
+        self.lote.save(update_fields=["estado_lote"])
+
+        # Reflejo inmediato
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_actualizada["estado_comercial"], "VENDIDO")
+        self.assertFalse(ficha_actualizada["disponible_para_venta"])
+
+    def test_actualizacion_tiempo_real_mutacion_datos_finca(self):
+        """
+        SCRUM-166: Al agregar coordenadas GPS a la finca asociada, la ficha digital
+        refleja al instante la georreferenciación y eleva la completitud.
+        """
+        ficha_inicial = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertFalse(ficha_inicial["finca"]["tiene_georreferenciacion"])
+
+        # Mutación en la finca
+        self.finca.latitud = Decimal("7.889900")
+        self.finca.longitud = Decimal("-72.778899")
+        self.finca.save(update_fields=["latitud", "longitud"])
+
+        # Reflejo instantáneo
+        ficha_actualizada = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertTrue(ficha_actualizada["finca"]["tiene_georreferenciacion"])
+        self.assertEqual(ficha_actualizada["finca"]["latitud"], Decimal("7.889900"))
+        self.assertEqual(ficha_actualizada["finca"]["longitud"], Decimal("-72.778899"))
+
+    def test_actualizacion_tiempo_real_reasignacion_proceso_beneficio(self):
+        """
+        SCRUM-166: Al reasignar el proceso de beneficio (Lavado -> Natural),
+        la ficha digital refleja el nuevo proceso al instante.
+        """
+        ficha_lavado = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_lavado["proceso_beneficio"]["codigo"], "LAVADO")
+
+        # Reasignación de proceso
+        self.lote.proceso_beneficio = self.proceso_natural
+        self.lote.save(update_fields=["proceso_beneficio"])
+
+        ficha_natural = obtener_ficha_consolidada_lote(self.lote.codigo)
+        self.assertEqual(ficha_natural["proceso_beneficio"]["codigo"], "NATURAL")
+        self.assertEqual(ficha_natural["proceso_beneficio"]["nombre"], "Natural Clásico")
+
+
+# ==============================================================================
+# SUITE HU-18 / SCRUM-175: ESTRUCTURA Y GENERACIÓN DEL IDENTIFICADOR QR POR LOTE
+# ==============================================================================
+
+class CodigoQREstructuraTests(TestCase):
+    """
+    Pruebas unitarias para HU18-ST2 (SCRUM-175):
+    Definir la estructura y generación del identificador QR por lote.
+    """
+
+    def setUp(self):
+        # Usar Municipio precargado respetando los estándares de Café Pérgamo
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.first()
+
+        self.productor_uuid = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Hacienda Santa Bárbara",
+            municipio=self.municipio,
+            vereda="El Suspiro",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.310123"),
+            longitud=Decimal("-72.483120"),
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo Típico", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO", nombre="Lavado Tradicional", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 8, 15),
+            cantidad_total=Decimal("2000.00"),
+            cantidad_disponible=Decimal("1500.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOT-QR-001",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("500.00"),
+            activo=True,
+        )
+
+    def test_generar_identificador_qr_formato_canonico(self):
+        """Verifica que el identificador siga la estructura 'QR-<CODIGO>' y sea único y determinista."""
+        identificador = generar_identificador_qr_lote(self.lote)
+        self.assertEqual(identificador, "QR-LOT-QR-001")
+        self.assertTrue(identificador.startswith(PREFIJO_IDENTIFICADOR_QR))
+        self.assertTrue(validar_estructura_identificador_qr(identificador))
+
+    def test_resolucion_polimorfica_identificador_qr(self):
+        """Verifica que generar_identificador_qr_lote resuelva por instancia Lote, por ID numérico y por código string."""
+        id_por_instancia = generar_identificador_qr_lote(self.lote)
+        id_por_pk = generar_identificador_qr_lote(self.lote.pk)
+        id_por_codigo = generar_identificador_qr_lote("LOT-QR-001")
+        id_por_identificador_previo = generar_identificador_qr_lote("QR-LOT-QR-001")
+
+        self.assertEqual(id_por_instancia, "QR-LOT-QR-001")
+        self.assertEqual(id_por_pk, "QR-LOT-QR-001")
+        self.assertEqual(id_por_codigo, "QR-LOT-QR-001")
+        self.assertEqual(id_por_identificador_previo, "QR-LOT-QR-001")
+
+    def test_validar_estructura_identificador_qr_y_extraccion(self):
+        """Comprueba validación sintáctica de identificadores QR y extracción limpia del código."""
+        self.assertTrue(validar_estructura_identificador_qr("QR-LOT-2026-001"))
+        self.assertTrue(validar_estructura_identificador_qr("QR-ABC_123"))
+        self.assertFalse(validar_estructura_identificador_qr("LOT-2026-001"))  # Falta prefijo
+        self.assertFalse(validar_estructura_identificador_qr("QR-"))  # Vacío
+        self.assertFalse(validar_estructura_identificador_qr("QR-LOT 001"))  # Espacio inválido
+        self.assertFalse(validar_estructura_identificador_qr(""))  # Vacío total
+        self.assertFalse(validar_estructura_identificador_qr(None))
+
+        # Extracción
+        codigo = extraer_codigo_lote_desde_qr("QR-LOT-QR-001")
+        self.assertEqual(codigo, "LOT-QR-001")
+
+        with self.assertRaises(ValidationError):
+            extraer_codigo_lote_desde_qr("INVALID-FORMAT")
+
+    def test_construir_payload_qr_relativo_y_absoluto(self):
+        """Verifica que el payload codificado corresponda a la URL de consulta de la ficha digital."""
+        payload_relativo = construir_payload_qr_lote(self.lote)
+        self.assertEqual(payload_relativo, f"/trazabilidad/lote/{self.lote.codigo}/")
+
+        payload_absoluto = construir_payload_qr_lote(self.lote, base_url="https://cafepergamo.com")
+        self.assertEqual(payload_absoluto, f"https://cafepergamo.com/trazabilidad/lote/{self.lote.codigo}/")
+
+    def test_generar_matriz_qr_png_valido(self):
+        """Comprueba que la generación retorne bytes binarios válidos de una imagen PNG con encabezado mágico."""
+        png_bytes = generar_matriz_qr_lote(self.lote)
+        self.assertIsInstance(png_bytes, bytes)
+        self.assertGreater(len(png_bytes), 100)
+        # Encabezado mágico PNG: 0x89 'P' 'N' 'G' '\r' '\n' 0x1A '\n'
+        self.assertTrue(png_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_generar_qr_base64_data_uri(self):
+        """Verifica que el generador base64 retorne un Data URI válido utilizable en HTML."""
+        data_uri = generar_qr_base64_lote(self.lote)
+        self.assertIsInstance(data_uri, str)
+        self.assertTrue(data_uri.startswith("data:image/png;base64,"))
+
+        # Decodificar y verificar consistencia de bytes
+        b64_content = data_uri.split("data:image/png;base64,")[1]
+        decoded = base64.b64decode(b64_content)
+        self.assertTrue(decoded.startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_obtener_estructura_qr_lote_y_serializador_dto(self):
+        """Verifica que la función orquestadora entregue el DTO completo y pase la validación del serializador DRF."""
+        estructura = obtener_estructura_qr_lote(
+            self.lote,
+            base_url="https://cafepergamo.com",
+            nivel_visibilidad="PUBLICA",
+            incluir_imagen_base64=True,
+        )
+
+        self.assertEqual(estructura["identificador_qr"], "QR-LOT-QR-001")
+        self.assertEqual(estructura["lote_codigo"], "LOT-QR-001")
+        self.assertEqual(estructura["lote_id"], self.lote.id)
+        self.assertEqual(estructura["payload_url"], f"/trazabilidad/lote/{self.lote.codigo}/")
+        self.assertEqual(estructura["url_absoluta"], f"https://cafepergamo.com/trazabilidad/lote/{self.lote.codigo}/")
+        self.assertEqual(estructura["nivel_visibilidad"], "PUBLICA")
+        self.assertEqual(estructura["version_qr"], "1.0")
+        self.assertEqual(estructura["formato"], "PNG")
+        self.assertTrue(estructura["imagen_base64"].startswith("data:image/png;base64,"))
+
+        # Validación formal del serializador DRF
+        serializer = EstructuraCodigoQRSerializer(data=estructura)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        datos_validados = serializer.validated_data
+        self.assertEqual(datos_validados["identificador_qr"], "QR-LOT-QR-001")
+        self.assertEqual(datos_validados["nivel_visibilidad"], "PUBLICA")
+
+    def test_control_visibilidad_opciones_permitidas_y_rechazo_invalidas(self):
+        """Verifica el soporte para niveles PUBLICA y PRIVADA y el rechazo de valores desconocidos."""
+        est_pub = obtener_estructura_qr_lote(self.lote, nivel_visibilidad="PUBLICA", incluir_imagen_base64=False)
+        self.assertEqual(est_pub["nivel_visibilidad"], "PUBLICA")
+
+        est_priv = obtener_estructura_qr_lote(self.lote, nivel_visibilidad="PRIVADA", incluir_imagen_base64=False)
+        self.assertEqual(est_priv["nivel_visibilidad"], "PRIVADA")
+
+        with self.assertRaises(ValidationError) as ctx:
+            obtener_estructura_qr_lote(self.lote, nivel_visibilidad="CONFIDENCIAL")
+        self.assertIn("nivel_visibilidad", ctx.exception.message_dict)
+
+    def test_error_al_solicitar_qr_de_lote_inexistente_o_codigo_vacio(self):
+        """Comprueba captura adecuada de excepciones ante lotes inexistentes o códigos vacíos."""
+        with self.assertRaises(ValidationError):
+            generar_identificador_qr_lote("")
+
+        with self.assertRaises(ValidationError):
+            generar_identificador_qr_lote("   ")
+
+        with self.assertRaises(ValidationError):
+            generar_identificador_qr_lote(999999)  # ID inexistente
+
+
+# ==============================================================================
+# SUITE HU-18 / SCRUM-176: PERSISTIR ASOCIACIÓN ENTRE LOTE Y CÓDIGO QR
+# ==============================================================================
+
+class CodigoQRPersistenciaTests(TestCase):
+    """
+    Pruebas unitarias y de persistencia para HU18-ST5 (SCRUM-176):
+    Persistir la asociación entre lote y código QR.
+
+    Criterios de Aceptación HU-18:
+    1. El QR debe ser único por lote.
+    2. El QR debe respetar el nivel de visibilidad de la información (pública / privada).
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.first()
+
+        self.productor_uuid = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Hacienda El Cedral",
+            municipio=self.municipio,
+            vereda="La Esmeralda",
+            productor_id=self.productor_uuid,
+            latitud=Decimal("7.315000"),
+            longitud=Decimal("-72.485000"),
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Geisha Especial", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="HONEY", nombre="Honey Dorado", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 9, 10),
+            cantidad_total=Decimal("3000.00"),
+            cantidad_disponible=Decimal("2500.00"),
+        )
+        self.lote = Lote(
+            codigo="LOT-QR-P01",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("800.00"),
+            activo=True,
+        )
+        self.lote._skip_auto_qr = True
+        self.lote.save()
+
+    def test_persistencia_asociacion_exitosa_uno_a_uno(self):
+        """Verifica que asociar_codigo_qr_a_lote persista correctamente en fincas_codigo_qr_lote."""
+        qr = asociar_codigo_qr_a_lote(
+            lote_o_id=self.lote,
+            nivel_visibilidad=VISIBILIDAD_QR_PUBLICA,
+        )
+
+        self.assertIsNotNone(qr.id)
+        self.assertEqual(qr.lote, self.lote)
+        self.assertEqual(qr.identificador, "QR-LOT-QR-P01")
+        self.assertEqual(qr.nivel_visibilidad, VISIBILIDAD_QR_PUBLICA)
+        self.assertEqual(qr.payload_url, f"/trazabilidad/lote/{self.lote.codigo}/")
+        self.assertTrue(qr.imagen_base64.startswith("data:image/png;base64,"))
+        self.assertTrue(qr.activo)
+
+        # Propiedades del modelo Lote
+        self.assertTrue(self.lote.tiene_codigo_qr)
+        self.assertEqual(self.lote.identificador_qr, "QR-LOT-QR-P01")
+        self.assertEqual(self.lote.codigo_qr, qr)
+
+    def test_unicidad_estricta_un_solo_qr_por_lote(self):
+        """Criterio de Aceptación 1: Unicidad estricta 1:1 en BD. Intentar crear un segundo QR para el mismo lote es rechazado."""
+        asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+
+        with self.assertRaises((IntegrityError, ValidationError)):
+            CodigoQRLote.objects.create(
+                lote=self.lote,
+                identificador="QR-LOT-OTRO-ID",
+                nivel_visibilidad=VISIBILIDAD_QR_PUBLICA,
+                payload_url=f"/trazabilidad/lote/{self.lote.codigo}/",
+            )
+
+    def test_unicidad_estricta_identificador_no_repetido_en_otros_lotes(self):
+        """Criterio de Aceptación 1: Dos lotes distintos no pueden tener el mismo identificador QR."""
+        asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+
+        lote2 = Lote(
+            codigo="LOT-QR-P02",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("300.00"),
+            activo=True,
+        )
+        lote2._skip_auto_qr = True
+        lote2.save()
+
+        with self.assertRaises((IntegrityError, ValidationError)):
+            CodigoQRLote.objects.create(
+                lote=lote2,
+                identificador="QR-LOT-QR-P01",  # Identificador ya en uso por self.lote
+                nivel_visibilidad=VISIBILIDAD_QR_PUBLICA,
+                payload_url=f"/trazabilidad/lote/{lote2.codigo}/",
+            )
+
+    def test_idempotencia_asociar_codigo_qr(self):
+        """Verifica que invocar asociar_codigo_qr_a_lote múltiples veces no duplica filas y actualiza metadatos."""
+        qr1 = asociar_codigo_qr_a_lote(lote_o_id=self.lote, nivel_visibilidad=VISIBILIDAD_QR_PUBLICA)
+        self.assertEqual(CodigoQRLote.objects.filter(lote=self.lote).count(), 1)
+
+        # Segunda llamada cambiando visibilidad
+        qr2 = asociar_codigo_qr_a_lote(lote_o_id=self.lote, nivel_visibilidad=VISIBILIDAD_QR_PRIVADA)
+        self.assertEqual(CodigoQRLote.objects.filter(lote=self.lote).count(), 1)
+        self.assertEqual(qr1.id, qr2.id)
+        self.assertEqual(qr2.nivel_visibilidad, VISIBILIDAD_QR_PRIVADA)
+
+    def test_actualizar_visibilidad_codigo_qr(self):
+        """Criterio de Aceptación 2: Control de visibilidad pública/privada persistida en BD."""
+        qr = asociar_codigo_qr_a_lote(lote_o_id=self.lote, nivel_visibilidad=VISIBILIDAD_QR_PUBLICA)
+        self.assertEqual(qr.nivel_visibilidad, VISIBILIDAD_QR_PUBLICA)
+
+        # Actualizar a PRIVADA
+        actualizado = actualizar_visibilidad_codigo_qr(lote_o_id=self.lote, nuevo_nivel=VISIBILIDAD_QR_PRIVADA)
+        self.assertEqual(actualizado.nivel_visibilidad, VISIBILIDAD_QR_PRIVADA)
+
+        qr.refresh_from_db()
+        self.assertEqual(qr.nivel_visibilidad, VISIBILIDAD_QR_PRIVADA)
+
+        # Rechazar nivel desconocido
+        with self.assertRaises(ValidationError):
+            actualizar_visibilidad_codigo_qr(lote_o_id=self.lote, nuevo_nivel="SECRETO")
+
+    def test_obtener_codigo_qr_lote_servicio(self):
+        """Verifica la recuperación segura del objeto persistido CodigoQRLote."""
+        self.assertIsNone(obtener_codigo_qr_lote(self.lote))
+
+        qr_creado = asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+        qr_recuperado = obtener_codigo_qr_lote(self.lote)
+
+        self.assertIsNotNone(qr_recuperado)
+        self.assertEqual(qr_recuperado.id, qr_creado.id)
+        self.assertEqual(qr_recuperado.identificador, "QR-LOT-QR-P01")
+
+    def test_eliminacion_en_cascada_al_eliminar_lote(self):
+        """Verifica integridad referencial: al eliminarse el Lote, se elimina en cascada su CodigoQRLote."""
+        qr = asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+        qr_id = qr.id
+        self.assertTrue(CodigoQRLote.objects.filter(id=qr_id).exists())
+
+        self.lote.delete()
+        self.assertFalse(CodigoQRLote.objects.filter(id=qr_id).exists())
+
+
+# ==============================================================================
+# SUITE HU-18 (SCRUM-174): GENERACIÓN AUTOMÁTICA DE QR AL CREAR O ACTUALIZAR (ST1)
+# ==============================================================================
+
+class CodigoQRGeneracionAutomaticaTests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST1 (SCRUM-174):
+    Implementar la generación automática del QR al crear o actualizar lote.
+
+    Criterios de Aceptación y Reglas de Negocio:
+    1. Generación automática e inmediata al crear un lote vía servicio de dominio `crear_lote()`.
+    2. Generación automática transparente en el ciclo de guardado ORM `Lote.save()`.
+    3. Sincronización automática de metadatos (identificador, payload y regeneración de imagen)
+       cuando muta el código del lote.
+    4. Idempotencia y optimización de cómputo: no regenerar la imagen QR si el código no cambió.
+    5. Servicio de actualización `actualizar_lote()` con sincronización transaccional del QR y balance de cosecha.
+    6. Servicio de sincronización `sincronizar_o_generar_qr_lote()` sobre lotes preexistentes sin QR.
+    7. Extensión de `obtener_codigo_qr_lote(..., auto_generar=True)`.
+    8. Consistencia de código generado automáticamente y su identificador QR asociado.
+    9. Exposición del estado del QR en la respuesta de la API `POST /fincas/api/lotes/`.
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca La Trazabilidad QR",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3150"),
+            longitud=Decimal("-72.4800"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo Tambo", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO_AUTO", nombre="Lavado Controlado", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 9, 20),
+            cantidad_total=Decimal("4000.00"),
+            cantidad_disponible=Decimal("3500.00"),
+            activo=True,
+        )
+
+    def test_generacion_automatica_con_servicio_crear_lote(self):
+        """Verifica que crear un lote con el servicio crear_lote genere inmediatamente su código QR."""
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("150.00"),
+            codigo="LOTAUTO01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        self.assertTrue(lote.tiene_codigo_qr)
+        self.assertEqual(lote.identificador_qr, "QR-LOTAUTO01")
+
+        qr = CodigoQRLote.objects.filter(lote=lote).first()
+        self.assertIsNotNone(qr)
+        self.assertEqual(qr.identificador, "QR-LOTAUTO01")
+        self.assertEqual(qr.payload_url, "/trazabilidad/lote/LOTAUTO01/")
+        self.assertEqual(qr.nivel_visibilidad, VISIBILIDAD_QR_PUBLICA)
+        self.assertTrue(qr.imagen_base64.startswith("data:image/png;base64,"))
+        self.assertTrue(qr.activo)
+
+    def test_generacion_automatica_en_guardado_orm(self):
+        """Verifica que Lote.objects.create genere y persista el QR automáticamente en el ciclo de guardado."""
+        lote = Lote.objects.create(
+            codigo="LOTORM02",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("80.00"),
+            activo=True,
+        )
+
+        self.assertTrue(lote.tiene_codigo_qr)
+        self.assertEqual(lote.identificador_qr, "QR-LOTORM02")
+        qr = CodigoQRLote.objects.filter(lote=lote).first()
+        self.assertIsNotNone(qr)
+        self.assertEqual(qr.payload_url, "/trazabilidad/lote/LOTORM02/")
+
+    def test_sincronizacion_automatica_al_mutar_codigo_lote(self):
+        """Verifica que al modificar el código del lote, el QR sincronice su identificador, URL y regenere la imagen."""
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("90.00"),
+            codigo="LOTMUTARA",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        qr_original = lote.codigo_qr
+        imagen_original = qr_original.imagen_base64
+
+        # Mutación del código del lote
+        lote.codigo = "LOTMUTARB"
+        lote.save()
+
+        lote.refresh_from_db()
+        qr_actualizado = CodigoQRLote.objects.get(lote=lote)
+
+        self.assertEqual(qr_actualizado.identificador, "QR-LOTMUTARB")
+        self.assertEqual(qr_actualizado.payload_url, "/trazabilidad/lote/LOTMUTARB/")
+        self.assertTrue(qr_actualizado.imagen_base64.startswith("data:image/png;base64,"))
+        # La imagen se regeneró para codificar el nuevo enlace
+        self.assertNotEqual(qr_actualizado.imagen_base64, imagen_original)
+
+    def test_idempotencia_actualizacion_lote_sin_cambio_codigo(self):
+        """Verifica que modificar atributos del lote sin cambiar el código mantenga la misma imagen y metadatos sin sobrecosto."""
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("110.00"),
+            codigo="LOTIDEMP01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        qr_original = lote.codigo_qr
+        qr_id_original = qr_original.id
+        imagen_original = qr_original.imagen_base64
+
+        # Modificación de atributos que no afectan el código ni el QR
+        lote.cantidad = Decimal("105.00")
+        lote.precio_referencial = Decimal("24500.00")
+        lote.save()
+
+        qr_despues = CodigoQRLote.objects.get(lote=lote)
+        self.assertEqual(qr_despues.id, qr_id_original)
+        self.assertEqual(qr_despues.imagen_base64, imagen_original)
+        self.assertEqual(qr_despues.identificador, "QR-LOTIDEMP01")
+
+    def test_servicio_actualizar_lote_sincroniza_qr_y_ajusta_cosecha(self):
+        """Verifica que el servicio actualizar_lote actualice datos, descuente de cosecha y sincronice el QR."""
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("100.00"),
+            codigo="LOTSRV01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        saldo_antes = Cosecha.objects.get(pk=self.cosecha.pk).cantidad_disponible
+
+        # Aumentar 50 kg y cambiar código
+        lote_actualizado = actualizar_lote(
+            lote_o_id=lote,
+            codigo="LOTSRV02",
+            cantidad=Decimal("150.00"),
+            precio_referencial=Decimal("26000.00"),
+        )
+
+        self.assertEqual(lote_actualizado.codigo, "LOTSRV02")
+        self.assertEqual(lote_actualizado.cantidad, Decimal("150.00"))
+        self.assertEqual(lote_actualizado.precio_referencial, Decimal("26000.00"))
+
+        # Descuento en cosecha
+        self.cosecha.refresh_from_db()
+        self.assertEqual(self.cosecha.cantidad_disponible, saldo_antes - Decimal("50.00"))
+
+        # QR sincronizado
+        qr = CodigoQRLote.objects.get(lote=lote_actualizado)
+        self.assertEqual(qr.identificador, "QR-LOTSRV02")
+        self.assertEqual(qr.payload_url, "/trazabilidad/lote/LOTSRV02/")
+
+    def test_actualizar_lote_validaciones_de_negocio(self):
+        """Verifica que actualizar_lote rechace códigos inválidos, duplicados o cantidades no válidas."""
+        lote1 = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("50.00"),
+            codigo="LOTEVAL01",
+        )
+        crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("50.00"),
+            codigo="LOTEVAL02",
+        )
+
+        # Código duplicado
+        with self.assertRaises(ValidationError):
+            actualizar_lote(lote_o_id=lote1, codigo="LOTEVAL02")
+
+        # Código no alfanumérico
+        with self.assertRaises(ValidationError):
+            actualizar_lote(lote_o_id=lote1, codigo="COD@INVALIDO")
+
+        # Cantidad negativa
+        with self.assertRaises(ValidationError):
+            actualizar_lote(lote_o_id=lote1, cantidad=Decimal("-10.00"))
+
+        # Incremento que supera saldo disponible de la cosecha
+        with self.assertRaises(ValidationError):
+            actualizar_lote(lote_o_id=lote1, cantidad=Decimal("99999.00"))
+
+    def test_sincronizar_o_generar_qr_en_lote_preexistente_sin_qr(self):
+        """Verifica que sincronizar_o_generar_qr_lote genere el QR para lotes existentes que carezcan de él."""
+        lote = Lote(
+            codigo="LOTLEGACY01",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("120.00"),
+            activo=True,
+        )
+        lote._skip_auto_qr = True
+        lote.save()
+
+        self.assertFalse(lote.tiene_codigo_qr)
+        self.assertIsNone(lote.identificador_qr)
+
+        qr_generado = sincronizar_o_generar_qr_lote(lote)
+        self.assertIsNotNone(qr_generado)
+        self.assertEqual(qr_generado.identificador, "QR-LOTLEGACY01")
+        self.assertTrue(lote.tiene_codigo_qr)
+
+    def test_obtener_codigo_qr_lote_con_auto_generar_true(self):
+        """Verifica que obtener_codigo_qr_lote(..., auto_generar=True) cree el QR bajo demanda si falta."""
+        lote = Lote(
+            codigo="LOTONDEMAND01",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            estado_lote=self.estado_disponible,
+            cantidad=Decimal("130.00"),
+            activo=True,
+        )
+        lote._skip_auto_qr = True
+        lote.save()
+
+        self.assertIsNone(obtener_codigo_qr_lote(lote, auto_generar=False))
+
+        qr_creado = obtener_codigo_qr_lote(lote, auto_generar=True)
+        self.assertIsNotNone(qr_creado)
+        self.assertEqual(qr_creado.identificador, "QR-LOTONDEMAND01")
+
+    def test_crear_lote_sin_codigo_genera_qr_consistente_con_codigo_automatico(self):
+        """Verifica que cuando crear_lote autogenera el código del lote, el QR se cree consistente con él."""
+        lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("45.00"),
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        self.assertTrue(lote.codigo.startswith("L"))
+        self.assertTrue(lote.tiene_codigo_qr)
+        self.assertEqual(lote.identificador_qr, f"QR-{lote.codigo}")
+        self.assertEqual(lote.codigo_qr.payload_url, f"/trazabilidad/lote/{lote.codigo}/")
+
+    @patch("fincas.views.Usuario")
+    def test_api_crear_lote_refleja_codigo_qr_generado(self, mock_usuario_model):
+        """Verifica que el endpoint REST POST /fincas/api/lotes/ devuelva tiene_codigo_qr e identificador_qr."""
+        client = Client()
+        productor_id = uuid.uuid4()
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=productor_id)
+
+        finca = Finca.objects.create(
+            nombre="Finca API QR Test",
+            productor_id=productor_id,
+            municipio=self.municipio,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            fecha_cosecha="2026-06-01",
+            cantidad_total=Decimal("200.00"),
+        )
+
+        url_api = reverse("api_lote_crear")
+        response = client.post(
+            url_api,
+            {"cosecha": cosecha.pk, "cantidad": "60.00", "codigo": "LOTAPIQR01"},
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["codigo"], "LOTAPIQR01")
+        self.assertTrue(data.get("tiene_codigo_qr"))
+        self.assertEqual(data.get("identificador_qr"), "QR-LOTAPIQR01")
+
+        lote = Lote.objects.get(codigo="LOTAPIQR01")
+        self.assertTrue(lote.tiene_codigo_qr)
+        self.assertEqual(lote.identificador_qr, "QR-LOTAPIQR01")
+
+
+# ==============================================================================
+# SUITE HU-18 (SCRUM-177): CONSULTA DE FICHA DIGITAL DESDE EL QR (ST3)
+# ==============================================================================
+
+class CodigoQRConsultaFichaTests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST3 (SCRUM-177):
+    Crear la vista o endpoint de consulta de ficha digital desde el QR.
+
+    Criterios de Aceptación y Escenarios:
+    1. Resolución de lote por identificador formal 'QR-<CODIGO>'.
+    2. Resolución polimórfica por código de lote directo.
+    3. Rechazo y manejo de errores ante QR inexistente o inactivo.
+    4. Rechazo ante lote inactivo.
+    5. Soporte en el servicio de dominio `obtener_ficha_consolidada_lote()` por identificador QR.
+    6. Vista Web de Escaneo `GET /trazabilidad/qr/<identificador>/`:
+       - Respuesta 200 OK con plantilla `fincas/ficha_digital.html`.
+       - Indicadores visuales de escaneo QR y renderizado de la imagen Base64.
+       - Registro de auditoría con tipo CONSULTA_WEB y canal 'escaneo_qr'.
+       - Respuesta 404 con plantilla de error ante QR no encontrado.
+    7. Endpoint REST `GET /fincas/api/qr/<identificador>/`:
+       - Respuesta 200 OK con DTO consolidado y nodo `codigo_qr`.
+       - Registro de auditoría con tipo CONSULTA_API y canal 'api_qr'.
+       - Respuesta 404 NOT FOUND ante QR inexistente o inactivo.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Hacienda San Isidro QR",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3120"),
+            longitud=Decimal("-72.4810"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Geisha", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="HONEY_QR", nombre="Honey Amarillo", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 9, 25),
+            cantidad_total=Decimal("5000.00"),
+            cantidad_disponible=Decimal("4800.00"),
+            activo=True,
+        )
+        self.lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("200.00"),
+            codigo="LOTCONSULTA01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        self.qr = self.lote.codigo_qr
+
+    def test_resolver_lote_desde_qr_por_identificador_formal(self):
+        """Verifica que resolver_lote_desde_qr resuelva correctamente por 'QR-<CODIGO>'."""
+        qr_obj, lote_obj = resolver_lote_desde_qr("QR-LOTCONSULTA01")
+        self.assertEqual(qr_obj.pk, self.qr.pk)
+        self.assertEqual(lote_obj.pk, self.lote.pk)
+        self.assertEqual(lote_obj.codigo, "LOTCONSULTA01")
+
+    def test_resolver_lote_desde_qr_por_codigo_directo(self):
+        """Verifica resolución polimórfica si se suministra el código de lote directamente."""
+        qr_obj, lote_obj = resolver_lote_desde_qr("LOTCONSULTA01")
+        self.assertEqual(qr_obj.pk, self.qr.pk)
+        self.assertEqual(lote_obj.pk, self.lote.pk)
+
+    def test_resolver_lote_desde_qr_inexistente_lanza_validation_error(self):
+        """Verifica que resolver_lote_desde_qr lance ValidationError ante QR desconocido."""
+        with self.assertRaises(ValidationError):
+            resolver_lote_desde_qr("QR-INEXISTENTE999")
+
+    def test_resolver_lote_desde_qr_inactivo_lanza_validation_error(self):
+        """Verifica que un código QR inactivo sea rechazado para consulta."""
+        self.qr.activo = False
+        self.qr.save()
+
+        with self.assertRaises(ValidationError):
+            resolver_lote_desde_qr("QR-LOTCONSULTA01")
+
+    def test_resolver_lote_desde_qr_con_lote_inactivo_lanza_validation_error(self):
+        """Verifica que un lote inactivo sea rechazado para consulta desde QR."""
+        self.lote.activo = False
+        self.lote.save()
+
+        with self.assertRaises(ValidationError):
+            resolver_lote_desde_qr("QR-LOTCONSULTA01")
+
+    def test_obtener_ficha_consolidada_lote_por_identificador_qr(self):
+        """Verifica que obtener_ficha_consolidada_lote acepte el identificador QR y retorne la ficha completa."""
+        ficha = obtener_ficha_consolidada_lote("QR-LOTCONSULTA01")
+        self.assertEqual(ficha["codigo"], "LOTCONSULTA01")
+        self.assertEqual(ficha["identificador_qr"], "QR-LOTCONSULTA01")
+        self.assertTrue(ficha["tiene_codigo_qr"])
+        self.assertEqual(ficha["finca"]["nombre"], "Hacienda San Isidro QR")
+
+    def test_vista_web_escanear_qr_exitoso_200_ok_y_template(self):
+        """Verifica que GET /trazabilidad/qr/<identificador>/ responda 200 OK y renderice la ficha digital."""
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": "QR-LOTCONSULTA01"})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+        self.assertTrue(response.context.get("es_escaneo_qr"))
+        self.assertEqual(response.context.get("codigo_qr").identificador, "QR-LOTCONSULTA01")
+        self.assertContains(response, "LOTCONSULTA01")
+        self.assertContains(response, "Hacienda San Isidro QR")
+        self.assertContains(response, "Consulta vía Escaneo QR")
+        self.assertContains(response, "QR Certificado Activo")
+
+    def test_vista_web_escanear_qr_registra_auditoria_en_bitacora(self):
+        """Verifica que el escaneo web registre auditoría en BitacoraFichaDigital con canal escaneo_qr."""
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": "QR-LOTCONSULTA01"})
+        self.client.get(url)
+
+        registro = BitacoraFichaDigital.objects.filter(
+            lote=self.lote, tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_WEB
+        ).order_by("-creado_en").first()
+
+        self.assertIsNotNone(registro)
+        self.assertEqual(registro.usuario_identificador, "Público / Escaneo QR")
+        self.assertEqual(registro.detalles.get("canal"), "escaneo_qr")
+        self.assertEqual(registro.detalles.get("identificador_qr"), "QR-LOTCONSULTA01")
+
+    def test_vista_web_escanear_qr_no_encontrado_responde_404_con_template_error(self):
+        """Verifica que consultar un QR inexistente responda 404 y use ficha_digital_error.html."""
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": "QR-DESCONOCIDO"})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTemplateUsed(response, "fincas/ficha_digital_error.html")
+        self.assertContains(response, "Ficha Digital No Disponible", status_code=404)
+
+    def test_api_consultar_ficha_desde_qr_200_ok_con_datos_completos(self):
+        """Verifica que GET /fincas/api/qr/<identificador>/ responda 200 OK con la ficha y metadatos de QR."""
+        url = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": "QR-LOTCONSULTA01"})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["codigo"], "LOTCONSULTA01")
+        self.assertEqual(data["cantidad_kg"], "200.00")
+        self.assertEqual(data["finca"]["nombre"], "Hacienda San Isidro QR")
+        self.assertEqual(data["variedad"]["nombre"], "Geisha")
+        self.assertEqual(data["proceso_beneficio"]["nombre"], "Honey Amarillo")
+
+        # Metadatos del QR adjuntos en la respuesta API
+        self.assertIn("codigo_qr", data)
+        qr_info = data["codigo_qr"]
+        self.assertEqual(qr_info["identificador"], "QR-LOTCONSULTA01")
+        self.assertEqual(qr_info["payload_url"], "/trazabilidad/lote/LOTCONSULTA01/")
+        self.assertEqual(qr_info["nivel_visibilidad"], VISIBILIDAD_QR_PUBLICA)
+        self.assertTrue(qr_info["activo"])
+        self.assertTrue(qr_info["imagen_base64"].startswith("data:image/png;base64,"))
+
+    def test_api_consultar_ficha_desde_qr_registra_auditoria(self):
+        """Verifica que la consulta API vía QR registre auditoría con tipo CONSULTA_API y canal api_qr."""
+        url = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": "QR-LOTCONSULTA01"})
+        self.client.get(url)
+
+        registro = BitacoraFichaDigital.objects.filter(
+            lote=self.lote, tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API
+        ).order_by("-creado_en").first()
+
+        self.assertIsNotNone(registro)
+        self.assertEqual(registro.detalles.get("canal"), "api_qr")
+        self.assertEqual(registro.detalles.get("identificador_qr"), "QR-LOTCONSULTA01")
+
+    def test_api_consultar_ficha_desde_qr_inactivo_o_inexistente_responde_404(self):
+        """Verifica que consultar un QR inexistente o inactivo por API responda 404 NOT FOUND."""
+        url_inexistente = reverse(
+            "api_consultar_ficha_desde_qr", kwargs={"identificador": "QR-NO-EXISTE-404"}
+        )
+        resp_inexistente = self.client.get(url_inexistente)
+        self.assertEqual(resp_inexistente.status_code, 404)
+        self.assertIn("error", resp_inexistente.json())
+
+        # Inactivar QR y verificar 404
+        self.qr.activo = False
+        self.qr.save()
+        url_inactivo = reverse(
+            "api_consultar_ficha_desde_qr", kwargs={"identificador": "QR-LOTCONSULTA01"}
+        )
+        resp_inactivo = self.client.get(url_inactivo)
+        self.assertEqual(resp_inactivo.status_code, 404)
+        self.assertIn("error", resp_inactivo.json())
+
+
+class CodigoQRControlVisibilidadTests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST4 (SCRUM-178):
+    Aplicar control de visibilidad en la ficha digital accesible desde el QR.
+
+    Criterios de Aceptación y Escenarios:
+    1. Reglas de negocio del servicio `verificar_permiso_visibilidad_qr`:
+       - Visibilidad PUBLICA: Acceso permitido para cualquier usuario anónimo o externo.
+       - Visibilidad PRIVADA: Acceso restringido para anónimos o terceros; irrestricto para el productor dueño.
+    2. Enmascaramiento y sanitización mediante `sanitizar_ficha_por_visibilidad`:
+       - Usuarios no propietarios no visualizan datos sensibles del productor (número y tipo de documento).
+       - El productor propietario conserva los datos completos.
+    3. Vista Web de Escaneo `GET /trazabilidad/qr/<identificador>/`:
+       - Si es PRIVADA y el usuario es anónimo: responde HTTP 403 Forbidden y renderiza `fincas/ficha_digital_privada.html`.
+       - Si es PUBLICA y el usuario es anónimo: responde HTTP 200 OK con `fincas/ficha_digital.html`.
+       - Si es PRIVADA y el usuario es el dueño: responde HTTP 200 OK con `fincas/ficha_digital.html`.
+    4. Endpoint REST `GET /fincas/api/qr/<identificador>/`:
+       - Si es PRIVADA y el usuario es anónimo: responde HTTP 403 Forbidden.
+       - Si es PRIVADA y el usuario es el dueño: responde HTTP 200 OK con datos completos.
+       - Si es PUBLICA: responde HTTP 200 OK con datos enmascarados para anónimos.
+    5. Actualización de Visibilidad REST `POST /fincas/api/lotes/<pk>/qr/visibilidad/`:
+       - Productor dueño actualiza exitosamente a 'PRIVADA' o 'PUBLICA' (200 OK).
+       - Usuario no propietario es rechazado con 403 Forbidden.
+       - Solicitud anónima es rechazada con 401 Unauthorized.
+       - Valor de visibilidad inválido responde 400 Bad Request.
+    6. Conmutación Web `POST /fincas/lotes/<pk>/qr/visibilidad/`:
+       - Productor dueño conmuta visibilidad y es redirigido con mensaje de éxito (302 Redirect).
+       - Tercero o anónimo es rechazado apropiadamente.
+    """
+
+    def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Hacienda El Secreto QR",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3150"),
+            longitud=Decimal("-72.4850"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Bourbon Rosado", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO_VIS", nombre="Lavado Clásico", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("3000.00"),
+            cantidad_disponible=Decimal("2500.00"),
+            activo=True,
+        )
+        self.lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("500.00"),
+            codigo="LOTVISIBILIDAD01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        self.qr = self.lote.codigo_qr
+
+    def test_servicio_verificar_permiso_visibilidad_publica(self):
+        """Verifica que un QR con visibilidad PUBLICA permita el acceso tanto anónimo como de cualquier usuario."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PUBLICA
+        self.qr.save()
+
+        # Usuario anónimo (None)
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, None)
+        self.assertTrue(puede_acceder)
+        self.assertFalse(es_propietario)
+
+        # Tercero
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, self.otro_productor_id)
+        self.assertTrue(puede_acceder)
+        self.assertFalse(es_propietario)
+
+        # Productor propietario
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, self.productor_id)
+        self.assertTrue(puede_acceder)
+        self.assertTrue(es_propietario)
+
+    def test_servicio_verificar_permiso_visibilidad_privada(self):
+        """Verifica que un QR con visibilidad PRIVADA niegue el acceso a anónimos y terceros, pero lo permita al dueño."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        # Anónimo
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, None)
+        self.assertFalse(puede_acceder)
+        self.assertFalse(es_propietario)
+        self.assertIn("Acceso restringido", motivo)
+
+        # Tercero
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, self.otro_productor_id)
+        self.assertFalse(puede_acceder)
+        self.assertFalse(es_propietario)
+
+        # Dueño
+        puede_acceder, es_propietario, motivo = verificar_permiso_visibilidad_qr(self.qr, self.productor_id)
+        self.assertTrue(puede_acceder)
+        self.assertTrue(es_propietario)
+
+    def test_servicio_sanitizar_ficha_por_visibilidad(self):
+        """Verifica que la sanitización oculte datos sensibles de identidad a no propietarios."""
+        ficha_mock = {
+            "id": self.lote.pk,
+            "codigo": self.lote.codigo,
+            "productor": {
+                "nombre": "Juan Pérez",
+                "numero_documento": "1098765432",
+                "tipo_documento": "CC",
+            },
+        }
+        # Caso no propietario: oculta documento
+        sanitizada_publica = sanitizar_ficha_por_visibilidad(ficha_mock, self.qr, es_propietario=False)
+        self.assertIsNone(sanitizada_publica["productor"]["numero_documento"])
+        self.assertIsNone(sanitizada_publica["productor"]["tipo_documento"])
+        self.assertEqual(sanitizada_publica["productor"]["nombre"], "Juan Pérez")
+        self.assertFalse(sanitizada_publica["es_propietario"])
+
+        # Caso propietario: conserva documento
+        sanitizada_propietario = sanitizar_ficha_por_visibilidad(ficha_mock, self.qr, es_propietario=True)
+        self.assertEqual(sanitizada_propietario["productor"]["numero_documento"], "1098765432")
+        self.assertEqual(sanitizada_propietario["productor"]["tipo_documento"], "CC")
+        self.assertTrue(sanitizada_propietario["es_propietario"])
+
+    def test_web_escanear_qr_publica_acceso_anonimo_exitoso(self):
+        """GET /trazabilidad/qr/<identificador>/ con QR PUBLICA responde 200 OK y plantilla ficha_digital.html."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PUBLICA
+        self.qr.save()
+
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+        self.assertContains(response, self.lote.codigo)
+
+    def test_web_escanear_qr_privada_anonimo_retorna_403_pantalla_privada(self):
+        """GET /trazabilidad/qr/<identificador>/ con QR PRIVADA y anónimo responde 403 y plantilla ficha_digital_privada.html."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTemplateUsed(response, "fincas/ficha_digital_privada.html")
+        self.assertContains(response, "Ficha Digital Privada", status_code=403)
+        self.assertContains(response, "visibilidad privada", status_code=403)
+        self.assertContains(response, self.lote.codigo, status_code=403)
+
+    def test_web_escanear_qr_privada_productor_propietario_acceso_exitoso(self):
+        """GET /trazabilidad/qr/<identificador>/ con QR PRIVADA y dueño autenticado responde 200 OK."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("trazabilidad_qr_web", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/ficha_digital.html")
+
+    def test_api_consultar_qr_publica_anonimo_exitoso_y_enmascarado(self):
+        """GET /fincas/api/qr/<identificador>/ con QR PUBLICA responde 200 OK y oculta documento del productor."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PUBLICA
+        self.qr.save()
+
+        url = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["codigo_qr"]["nivel_visibilidad"], "PUBLICA")
+        self.assertFalse(data["es_propietario"])
+
+    def test_api_consultar_qr_privada_anonimo_retorna_403(self):
+        """GET /fincas/api/qr/<identificador>/ con QR PRIVADA responde 403 FORBIDDEN para usuarios no autorizados."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        url = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("error", response.json())
+
+    def test_api_consultar_qr_privada_propietario_retorna_200(self):
+        """GET /fincas/api/qr/<identificador>/ con QR PRIVADA responde 200 OK para el productor propietario."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["es_propietario"])
+        self.assertEqual(data["codigo_qr"]["nivel_visibilidad"], "PRIVADA")
+
+    @patch("fincas.views.Usuario")
+    def test_api_actualizar_visibilidad_propietario_exitoso(self, mock_usuario_model):
+        """POST /fincas/api/lotes/<pk>/qr/visibilidad/ permite al dueño actualizar visibilidad a PRIVADA."""
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.productor_id)
+        url = reverse("api_lote_qr_visibilidad", kwargs={"pk": self.lote.pk})
+        response = self.client.post(
+            url,
+            data=json.dumps({"nivel_visibilidad": "PRIVADA"}),
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.qr.refresh_from_db()
+        self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PRIVADA)
+
+    @patch("fincas.views.Usuario")
+    def test_api_actualizar_visibilidad_no_propietario_retorna_403(self, mock_usuario_model):
+        """POST /fincas/api/lotes/<pk>/qr/visibilidad/ rechaza a productores que no sean dueños con 403 FORBIDDEN."""
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.otro_productor_id)
+        url = reverse("api_lote_qr_visibilidad", kwargs={"pk": self.lote.pk})
+        response = self.client.post(
+            url,
+            data=json.dumps({"nivel_visibilidad": "PRIVADA"}),
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("error", response.json())
+
+    def test_api_actualizar_visibilidad_sin_autenticacion_retorna_401(self):
+        """POST /fincas/api/lotes/<pk>/qr/visibilidad/ rechaza peticiones anónimas con 401 UNAUTHORIZED."""
+        url = reverse("api_lote_qr_visibilidad", kwargs={"pk": self.lote.pk})
+        response = self.client.post(
+            url,
+            data=json.dumps({"nivel_visibilidad": "PRIVADA"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    @patch("fincas.views.Usuario")
+    def test_api_actualizar_visibilidad_valor_invalido_retorna_400(self, mock_usuario_model):
+        """POST /fincas/api/lotes/<pk>/qr/visibilidad/ con nivel inválido retorna 400 BAD REQUEST."""
+        mock_usuario_model.objects.filter.return_value.first.return_value = MagicMock(id=self.productor_id)
+        url = reverse("api_lote_qr_visibilidad", kwargs={"pk": self.lote.pk})
+        response = self.client.post(
+            url,
+            data=json.dumps({"nivel_visibilidad": "CONFIDENCIAL"}),
+            content_type="application/json",
+            **_jwt_bearer_headers(),
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_web_cambiar_visibilidad_conmuta_exitosamente(self):
+        """POST /fincas/lotes/<pk>/qr/visibilidad/ conmuta la visibilidad de PUBLICA a PRIVADA para el dueño."""
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("lote_qr_visibilidad_web", kwargs={"pk": self.lote.pk})
+        response = self.client.post(url, follow=False)
+
+        self.assertEqual(response.status_code, 302)
+        self.qr.refresh_from_db()
+        self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PRIVADA)
+
+
+class CodigoQRVisualizacionGestionTests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST6 (SCRUM-179):
+    Incluir la visualización del QR en la interfaz de gestión del lote.
+
+    Criterios de Aceptación y Escenarios:
+    1. Vista 'Mis Lotes' (mis_lotes_view):
+       - El contexto 'lotes_info' provee el objeto 'codigo_qr' sincronizado.
+       - La tabla de lotes renderiza el badge de visibilidad del QR (Público / Privado).
+       - Se incluye el botón interactivo de apertura de modal QR en la columna de acciones.
+       - El modal del QR renderiza la imagen matricial Base64, el identificador formal y el conmutador de visibilidad.
+    2. Vista de Detalle de Lote (detalle_lote_view):
+       - Se incluye la sección 'seccion-codigo-qr' con la visualización gráfica del código QR.
+       - Se visualiza el identificador formal, el badge de nivel de visibilidad y el enlace directo de escaneo.
+       - Permite conmutar la visibilidad entre Pública y Privada directamente desde la pantalla de detalle.
+    3. Auto-sincronización resiliente:
+       - Si un lote preexistente carece de registro QR en base de datos, las vistas de gestión lo auto-generan
+         al consultarlo para garantizar que el caficultor siempre disponga de su código QR.
+    """
+
+    def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        _iniciar_sesion_productor(self.client, self.productor_id)
+
+        self.finca = Finca.objects.create(
+            nombre="Finca La Esperanza QR",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3110"),
+            longitud=Decimal("-72.4810"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="NATURAL_GEST", nombre="Natural Clásico", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 10),
+            cantidad_total=Decimal("4000.00"),
+            cantidad_disponible=Decimal("3500.00"),
+            activo=True,
+        )
+        self.lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("500.00"),
+            codigo="LOTGESTIONQR01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        self.qr = self.lote.codigo_qr
+
+    def test_mis_lotes_incluye_codigo_qr_en_lotes_info_y_modal(self):
+        """mis_lotes_view incluye el QR en el contexto y renderiza el modal interactivo con imagen y datos."""
+        response = self.client.get(reverse("mis_lotes"))
+        self.assertEqual(response.status_code, 200)
+
+        # Contexto
+        lotes_info = response.context["lotes_info"]
+        self.assertEqual(len(lotes_info), 1)
+        self.assertIsNotNone(lotes_info[0]["codigo_qr"])
+        self.assertEqual(lotes_info[0]["codigo_qr"].identificador, "QR-LOTGESTIONQR01")
+
+        # Renderizado en tabla y modal
+        self.assertContains(response, "LOTGESTIONQR01")
+        self.assertContains(response, f"modalQRLote{self.lote.id}")
+        self.assertContains(response, "QR-LOTGESTIONQR01")
+        self.assertContains(response, "Público")
+        self.assertContains(response, self.qr.imagen_base64)
+
+    def test_mis_lotes_refleja_badge_privado_cuando_qr_es_privado(self):
+        """mis_lotes_view refleja visualmente la visibilidad privada configurada."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        response = self.client.get(reverse("mis_lotes"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Privado")
+        self.assertContains(response, "Hacer Público")
+
+    def test_detalle_lote_incluye_seccion_codigo_qr(self):
+        """detalle_lote_view renderiza la sección 'seccion-codigo-qr' con la imagen y controles del QR."""
+        url = reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "id=\"seccion-codigo-qr\"")
+        self.assertContains(response, "Código QR de Trazabilidad")
+        self.assertContains(response, "QR-LOTGESTIONQR01")
+        self.assertContains(response, "Visibilidad Pública")
+        self.assertContains(response, self.qr.imagen_base64)
+        self.assertContains(response, "Ver Ficha Digital (Escaneo)")
+
+    def test_detalle_lote_auto_sincroniza_qr_si_no_existia(self):
+        """detalle_lote_view genera y asocia el QR automáticamente si no existía previamente."""
+        self.qr.delete()
+        self.lote.refresh_from_db()
+        self.assertFalse(self.lote.tiene_codigo_qr)
+
+        url = reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.lote.refresh_from_db()
+        self.assertTrue(self.lote.tiene_codigo_qr)
+        self.assertEqual(self.lote.codigo_qr.identificador, "QR-LOTGESTIONQR01")
+        self.assertContains(response, "QR-LOTGESTIONQR01")
+
+
+class CodigoQRDescargaImpresionTests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST7 (SCRUM-180):
+    Permitir descargar o imprimir el QR del lote.
+
+    Criterios de Aceptación y Escenarios:
+    1. Servicio 'obtener_bytes_descarga_qr_lote':
+       - Genera bytes de imagen PNG válidos (firma de archivo \x89PNG\r\n\x1a\n).
+       - Retorna nombre de archivo canónico '{identificador}.png'.
+       - Soporta resolución tanto por instancia/ID de Lote como por identificador formal 'QR-<CODIGO>'.
+    2. Endpoint/Vista de Descarga 'descargar_qr_lote_view':
+       - GET /fincas/lotes/<pk>/qr/descargar/ retorna HTTP 200 con Content-Type: image/png y Content-Disposition: attachment.
+       - GET /fincas/qr/<identificador>/descargar/ retorna imagen descargable para acceso público.
+       - Si el QR está configurado como PRIVADA y quien solicita no es el propietario, retorna HTTP 403 Forbidden.
+       - Si quien solicita el QR privado es el productor dueño autenticado, retorna HTTP 200 con la imagen adjunta.
+       - QR inexistente retorna HTTP 404 Not Found.
+    3. Vista de Etiqueta Imprimible 'imprimir_etiqueta_qr_view':
+       - GET /fincas/lotes/<pk>/qr/imprimir/ renderiza plantilla 'fincas/etiqueta_qr_lote.html'.
+       - Incluye los datos esenciales: código de lote, finca, municipio, variedad, proceso, cantidad, QR Base64.
+       - Si el QR es PRIVADO y el usuario es anónimo o externo, retorna HTTP 403 Forbidden.
+       - Si el QR es PRIVADO y el usuario es el dueño autenticado, retorna HTTP 200 con la plantilla de etiqueta.
+    4. Integración en Interfaces:
+       - Modal de 'Mis Lotes' y tarjeta de 'Detalle de Lote' contienen los hipervínculos hacia descargar e imprimir.
+    """
+
+    def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Hacienda El Paraíso QR",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3125"),
+            longitud=Decimal("-72.4820"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Caturra", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="WASHED_ST7", nombre="Lavado Gourmet", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 15),
+            cantidad_total=Decimal("6000.00"),
+            cantidad_disponible=Decimal("5500.00"),
+            activo=True,
+        )
+        self.lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("500.00"),
+            codigo="LOTDESCARGA01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        self.qr = self.lote.codigo_qr
+
+    def test_servicio_obtener_bytes_descarga_qr_lote_valido(self):
+        """El servicio genera bytes PNG con el encabezado estándar y el nombre '{identificador}.png'."""
+        png_bytes, nombre_archivo, qr_obj, lote_obj = obtener_bytes_descarga_qr_lote(self.lote)
+
+        self.assertTrue(png_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(nombre_archivo, f"{self.qr.identificador}.png")
+        self.assertEqual(qr_obj.pk, self.qr.pk)
+        self.assertEqual(lote_obj.pk, self.lote.pk)
+
+    def test_servicio_obtener_bytes_descarga_por_identificador_formal(self):
+        """El servicio resuelve por el identificador formal 'QR-<CODIGO>' y genera la imagen correspondiente."""
+        png_bytes, nombre_archivo, qr_obj, lote_obj = obtener_bytes_descarga_qr_lote(self.qr.identificador)
+
+        self.assertTrue(png_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(nombre_archivo, "QR-LOTDESCARGA01.png")
+        self.assertEqual(lote_obj.codigo, "LOTDESCARGA01")
+
+    def test_vista_descargar_qr_por_pk_exitoso(self):
+        """GET /fincas/lotes/<pk>/qr/descargar/ retorna la imagen PNG con Content-Disposition: attachment."""
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "image/png")
+        self.assertIn('attachment; filename="QR-LOTDESCARGA01.png"', response["Content-Disposition"])
+        self.assertTrue(response.content.startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_vista_descargar_qr_por_identificador_publico_anonimo(self):
+        """GET /fincas/qr/<identificador>/descargar/ permite a usuarios anónimos descargar si es PUBLICA."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PUBLICA
+        self.qr.save()
+
+        url = reverse("qr_descargar_directo", kwargs={"identificador": self.qr.identificador})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "image/png")
+        self.assertIn("attachment;", response["Content-Disposition"])
+
+    def test_vista_descargar_qr_privado_anonimo_retorna_403(self):
+        """GET descarga sobre un lote PRIVADO niega el acceso a anónimos con HTTP 403 Forbidden."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        url = reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_vista_descargar_qr_privado_propietario_retorna_200(self):
+        """GET descarga sobre un lote PRIVADO permite la descarga al productor dueño autenticado."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "image/png")
+
+    def test_vista_descargar_qr_inexistente_retorna_404(self):
+        """Solicitud de descarga con identificador inexistente retorna HTTP 404 Not Found."""
+        url = reverse("qr_descargar_directo", kwargs={"identificador": "QR-INEXISTENTE-999"})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_vista_imprimir_etiqueta_publica_renderiza_plantilla(self):
+        """GET /fincas/lotes/<pk>/qr/imprimir/ renderiza la plantilla 'fincas/etiqueta_qr_lote.html'."""
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/etiqueta_qr_lote.html")
+        self.assertContains(response, self.lote.codigo)
+        self.assertContains(response, self.finca.nombre)
+        self.assertContains(response, self.qr.identificador)
+        self.assertContains(response, "Imprimir Etiqueta")
+        self.assertContains(response, "window.print()")
+
+    def test_vista_imprimir_etiqueta_privada_anonimo_retorna_403(self):
+        """Petición anónima a etiqueta de lote PRIVADO retorna 403 y plantilla privada."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        url = reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTemplateUsed(response, "fincas/ficha_digital_privada.html")
+
+    def test_vista_imprimir_etiqueta_privada_propietario_retorna_200(self):
+        """Productor dueño autenticado puede imprimir la etiqueta de su lote privado (200 OK)."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url = reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk})
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "fincas/etiqueta_qr_lote.html")
+
+    def test_interfaces_incluyen_enlaces_descarga_e_impresion(self):
+        """Tanto 'Mis Lotes' como 'Detalle de Lote' contienen los enlaces a descargar e imprimir."""
+        _iniciar_sesion_productor(self.client, self.productor_id)
+
+        # Mis lotes
+        resp_mis_lotes = self.client.get(reverse("mis_lotes"))
+        self.assertEqual(resp_mis_lotes.status_code, 200)
+        self.assertContains(resp_mis_lotes, reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk}))
+        self.assertContains(resp_mis_lotes, reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk}))
+
+        # Detalle de lote
+        resp_detalle = self.client.get(reverse("lote_detalle", kwargs={"pk": self.lote.pk}))
+        self.assertEqual(resp_detalle.status_code, 200)
+        self.assertContains(resp_detalle, reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk}))
+        self.assertContains(resp_detalle, reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk}))
+
+
+class CodigoQRCertificacionUnicidadE2ETests(TestCase):
+    """
+    Batería de pruebas automatizadas para HU18-ST8 (SCRUM-181):
+    Validar unicidad y correcto funcionamiento del QR por lote.
+
+    Criterios de Aceptación y Certificación:
+    1. Unicidad Estricta (1:1):
+       - Cada lote tiene exactamente un código QR único (restricción OneToOneField).
+       - Intentar crear un segundo registro de CodigoQRLote para el mismo lote lanza IntegrityError.
+       - La unicidad del identificador formal ('QR-<CODIGO>') es absoluta entre distintos lotes.
+       - La función de asociación 'asociar_codigo_qr_a_lote' es estrictamente idempotente.
+    2. Consistencia en Actualización de Lote:
+       - Modificar el código de un lote mantiene la unicidad y actualiza el identificador del QR.
+    3. Ciclo de Vida Completo E2E (Trazabilidad y Funcionamiento):
+       - Fase 1 (Creación): Registro automático del QR al crear el lote.
+       - Fase 2 (Escaneo Web): Consulta pública de la ficha digital y registro en bitácora (CONSULTA_WEB).
+       - Fase 3 (Consulta API REST): Consumo por escáner de aplicación móvil (CONSULTA_API).
+       - Fase 4 (Seguridad y Visibilidad): Conmutación a PRIVADA con bloqueo inmediato a anónimos (403)
+         y acceso irrestricto al productor dueño.
+       - Fase 5 (Descarga Física): Emisión del archivo PNG en alta definición con Content-Disposition.
+       - Fase 6 (Rotulado e Impresión): Renderizado de la etiqueta física con datos de origen y QR.
+       - Fase 7 (Trazabilidad Inmutable): Auditoría íntegra y ordenada en la BitacoraFichaDigital.
+    4. Aislamiento Multi-Productor:
+       - Productores no propietarios no pueden descargar ni consultar lotes privados ajenos.
+    """
+
+    def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="54820",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                latitud=Decimal("7.3100"),
+                longitud=Decimal("-72.4830"),
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.productor_ajeno_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Hacienda San José Certificación",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            latitud=Decimal("7.3130"),
+            longitud=Decimal("-72.4815"),
+            activo=True,
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Typica", especie="Arábica", activo=True
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="HONEY_CERT", nombre="Honey Rojo", activo=True
+        )
+        self.estado_disponible = EstadoLote.objects.create(
+            codigo="DISPONIBLE", nombre="Disponible", activo=True
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 20),
+            cantidad_total=Decimal("8000.00"),
+            cantidad_disponible=Decimal("7500.00"),
+            activo=True,
+        )
+        self.lote = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("500.00"),
+            codigo="LOTCERT01",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+        self.qr = self.lote.codigo_qr
+
+    def test_unicidad_estricta_un_solo_qr_por_lote(self):
+        """Verifica que no sea posible crear un segundo CodigoQRLote para el mismo lote (ValidationError o IntegrityError)."""
+        with self.assertRaises((ValidationError, IntegrityError)):
+            CodigoQRLote.objects.create(
+                lote=self.lote,
+                identificador="QR-DUPLICADO-ERR",
+                payload_url="/trazabilidad/lote/DUPLICADO/",
+                nivel_visibilidad=CodigoQRLote.VISIBILIDAD_PUBLICA,
+            )
+
+    def test_unicidad_identificador_no_duplicable_entre_lotes(self):
+        """Verifica que dos lotes distintos no puedan compartir el mismo identificador de QR (ValidationError o IntegrityError)."""
+        lote2 = crear_lote(
+            cosecha_id=self.cosecha.pk,
+            cantidad=Decimal("200.00"),
+            codigo="LOTCERT02",
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=self.estado_disponible.pk,
+        )
+
+        with self.assertRaises((ValidationError, IntegrityError)):
+            lote2.codigo_qr.identificador = self.qr.identificador
+            lote2.codigo_qr.save()
+
+    def test_asociar_codigo_qr_a_lote_idempotente_garantiza_unicidad(self):
+        """Invocaciones sucesivas de 'asociar_codigo_qr_a_lote' retornan el mismo registro sin duplicar."""
+        qr1 = asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+        qr2 = asociar_codigo_qr_a_lote(lote_o_id=self.lote)
+
+        self.assertEqual(qr1.pk, qr2.pk)
+        self.assertEqual(qr1.identificador, "QR-LOTCERT01")
+        self.assertEqual(CodigoQRLote.objects.filter(lote=self.lote).count(), 1)
+
+    def test_actualizar_codigo_lote_mantiene_consistencia_y_unicidad_qr(self):
+        """Modificar el código del lote actualiza sincronizadamente el identificador del QR conservando unicidad."""
+        lote_actualizado = actualizar_lote(lote_o_id=self.lote, codigo="LOTCERTRENOMBRADO")
+        self.assertEqual(lote_actualizado.codigo, "LOTCERTRENOMBRADO")
+
+        self.qr.refresh_from_db()
+        self.assertEqual(self.qr.identificador, "QR-LOTCERTRENOMBRADO")
+        self.assertEqual(self.qr.payload_url, "/trazabilidad/lote/LOTCERTRENOMBRADO/")
+
+    def test_ciclo_completo_e2e_trazabilidad_qr(self):
+        """
+        Ejecuta el ciclo de vida completo E2E de un código QR:
+        Creación -> Escaneo Web -> Consulta API -> Cambio de Visibilidad -> Descarga PNG -> Impresión -> Auditoría.
+        """
+        # Fase 1: Creación automática verificada
+        self.assertTrue(self.lote.tiene_codigo_qr)
+        self.assertEqual(self.qr.identificador, "QR-LOTCERT01")
+        self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PUBLICA)
+
+        # Fase 2: Escaneo Web Público
+        url_scan_web = reverse("trazabilidad_qr_web", kwargs={"identificador": self.qr.identificador})
+        resp_web = self.client.get(url_scan_web)
+        self.assertEqual(resp_web.status_code, 200)
+        self.assertTemplateUsed(resp_web, "fincas/ficha_digital.html")
+
+        # Fase 3: Consulta API REST Consolidada
+        url_scan_api = reverse("api_consultar_ficha_desde_qr", kwargs={"identificador": self.qr.identificador})
+        resp_api = self.client.get(url_scan_api)
+        self.assertEqual(resp_api.status_code, 200)
+        data_api = resp_api.json()
+        self.assertEqual(data_api["codigo"], "LOTCERT01")
+        self.assertEqual(data_api["codigo_qr"]["identificador"], "QR-LOTCERT01")
+        self.assertFalse(data_api["es_propietario"])
+
+        # Fase 4: Modificación de Visibilidad a PRIVADA
+        _iniciar_sesion_productor(self.client, self.productor_id)
+        url_vis = reverse("lote_qr_visibilidad_web", kwargs={"pk": self.lote.pk})
+        resp_toggle = self.client.post(url_vis, {"nivel_visibilidad": "PRIVADA"}, follow=False)
+        self.assertEqual(resp_toggle.status_code, 302)
+        self.qr.refresh_from_db()
+        self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PRIVADA)
+
+        # Validación de bloqueo a anónimos
+        cliente_anonimo = Client()
+        resp_anon_web = cliente_anonimo.get(url_scan_web)
+        self.assertEqual(resp_anon_web.status_code, 403)
+        self.assertTemplateUsed(resp_anon_web, "fincas/ficha_digital_privada.html")
+
+        resp_anon_api = cliente_anonimo.get(url_scan_api)
+        self.assertEqual(resp_anon_api.status_code, 403)
+
+        # Validación de acceso al productor dueño
+        resp_owner_web = self.client.get(url_scan_web)
+        self.assertEqual(resp_owner_web.status_code, 200)
+
+        # Fase 5: Descarga de imagen física PNG
+        url_descarga = reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk})
+        resp_descarga = self.client.get(url_descarga)
+        self.assertEqual(resp_descarga.status_code, 200)
+        self.assertEqual(resp_descarga["Content-Type"], "image/png")
+        self.assertTrue(resp_descarga.content.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertIn('filename="QR-LOTCERT01.png"', resp_descarga["Content-Disposition"])
+
+        # Fase 6: Rotulado e Impresión de Etiqueta
+        url_imprimir = reverse("lote_qr_imprimir", kwargs={"pk": self.lote.pk})
+        resp_imprimir = self.client.get(url_imprimir)
+        self.assertEqual(resp_imprimir.status_code, 200)
+        self.assertTemplateUsed(resp_imprimir, "fincas/etiqueta_qr_lote.html")
+        self.assertContains(resp_imprimir, "QR-LOTCERT01")
+        self.assertContains(resp_imprimir, "window.print()")
+
+        # Fase 7: Auditoría Inmutable en Bitácora
+        auditorias = BitacoraFichaDigital.objects.filter(lote=self.lote).order_by("creado_en", "id")
+        self.assertTrue(auditorias.filter(tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_WEB).exists())
+        self.assertTrue(auditorias.filter(tipo_evento=BitacoraFichaDigital.TIPO_CONSULTA_API).exists())
+
+    def test_aislamiento_entre_productores_y_seguridad_qr(self):
+        """Un productor ajeno no puede descargar el QR privado ni conmutar la visibilidad de otro lote."""
+        self.qr.nivel_visibilidad = CodigoQRLote.VISIBILIDAD_PRIVADA
+        self.qr.save()
+
+        # Iniciar sesión como otro productor
+        _iniciar_sesion_productor(self.client, self.productor_ajeno_id)
+
+        # Intento de descarga de QR privado ajeno -> 403
+        url_descarga = reverse("lote_qr_descargar", kwargs={"pk": self.lote.pk})
+        resp_descarga = self.client.get(url_descarga)
+        self.assertEqual(resp_descarga.status_code, 403)
+
+        # Intento de cambio de visibilidad de lote ajeno -> Redirigido o error
+        url_vis = reverse("lote_qr_visibilidad_web", kwargs={"pk": self.lote.pk})
+        resp_vis = self.client.post(url_vis, {"nivel_visibilidad": "PUBLICA"})
+        self.assertEqual(resp_vis.status_code, 302)
+
+        self.qr.refresh_from_db()
+        self.assertEqual(self.qr.nivel_visibilidad, CodigoQRLote.VISIBILIDAD_PRIVADA)
+
+
+# ==============================================================================
+# SUBTAREA: HU22-ST5 (SCRUM-264): EXPOSICIÓN DEL ENDPOINT PARA REGISTRAR INTERÉS
+# ==============================================================================
+
+
+class TestScrum264EndpointManifestarInteres(TestCase):
+    """
+    Pruebas unitarias y de integración para la exposición del endpoint
+    y servicio de manifestación de interés sobre lotes (HU-22 / SCRUM-264).
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-TOLEDO-HU22",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+        self.otro_comprador_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Finca La Esperanza HU22",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            vereda="El Diamante",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo HU22",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO_HU22",
+            nombre="Lavado Tradicional",
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-08-10",
+            cantidad_total=Decimal("1200.00"),
+            cantidad_disponible=Decimal("600.00"),
+            activo=True,
+        )
+
+        self.lote_publicado = Lote.objects.create(
+            codigo="LOTE-HU22-001",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("350.00"),
+            precio_referencial=Decimal("18500.00"),
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+
+        self.lote_no_publicado = Lote.objects.create(
+            codigo="LOTE-HU22-002",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("250.00"),
+            publicado_en_catalogo=False,
+            activo=True,
+        )
+
+        self.lote_inactivo = Lote.objects.create(
+            codigo="LOTE-HU22-003",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("100.00"),
+            publicado_en_catalogo=True,
+            activo=False,
+        )
+
+    def _iniciar_sesion(self, usuario_id, correo="comprador@example.com", rol="COMPRADOR"):
+        session = self.client.session
+        session["usuario_id"] = str(usuario_id)
+        session["correo"] = correo
+        session["usuario_email"] = correo
+        session["rol"] = rol
+        session.save()
+
+    def test_servicio_valida_existencia_lote(self):
+        """Lote inexistente arroja ValidationError informando que no existe."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=999999,
+                comprador_id=self.comprador_id,
+            )
+        self.assertIn("lote", ctx.exception.message_dict)
+
+    def test_servicio_valida_lote_inactivo(self):
+        """Lote inactivo no puede recibir manifestaciones de interés."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_inactivo.id,
+                comprador_id=self.comprador_id,
+            )
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertIn("activo", ctx.exception.message_dict["lote"][0])
+
+    def test_servicio_valida_lote_no_publicado_en_catalogo(self):
+        """Lote no publicado en catálogo comercial rechaza manifestación."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_no_publicado.id,
+                comprador_id=self.comprador_id,
+            )
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertIn("catálogo", ctx.exception.message_dict["lote"][0])
+
+    def test_servicio_rechaza_interes_propio_productor(self):
+        """Un productor no puede manifestar interés sobre su propio lote."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_publicado.id,
+                comprador_id=self.productor_id,
+            )
+        self.assertIn("comprador", ctx.exception.message_dict)
+        self.assertIn("propio lote", ctx.exception.message_dict["comprador"][0])
+
+    def test_servicio_valida_cantidad_positiva(self):
+        """Cantidad menor o igual a cero es rechazada."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_publicado.id,
+                comprador_id=self.comprador_id,
+                cantidad_kg=Decimal("0.00"),
+            )
+        self.assertIn("cantidad_kg", ctx.exception.message_dict)
+
+    def test_servicio_valida_cantidad_no_exceda_stock_disponible(self):
+        """Cantidad mayor al stock del lote (350 kg) es rechazada."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_publicado.id,
+                comprador_id=self.comprador_id,
+                cantidad_kg=Decimal("400.00"),
+            )
+        self.assertIn("cantidad_kg", ctx.exception.message_dict)
+        self.assertIn("superar el stock", ctx.exception.message_dict["cantidad_kg"][0])
+
+    def test_servicio_manifestacion_exitosa_por_id_o_codigo(self):
+        """Registro exitoso devuelve el contrato con los datos esperados."""
+        res_id = registrar_manifestacion_interes(
+            lote_id=self.lote_publicado.id,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador@cafes.com",
+            cantidad_kg=Decimal("150.00"),
+            mensaje="Interesado en adquirir muestra inicial.",
+            telefono_contacto="+57 312 0000000",
+        )
+        self.assertEqual(res_id["lote_id"], self.lote_publicado.id)
+        self.assertEqual(res_id["lote_codigo"], "LOTE-HU22-001")
+        self.assertEqual(res_id["estado"], "REGISTRADO")
+        self.assertTrue(res_id["notificado"])
+        self.assertEqual(res_id["cantidad_kg"], "150.00")
+
+        # Prueba con código textual
+        res_cod = registrar_manifestacion_interes(
+            lote_id=self.lote_publicado.codigo,
+            comprador_id=self.comprador_id,
+        )
+        self.assertEqual(res_cod["lote_codigo"], "LOTE-HU22-001")
+
+    def test_vista_web_rechaza_metodo_get(self):
+        """El endpoint web solo admite POST (405 Method Not Allowed)."""
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote_publicado.pk})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 405)
+
+    def test_vista_web_redirecciona_a_login_si_es_anonimo(self):
+        """Usuario no autenticado es redirigido a login al intentar POST tradicional."""
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote_publicado.pk})
+        resp = self.client.post(url, {"cantidad_kg": "50.00"})
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(reverse("login"), resp.url)
+
+    def test_vista_web_ajax_responde_401_si_es_anonimo(self):
+        """Petición asíncrona no autenticada responde 401 Unauthorized JSON."""
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote_publicado.pk})
+        resp = self.client.post(
+            url,
+            data=json.dumps({"cantidad_kg": "50.00"}),
+            content_type="application/json",
+            headers={"x-requested-with": "XMLHttpRequest"},
+        )
+        self.assertEqual(resp.status_code, 401)
+        data = resp.json()
+        self.assertFalse(data["ok"])
+
+    def test_vista_web_post_exitoso_y_redireccion(self):
+        """Comprador autenticado registra interés y es redirigido con mensaje exitoso."""
+        self._iniciar_sesion(self.comprador_id)
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote.pk if hasattr(self, 'lote') else self.lote_publicado.pk})
+        resp = self.client.post(
+            url,
+            {
+                "cantidad_kg": "100.00",
+                "mensaje": "Quiero cotizar este lote",
+                "telefono_contacto": "3001234567",
+                "next": reverse("catalogo"),
+            },
+            follow=False,
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.url, reverse("catalogo"))
+        # Verificar mensaje en el storage de mensajes
+        messages = list(get_messages(resp.wsgi_request))
+        self.assertTrue(any("manifestación de interés" in str(m) for m in messages))
+
+    def test_vista_web_ajax_post_exitoso_retorna_201_json(self):
+        """Petición AJAX autenticada retorna 201 Created con payload estructurado."""
+        self._iniciar_sesion(self.comprador_id)
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote_publicado.pk})
+        resp = self.client.post(
+            url,
+            data=json.dumps({
+                "cantidad_kg": "80.00",
+                "mensaje": "Oferta formal de compra",
+            }),
+            content_type="application/json",
+            headers={"x-requested-with": "XMLHttpRequest"},
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertTrue(data["ok"])
+        self.assertIn("notificada al productor", data["mensaje"])
+        self.assertEqual(data["data"]["cantidad_kg"], "80.00")
+
+    def test_api_rest_interes_requiere_autenticacion(self):
+        """El endpoint REST responde 401 si no hay usuario autenticado."""
+        url = reverse("api_lote_manifestar_interes", kwargs={"pk": self.lote_publicado.pk})
+        resp = self.client.post(url, data={}, content_type="application/json")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_api_rest_interes_post_exitoso(self):
+        """El endpoint REST registra la manifestación y responde 201 Created."""
+        self._iniciar_sesion(self.comprador_id)
+        url = reverse("api_lote_manifestar_interes", kwargs={"pk": self.lote_publicado.pk})
+        payload = {
+            "cantidad_kg": "50.00",
+            "mensaje": "Interés desde API Móvil",
+            "telefono_contacto": "+57 320 1112233",
+        }
+        resp = self.client.post(url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(resp.status_code, 201)
+        body = resp.json()
+        self.assertIn("manifestacion", body)
+        self.assertEqual(body["manifestacion"]["lote_codigo"], "LOTE-HU22-001")
+        self.assertEqual(body["manifestacion"]["estado"], "REGISTRADO")
+
+    def test_api_rest_interes_valida_datos_invalidos(self):
+        """El endpoint REST rechaza datos no válidos con 400 Bad Request."""
+        self._iniciar_sesion(self.comprador_id)
+        url = reverse("api_lote_manifestar_interes", kwargs={"pk": self.lote_publicado.pk})
+        payload = {
+            "cantidad_kg": "-10.00",  # Cantidad negativa
+        }
+        resp = self.client.post(url, data=json.dumps(payload), content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
+
+# ==============================================================================
+# SUBTAREA: HU22-ST6 (SCRUM-265) & HU22-ST7 (SCRUM-266): INTERFAZ Y CONFIRMACIÓN
+# ==============================================================================
+
+
+class TestScrum265InterfazManifestarInteresYCatalogo(TestCase):
+    """
+    Pruebas unitarias de interfaz y feedback UX para la acción de manifestar interés
+    en el catálogo y ficha digital (HU22-ST6 / SCRUM-265, HU22-ST7 / SCRUM-266).
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-TOLEDO-UI",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Finca Vista Hermosa",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            vereda="Santa Inés",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Bourbon Rosado",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="HONEY_UI",
+            nombre="Honey",
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-01",
+            cantidad_total=Decimal("800.00"),
+            cantidad_disponible=Decimal("400.00"),
+            activo=True,
+        )
+
+        self.lote = Lote.objects.create(
+            codigo="LOT-UI-2026-01",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("200.00"),
+            precio_referencial=Decimal("22000.00"),
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+
+        self.calidad = CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            puntaje_taza=Decimal("86.50"),
+            humedad=Decimal("11.20"),
+            perfil_sensorial="Notas florales, jazmín y miel.",
+        )
+
+    def _iniciar_sesion(self, usuario_id, correo="comprador.ui@example.com", rol="COMPRADOR"):
+        session = self.client.session
+        session["usuario_id"] = str(usuario_id)
+        session["correo"] = correo
+        session["usuario_email"] = correo
+        session["rol"] = rol
+        session.save()
+
+    def test_catalogo_muestra_boton_manifestar_interes_en_tarjeta(self):
+        """La grilla del catálogo incluye el botón interactivo de manifestar interés por cada lote."""
+        url = reverse("catalogo")
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Manifestar Interés")
+        self.assertContains(resp, f'id="btn-manifestar-interes-{self.lote.id}"')
+        self.assertContains(resp, 'data-bs-target="#modalManifestarInteres"')
+        self.assertContains(resp, f'data-lote-codigo="{self.lote.codigo}"')
+
+    def test_catalogo_incluye_modal_de_formulario_y_modal_de_confirmacion(self):
+        """La plantilla catalogo.html contiene el modal de captura y el modal de éxito (SCRUM-266)."""
+        url = reverse("catalogo")
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="modalManifestarInteres"')
+        self.assertContains(resp, 'name="cantidad_kg"')
+        self.assertContains(resp, 'name="mensaje"')
+        self.assertContains(resp, 'name="telefono_contacto"')
+        self.assertContains(resp, 'id="modalConfirmacionInteresExito"')
+        self.assertContains(resp, "¡Interés Manifestado con Éxito!")
+
+    def test_ficha_digital_muestra_boton_y_modal_de_interes_comercial(self):
+        """La Ficha Digital pública consolida la sección comercial con botón y modal de interés."""
+        url = reverse("lote_ficha_digital_web", kwargs={"codigo": self.lote.codigo})
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="btn-manifestar-interes-ficha"')
+        self.assertContains(resp, 'id="modalManifestarInteresFicha"')
+        self.assertContains(resp, 'id="modalConfirmacionInteresFichaExito"')
+
+    def test_confirmacion_al_comprador_via_ajax_devuelve_payload_de_exito(self):
+        """El flujo asíncrono responde confirmación estructurada para el feedback del comprador."""
+        self._iniciar_sesion(self.comprador_id)
+        url = reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote.pk})
+        resp = self.client.post(
+            url,
+            data=json.dumps({"cantidad_kg": "50.00", "mensaje": "Solicitud de prueba"}),
+            content_type="application/json",
+            headers={"x-requested-with": "XMLHttpRequest"},
+        )
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertTrue(data["ok"])
+        self.assertIn("notificada al productor", data["mensaje"])
+        self.assertEqual(data["data"]["lote_codigo"], self.lote.codigo)
+
+
+# ==============================================================================
+# SUBTAREA: HU22-ST8 (SCRUM-267): PRUEBAS DEL REGISTRO Y NOTIFICACIÓN DE INTERÉS
+# ==============================================================================
+
+
+class TestScrum267PruebasRegistroYNotificacionInteres(TestCase):
+    """
+    Batería exhaustiva de pruebas unitarias y de integración para certificar el
+    cumplimiento de los criterios de aceptación de la HU-22 (SCRUM-267):
+    - Criterio 1: La manifestación queda registrada.
+    - Criterio 2: La manifestación es notificada al productor/comercializador del lote.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-TOLEDO-ST8",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.comprador_1_id = uuid.uuid4()
+        self.comprador_2_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Finca La Samaria",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            vereda="El Roble",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Geisha Especial",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="ANAEROBICO_ST8",
+            nombre="Anaeróbico 72h",
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-15",
+            cantidad_total=Decimal("1500.00"),
+            cantidad_disponible=Decimal("1500.00"),
+            activo=True,
+        )
+
+        self.lote_a = Lote.objects.create(
+            codigo="LOT-ST8-001",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("500.00"),
+            precio_referencial=Decimal("28000.00"),
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+
+        self.lote_b = Lote.objects.create(
+            codigo="LOT-ST8-002",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("300.00"),
+            precio_referencial=Decimal("25000.00"),
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+
+    def test_criterio1_registro_completo_con_contrato_estructurado(self):
+        """Certifica Criterio 1: La manifestación queda registrada con todos los metadatos necesarios."""
+        resultado = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            comprador_correo="comprador.especial@mercado.com",
+            cantidad_kg=Decimal("250.00"),
+            mensaje="Interés en lote para exportación a Europa.",
+            telefono_contacto="+57 315 8889900",
+        )
+
+        self.assertIsNotNone(resultado["id"])
+        self.assertTrue(resultado["id"].startswith("INT-"))
+        self.assertEqual(resultado["lote_id"], self.lote_a.id)
+        self.assertEqual(resultado["lote_codigo"], "LOT-ST8-001")
+        self.assertEqual(resultado["finca_nombre"], "Finca La Samaria")
+        self.assertEqual(resultado["productor_id"], str(self.productor_id))
+        self.assertEqual(resultado["comprador_id"], str(self.comprador_1_id))
+        self.assertEqual(resultado["comprador_correo"], "comprador.especial@mercado.com")
+        self.assertEqual(resultado["cantidad_kg"], "250.00")
+        self.assertEqual(resultado["mensaje"], "Interés en lote para exportación a Europa.")
+        self.assertEqual(resultado["telefono_contacto"], "+57 315 8889900")
+        self.assertEqual(resultado["estado"], "REGISTRADO")
+
+    def test_criterio2_notificacion_al_productor_del_lote(self):
+        """Certifica Criterio 2: La manifestación es notificada al productor del lote con la información requerida."""
+        resultado = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            comprador_correo="juan.comprador@tostadores.com",
+            cantidad_kg=Decimal("100.00"),
+            mensaje="Propuesta de compra inmediata para despacho en Bucaramanga.",
+            telefono_contacto="+57 301 5554433",
+        )
+
+        # La respuesta confirma que se generó la notificación
+        self.assertTrue(resultado["notificado"])
+        # Incluye los canales de contacto requeridos para la notificación
+        self.assertEqual(resultado["productor_id"], str(self.productor_id))
+        self.assertIn("La Samaria", resultado["productor_nombre"])
+        self.assertEqual(resultado["comprador_correo"], "juan.comprador@tostadores.com")
+
+    def test_multiples_compradores_en_el_mismo_lote_tienen_solicitudes_unicas(self):
+        """Dos compradores distintos registran interés en el mismo lote de forma independiente."""
+        reg1 = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            comprador_correo="comprador1@example.com",
+            cantidad_kg=Decimal("100.00"),
+        )
+        reg2 = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_2_id,
+            comprador_correo="comprador2@example.com",
+            cantidad_kg=Decimal("150.00"),
+        )
+
+        self.assertNotEqual(reg1["id"], reg2["id"])
+        self.assertNotEqual(reg1["comprador_id"], reg2["comprador_id"])
+        self.assertEqual(reg1["lote_codigo"], reg2["lote_codigo"])
+        self.assertEqual(reg1["estado"], "REGISTRADO")
+        self.assertEqual(reg2["estado"], "REGISTRADO")
+
+    def test_un_mismo_comprador_puede_manifestar_interes_en_multiples_lotes(self):
+        """Un comprador registra interés en dos lotes distintos con éxito."""
+        reg_lote_a = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            cantidad_kg=Decimal("200.00"),
+        )
+        reg_lote_b = registrar_manifestacion_interes(
+            lote_id=self.lote_b.id,
+            comprador_id=self.comprador_1_id,
+            cantidad_kg=Decimal("100.00"),
+        )
+
+        self.assertEqual(reg_lote_a["lote_codigo"], "LOT-ST8-001")
+        self.assertEqual(reg_lote_b["lote_codigo"], "LOT-ST8-002")
+        self.assertNotEqual(reg_lote_a["id"], reg_lote_b["id"])
+
+    def test_limite_exacto_de_stock_disponible_es_admitido(self):
+        """Solicitar exactamente todo el stock del lote (500 kg) es válido."""
+        resultado = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            cantidad_kg=Decimal("500.00"),
+        )
+        self.assertEqual(resultado["cantidad_kg"], "500.00")
+
+    def test_superar_stock_incluso_por_un_gramo_es_rechazado(self):
+        """Solicitar 500.01 kg sobre un stock de 500.00 kg es rechazado."""
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(
+                lote_id=self.lote_a.id,
+                comprador_id=self.comprador_1_id,
+                cantidad_kg=Decimal("500.01"),
+            )
+        self.assertIn("cantidad_kg", ctx.exception.message_dict)
+        self.assertIn("superar el stock", ctx.exception.message_dict["cantidad_kg"][0])
+
+    def test_preservacion_de_caracteres_especiales_y_tildes(self):
+        """Mensajes con tildes, signos de puntuación y saltos de línea se preservan íntegros."""
+        mensaje_complejo = "¡Hola! ¿Tienen disponibilidad de envío a Medellín? Interesado en 150 kg café año 2026."
+        resultado = registrar_manifestacion_interes(
+            lote_id=self.lote_a.id,
+            comprador_id=self.comprador_1_id,
+            mensaje=mensaje_complejo,
+        )
+        self.assertEqual(resultado["mensaje"], mensaje_complejo)
+
+    def test_mock_disparo_notificacion_externa(self):
+        """Simula y verifica que el flujo dispara correctamente el mecanismo de notificación."""
+        # Se captura 'ahora_fijo' ANTES de iniciar el parche: con persistencia
+        # real (ManifestacionInteres.full_clean/save), notificado_en debe ser
+        # un datetime de verdad, no el MagicMock que devolvia timezone.now()
+        # si se le llamaba ya con el parche activo pero sin return_value fijo.
+        ahora_fijo = timezone.now()
+        with patch("fincas.services.timezone.now", return_value=ahora_fijo):
+            resultado = registrar_manifestacion_interes(
+                lote_id=self.lote_a.id,
+                comprador_id=self.comprador_1_id,
+                comprador_correo="test@comprador.com",
+            )
+            self.assertEqual(resultado["fecha_registro"], ahora_fijo.isoformat())
+            self.assertTrue(resultado["notificado"])
+
+
 class ManifestacionInteresHU22Tests(TestCase):
     """
     HU-22 (SCRUM-231): Manifestar interés sobre un lote específico.
@@ -5888,7 +10104,7 @@ class ManifestacionInteresHU22Tests(TestCase):
 
     def _datos(self, **extra):
         datos = {
-            "lote_o_id": self.lote,
+            "lote_id": self.lote,
             "comprador_id": self.comprador_id,
             "comprador_correo": "comprador@example.com",
             "cantidad_kg": "20.00",
@@ -5929,7 +10145,7 @@ class ManifestacionInteresHU22Tests(TestCase):
         self.assertEqual(resultado["estado"], ManifestacionInteres.EstadoManifestacion.REGISTRADO)
 
     def test_acepta_identificar_el_lote_por_codigo_en_lugar_del_objeto(self):
-        resultado = registrar_manifestacion_interes(**self._datos(lote_o_id="LOTEHU22"))
+        resultado = registrar_manifestacion_interes(**self._datos(lote_id="LOTEHU22"))
         self.assertEqual(resultado["lote_id"], self.lote.pk)
 
     def test_la_cantidad_de_interes_es_opcional(self):
@@ -5957,7 +10173,7 @@ class ManifestacionInteresHU22Tests(TestCase):
         otro_lote = Lote.objects.create(
             codigo="LOTEAJENO", cosecha=otra_cosecha, cantidad=Decimal("50.00"), publicado_en_catalogo=True
         )
-        registrar_manifestacion_interes(**self._datos(lote_o_id=otro_lote, comprador_id=uuid.uuid4()))
+        registrar_manifestacion_interes(**self._datos(lote_id=otro_lote, comprador_id=uuid.uuid4()))
 
         recibidas = listar_manifestaciones_interes_productor(productor_id=self.productor_id)
         self.assertEqual(recibidas.count(), 1)
@@ -5996,7 +10212,7 @@ class ManifestacionInteresHU22Tests(TestCase):
 
     def test_rechaza_lote_inexistente(self):
         with self.assertRaises(ValidationError) as ctx:
-            registrar_manifestacion_interes(**self._datos(lote_o_id=999999))
+            registrar_manifestacion_interes(**self._datos(lote_id=999999))
         self.assertIn("lote", ctx.exception.message_dict)
         self.assertEqual(ManifestacionInteres.objects.count(), 0)
 
@@ -6170,7 +10386,7 @@ class RestriccionRolComercioHU22Tests(TestCase):
     def test_comprador_si_puede_manifestar_interes(self):
         _iniciar_sesion_comprador(self.client)
         response = self.client.post(
-            reverse("lote_manifestar_interes", kwargs={"pk": self.lote.pk}),
+            reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote.pk}),
             {"mensaje": "Interesado en este lote"},
         )
         self.assertEqual(response.status_code, 302)
@@ -6182,7 +10398,7 @@ class RestriccionRolComercioHU22Tests(TestCase):
     def test_productor_no_puede_manifestar_interes(self):
         _iniciar_sesion_productor(self.client)
         response = self.client.post(
-            reverse("lote_manifestar_interes", kwargs={"pk": self.lote.pk}),
+            reverse("lote_manifestar_interes_web", kwargs={"pk": self.lote.pk}),
             {"mensaje": "Interesado en este lote"},
         )
         self.assertEqual(response.status_code, 302)
@@ -6224,7 +10440,7 @@ class PanelManifestacionesInteresProductorHU22Tests(TestCase):
       productor que inicio sesion, nunca las de otro productor.
     - Marcar una manifestacion como vista funciona de verdad (POST real) y
       queda reflejado tanto en el detalle como en el contador de "sin ver".
-    - El boton "Me interesa" del catalogo ahora se oculta para quien no
+    - El boton "Manifestar Interés" del catalogo ahora se oculta para quien no
       tiene el permiso 'manifestaciones_interes.crear' (p.ej. un productor
       autenticado), no solo para los anonimos.
     """
@@ -6299,7 +10515,7 @@ class PanelManifestacionesInteresProductorHU22Tests(TestCase):
     def test_productor_ve_la_manifestacion_real_que_le_mandaron(self):
         comprador_id = uuid.uuid4()
         registrar_manifestacion_interes(
-            lote_o_id=self.lote.pk,
+            lote_id=self.lote.pk,
             comprador_id=comprador_id,
             comprador_correo="comprador.panel@example.com",
             mensaje="Quiero este cafe",
@@ -6316,7 +10532,7 @@ class PanelManifestacionesInteresProductorHU22Tests(TestCase):
 
     def test_productor_no_ve_manifestaciones_de_lotes_ajenos(self):
         registrar_manifestacion_interes(
-            lote_o_id=self.lote_ajeno.pk,
+            lote_id=self.lote_ajeno.pk,
             comprador_id=uuid.uuid4(),
             comprador_correo="otro.comprador@example.com",
         )
@@ -6334,7 +10550,7 @@ class PanelManifestacionesInteresProductorHU22Tests(TestCase):
 
     def test_contador_de_sin_ver_aparece_en_mis_lotes(self):
         registrar_manifestacion_interes(
-            lote_o_id=self.lote.pk,
+            lote_id=self.lote.pk,
             comprador_id=uuid.uuid4(),
             comprador_correo="contador@example.com",
         )
@@ -6346,7 +10562,7 @@ class PanelManifestacionesInteresProductorHU22Tests(TestCase):
 
     def test_productor_puede_marcar_su_manifestacion_como_vista(self):
         registrar_manifestacion_interes(
-            lote_o_id=self.lote.pk,
+            lote_id=self.lote.pk,
             comprador_id=uuid.uuid4(),
             comprador_correo="marcar@example.com",
         )
@@ -6366,7 +10582,7 @@ class PanelManifestacionesInteresProductorHU22Tests(TestCase):
 
     def test_otro_productor_no_puede_marcar_como_vista_una_manifestacion_ajena(self):
         registrar_manifestacion_interes(
-            lote_o_id=self.lote.pk,
+            lote_id=self.lote.pk,
             comprador_id=uuid.uuid4(),
             comprador_correo="ajena@example.com",
         )
@@ -6384,7 +10600,7 @@ class PanelManifestacionesInteresProductorHU22Tests(TestCase):
 
     def test_marcar_como_vista_rechaza_metodo_get(self):
         registrar_manifestacion_interes(
-            lote_o_id=self.lote.pk,
+            lote_id=self.lote.pk,
             comprador_id=uuid.uuid4(),
             comprador_correo="getmetodo@example.com",
         )
@@ -6398,16 +10614,16 @@ class PanelManifestacionesInteresProductorHU22Tests(TestCase):
         )
         self.assertEqual(respuesta.status_code, 405)
 
-    # ------------------------ "Me interesa" ahora oculto tambien para el productor ------------------------
+    # ------------------------ "Manifestar Interés" ahora oculto tambien para el productor ------------------------
 
     def test_boton_me_interesa_oculto_para_productor_en_el_catalogo(self):
         _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
         respuesta = self.client.get(reverse("catalogo"))
         self.assertEqual(respuesta.status_code, 200)
-        self.assertNotContains(respuesta, "Me interesa")
+        self.assertNotContains(respuesta, "Manifestar Interés")
 
     def test_boton_me_interesa_visible_para_comprador_en_el_catalogo(self):
         _iniciar_sesion_comprador(self.client)
         respuesta = self.client.get(reverse("catalogo"))
         self.assertEqual(respuesta.status_code, 200)
-        self.assertContains(respuesta, "Me interesa")
+        self.assertContains(respuesta, "Manifestar Interés")

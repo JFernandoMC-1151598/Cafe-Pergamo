@@ -16,11 +16,19 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from fincas.views import (
+    api_consultar_ficha_desde_qr_view,
+    escanear_qr_web_view,
+    ficha_digital_web_view,
+)
 
 urlpatterns = [
     path('', include('usuarios.urls')),
     path('fincas/', include('fincas.urls')),
     path('actores/', include('actores.urls')),
     path('catalogos/', include('catalogos.urls')),
+    path('trazabilidad/lote/<str:codigo>/', ficha_digital_web_view, name='trazabilidad_lote_publica_root'),
+    path('trazabilidad/qr/<str:identificador>/', escanear_qr_web_view, name='trazabilidad_qr_publica_root'),
+    path('api/v1/qr/<str:identificador>/', api_consultar_ficha_desde_qr_view, name='api_v1_qr_root'),
     path('admin/', admin.site.urls),
 ]

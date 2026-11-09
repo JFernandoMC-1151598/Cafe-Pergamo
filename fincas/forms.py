@@ -8,6 +8,8 @@ Subtarea: SCRUM-89 / HU06-ST4: Validar campos obligatorios y consistencia de dat
 Subtarea: SCRUM-144 / HU13: Crear formulario o pantalla de registro de lotes.
 Subtarea: SCRUM-148 / HU14-ST1: Diseñar la interfaz para capturar etapas de beneficio.
 Subtarea: SCRUM-152 / HU14-ST3: Validar reglas de registro de etapas.
+Subtarea: SCRUM-155 / HU15-ST2: Crear interfaz para registrar características
+físicas y de calidad del lote.
 Nota: para que ese formulario tenga cosechas entre las cuales elegir, también se agrega
 aquí un formulario de registro de cosechas (complemento necesario: ninguna subtarea de
 Jira lo pedía todavía, pero sin él el formulario de lotes no se puede usar de principio
@@ -18,6 +20,7 @@ from decimal import Decimal
 from django import forms
 from django.db import models
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
+from .models import CaracteristicasCalidad
 from .models import Cosecha, EtapaBeneficio, Finca, Lote, Municipio
 
 from .validators import (
@@ -669,3 +672,37 @@ class EtapaBeneficioForm(forms.ModelForm):
 
     def clean_observaciones(self):
         return (self.cleaned_data.get("observaciones") or "").strip()
+
+
+class CaracteristicasCalidadForm(forms.ModelForm):
+    """Formulario web para registrar o editar la calidad de un lote."""
+
+    class Meta:
+        model = CaracteristicasCalidad
+        fields = ["humedad", "merma", "puntaje_taza", "perfil_sensorial", "observaciones"]
+        widgets = {
+            "humedad": forms.NumberInput(attrs={"class": "form-control", "step": "0.01", "min": "0", "max": "100"}),
+            "merma": forms.NumberInput(attrs={"class": "form-control", "step": "0.01", "min": "0", "max": "100"}),
+            "puntaje_taza": forms.NumberInput(attrs={"class": "form-control", "step": "0.01", "min": "0", "max": "100"}),
+            "perfil_sensorial": forms.Textarea(attrs={"class": "form-control", "rows": 3}),
+            "observaciones": forms.Textarea(attrs={"class": "form-control", "rows": 3}),
+        }
+        labels = {
+            "humedad": "Humedad (%)",
+            "merma": "Merma (%)",
+            "puntaje_taza": "Puntaje en taza",
+            "perfil_sensorial": "Perfil sensorial",
+            "observaciones": "Observaciones",
+        }
+        help_texts = {
+            "humedad": "Valor entre 0 y 100.",
+            "merma": "Valor entre 0 y 100.",
+            "puntaje_taza": "Puntaje entre 0 y 100.",
+        }
+
+    def clean(self):
+        cleaned_data = super().clean()
+        for campo in ("perfil_sensorial", "observaciones"):
+            if cleaned_data.get(campo) is not None:
+                cleaned_data[campo] = cleaned_data[campo].strip()
+        return cleaned_data

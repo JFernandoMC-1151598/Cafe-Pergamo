@@ -31,8 +31,9 @@ negocio adicionales, etc.), que queda pendiente en el backlog del equipo.
 """
 
 from decimal import Decimal
+from typing import Optional
 
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
@@ -157,8 +158,6 @@ class Municipio(models.Model):
             self.codigo = base_code
         self.clean()
         super().save(*args, **kwargs)
-
-
 
 
 class Finca(models.Model):
@@ -393,6 +392,25 @@ class Lote(models.Model):
         verbose_name="Estado del lote",
     )
 
+    class EstadoComercial(models.TextChoices):
+        DISPONIBLE = "DISPONIBLE", "Disponible"
+        RESERVADO = "RESERVADO", "Reservado"
+        NEGOCIADO = "NEGOCIADO", "Negociado"
+        VENDIDO = "VENDIDO", "Vendido"
+        CERRADO = "CERRADO", "Cerrado"
+
+    estado_comercial = models.CharField(
+        max_length=20,
+        choices=EstadoComercial.choices,
+        default=EstadoComercial.DISPONIBLE,
+        verbose_name="Estado comercial",
+        help_text="Estado actual del lote dentro del proceso de comercialización.",
+    )
+    estado_comercial_actualizado_en = models.DateTimeField(
+        default=timezone.now,
+        verbose_name="Última actualización del estado comercial",
+    )
+
     cantidad = models.DecimalField(
         max_digits=10,
         decimal_places=2,
@@ -434,6 +452,101 @@ class Lote(models.Model):
     def __str__(self):
         estado_cat = " [Publicado]" if self.publicado_en_catalogo else ""
         return f"Lote {self.codigo} ({self.cantidad} kg){estado_cat} de {self.cosecha}"
+
+    def save(self, *args, **kwargs):
+        """
+        Ciclo de guardado de Lote con generación y sincronización automática del
+        código QR asociado (HU18-ST1 / SCRUM-174).
+        """
+        sincronizar_qr = kwargs.pop("sincronizar_qr", True)
+        es_creacion = self.pk is None
+        codigo_previo = None
+        if not es_creacion and self.pk:
+            codigo_previo = (
+                Lote.objects.filter(pk=self.pk).values_list("codigo", flat=True).first()
+            )
+
+        super().save(*args, **kwargs)
+
+        if sincronizar_qr and not getattr(self, "_skip_auto_qr", False):
+            from .services import sincronizar_o_generar_qr_lote
+            try:
+                hubo_cambio_codigo = bool(codigo_previo and codigo_previo != self.codigo)
+                sincronizar_o_generar_qr_lote(self, forzar_regeneracion=hubo_cambio_codigo)
+            except Exception:
+                pass
+
+    @property
+    def tiene_codigo_qr(self) -> bool:
+        """Indica si el lote tiene un registro de código QR asociado (HU-18 / SCRUM-176)."""
+        return hasattr(self, "codigo_qr") and self.codigo_qr is not None
+
+    @property
+    def identificador_qr(self) -> Optional[str]:
+        """Retorna el identificador QR persistido o None."""
+        try:
+            return self.codigo_qr.identificador
+        except (ObjectDoesNotExist, AttributeError):
+            return None
+
+
+
+class HistorialEstadoLote(models.Model):
+    """Auditoría de cambios del estado comercial de un lote (HU16-ST3)."""
+
+    lote = models.ForeignKey(
+        Lote,
+        on_delete=models.CASCADE,
+        related_name="historial_estados_comerciales",
+        verbose_name="Lote",
+    )
+    estado_anterior = models.CharField(
+        max_length=20,
+        choices=Lote.EstadoComercial.choices,
+        verbose_name="Estado comercial anterior",
+    )
+    estado_nuevo = models.CharField(
+        max_length=20,
+        choices=Lote.EstadoComercial.choices,
+        verbose_name="Estado comercial nuevo",
+    )
+    usuario_responsable_id = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        verbose_name="ID del usuario responsable",
+    )
+    usuario_responsable_correo = models.EmailField(
+        null=True,
+        blank=True,
+        verbose_name="Correo del usuario responsable",
+    )
+    motivo = models.TextField(
+        blank=True,
+        default="",
+        verbose_name="Motivo del cambio",
+    )
+    creado_en = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Fecha del cambio",
+    )
+
+    class Meta:
+        managed = True
+        db_table = "fincas_historial_estado_lote"
+        ordering = ["-creado_en", "-id"]
+        indexes = [
+            models.Index(
+                fields=["lote", "-creado_en"],
+                name="idx_hist_estado_lote_fecha",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.lote.codigo}: {self.estado_anterior} -> "
+            f"{self.estado_nuevo} ({self.creado_en})"
+        )
 
 
 class CaracteristicasCalidad(models.Model):
@@ -817,3 +930,191 @@ class ManifestacionInteres(models.Model):
             self.vista_por_productor = True
             self.vista_en = timezone.now()
             self.save(update_fields=["vista_por_productor", "vista_en"])
+class BitacoraFichaDigital(models.Model):
+    """
+    Registro inmutable de auditoría para la Ficha Digital Consolidada
+    (HU-17 / ST7 - SCRUM-172).
+    Registra consultas públicas (Web y API/QR) y eventos de actualización
+    de trazabilidad del lote.
+    """
+
+    TIPO_CONSULTA_WEB = "CONSULTA_WEB"
+    TIPO_CONSULTA_API = "CONSULTA_API"
+    TIPO_ACTUALIZACION = "ACTUALIZACION"
+
+    TIPOS_EVENTO = [
+        (TIPO_CONSULTA_WEB, "Consulta Web de Ficha Digital"),
+        (TIPO_CONSULTA_API, "Consulta API REST / Escaneo QR"),
+        (TIPO_ACTUALIZACION, "Actualización de Datos de Trazabilidad"),
+    ]
+
+    lote = models.ForeignKey(
+        Lote,
+        on_delete=models.CASCADE,
+        related_name="auditorias_ficha",
+        verbose_name="Lote auditado",
+    )
+    tipo_evento = models.CharField(
+        max_length=30,
+        choices=TIPOS_EVENTO,
+        default=TIPO_CONSULTA_WEB,
+        verbose_name="Tipo de evento",
+    )
+    completitud_porcentaje = models.PositiveSmallIntegerField(
+        default=0,
+        verbose_name="Completitud al momento del evento (%)",
+    )
+    es_consistente = models.BooleanField(
+        default=True,
+        verbose_name="Estado de consistencia de datos",
+    )
+    ip_address = models.GenericIPAddressField(
+        null=True,
+        blank=True,
+        verbose_name="Dirección IP",
+    )
+    user_agent = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        verbose_name="Agente de usuario / Navegador",
+    )
+    usuario_identificador = models.CharField(
+        max_length=150,
+        null=True,
+        blank=True,
+        verbose_name="Usuario / Actor",
+        help_text="Identificador o correo del usuario, o 'Público / Escaneo QR' si fue acceso público.",
+    )
+    detalles = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="Detalles contextuales del evento",
+    )
+    creado_en = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Fecha y hora del registro",
+    )
+
+    class Meta:
+        managed = True
+        db_table = "fincas_bitacora_ficha_digital"
+        verbose_name = "Auditoría de Ficha Digital"
+        verbose_name_plural = "Bitácora de Fichas Digitales"
+        ordering = ["-creado_en"]
+        indexes = [
+            models.Index(fields=["lote", "-creado_en"], name="idx_bitacora_lote_fecha"),
+            models.Index(fields=["tipo_evento"], name="idx_bitacora_tipo_evento"),
+        ]
+
+    def __str__(self):
+        return f"{self.tipo_evento} - Lote {self.lote.codigo} ({self.creado_en:%Y-%m-%d %H:%M})"
+
+
+# ==============================================================================
+# MODELO DE ASOCIACIÓN Y PERSISTENCIA LOTE - CÓDIGO QR (HU-18 / SCRUM-176)
+# ==============================================================================
+
+class CodigoQRLote(models.Model):
+    """
+    Persistencia de la asociación entre lote y código QR (HU-18 / SCRUM-176 / SCRUM-22).
+
+    Criterios de Aceptación:
+    1. Unicidad: Cada lote tiene a lo sumo un registro de Código QR único (OneToOneField + unique).
+    2. Nivel de Visibilidad: Define si la ficha accesible es pública o privada (PUBLICA / PRIVADA).
+    """
+
+    VISIBILIDAD_PUBLICA = "PUBLICA"
+    VISIBILIDAD_PRIVADA = "PRIVADA"
+    OPCIONES_VISIBILIDAD = (
+        (VISIBILIDAD_PUBLICA, "Pública (Acceso libre a compradores)"),
+        (VISIBILIDAD_PRIVADA, "Privada (Restringida al productor)"),
+    )
+
+    lote = models.OneToOneField(
+        Lote,
+        on_delete=models.CASCADE,
+        related_name="codigo_qr",
+        verbose_name="Lote de café asociado",
+        help_text="Lote único al que pertenece este código QR (criterio de aceptación: 1 QR por lote).",
+    )
+
+    identificador = models.CharField(
+        max_length=60,
+        unique=True,
+        db_index=True,
+        verbose_name="Identificador único del QR",
+        help_text="Identificador único formal del QR (formato canónico: 'QR-<CODIGO_LOTE>').",
+    )
+
+    nivel_visibilidad = models.CharField(
+        max_length=15,
+        choices=OPCIONES_VISIBILIDAD,
+        default=VISIBILIDAD_PUBLICA,
+        verbose_name="Nivel de visibilidad",
+        help_text="Controla el nivel de acceso a la ficha digital: pública o privada (HU-18).",
+    )
+
+    payload_url = models.CharField(
+        max_length=255,
+        verbose_name="URL codificada en el QR",
+        help_text="Ruta canónica o URL pública codificada dentro de la matriz del QR.",
+    )
+
+    imagen_base64 = models.TextField(
+        blank=True,
+        default="",
+        verbose_name="Imagen QR (Data URI Base64)",
+        help_text="Representación gráfica matricial en Data URI para renderizado directo.",
+    )
+
+    activo = models.BooleanField(
+        default=True,
+        verbose_name="QR activo",
+        help_text="Indica si el QR está activo para consultas y escaneo.",
+    )
+
+    creado_en = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name="Fecha de generación",
+    )
+
+    actualizado_en = models.DateTimeField(
+        auto_now=True,
+        verbose_name="Última actualización",
+    )
+
+    class Meta:
+        managed = True
+        db_table = "fincas_codigo_qr_lote"
+        verbose_name = "Código QR de Lote"
+        verbose_name_plural = "Códigos QR de Lotes"
+        ordering = ["-creado_en"]
+        indexes = [
+            models.Index(fields=["identificador"], name="idx_qr_identificador"),
+            models.Index(fields=["lote", "activo"], name="idx_qr_lote_activo"),
+        ]
+
+    def __str__(self):
+        return f"{self.identificador} -> Lote {self.lote.codigo} [{self.nivel_visibilidad}]"
+
+    def clean(self):
+        super().clean()
+        if not self.identificador and hasattr(self, "lote") and self.lote:
+            from .services import generar_identificador_qr_lote
+            self.identificador = generar_identificador_qr_lote(self.lote)
+        if self.nivel_visibilidad not in [self.VISIBILIDAD_PUBLICA, self.VISIBILIDAD_PRIVADA]:
+            raise ValidationError({
+                "nivel_visibilidad": f"Nivel de visibilidad '{self.nivel_visibilidad}' no válido."
+            })
+
+    def save(self, *args, **kwargs):
+        if not self.identificador and hasattr(self, "lote") and self.lote:
+            from .services import generar_identificador_qr_lote
+            self.identificador = generar_identificador_qr_lote(self.lote)
+        if not self.payload_url and hasattr(self, "lote") and self.lote:
+            from .services import construir_payload_qr_lote
+            self.payload_url = construir_payload_qr_lote(self.lote)
+        self.full_clean()
+        super().save(*args, **kwargs)
+
