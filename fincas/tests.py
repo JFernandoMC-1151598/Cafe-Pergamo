@@ -48,6 +48,7 @@ from fincas.models import (
     EtapaBeneficio,
     Finca,
     Lote,
+    ManifestacionInteres,
     Municipio,
 )
 from fincas.services import (
@@ -59,11 +60,14 @@ from fincas.services import (
     filtrar_catalogo_lotes,
     generar_codigo_lote,
     generar_snapshot_trazabilidad,
+    listar_manifestaciones_interes_productor,
     lotes_disponibles_en_catalogo,
+    marcar_manifestacion_interes_vista,
     normalizar_filtros_catalogo,
     obtener_opciones_filtro_catalogo,
     publicar_lote_en_catalogo,
     registrar_etapa_beneficio,
+    registrar_manifestacion_interes,
     validar_lote_para_publicacion,
 )
 from fincas.views import (
@@ -5557,3 +5561,212 @@ class ReglasRegistroEtapasHU14ST3ST4Tests(TestCase):
             self.lote.delete()
         self.assertTrue(Lote.objects.filter(pk=self.lote.pk).exists())
         self.assertEqual(EtapaBeneficio.objects.count(), 1)
+
+
+class ManifestacionInteresHU22Tests(TestCase):
+    """
+    HU-22 (SCRUM-231): Manifestar interés sobre un lote específico.
+
+    Subtareas propias (DT):
+    - SCRUM-260 / HU22-ST1: Definir el mecanismo de notificación al
+      productor/comercializador (in-app, sin correo -- RNF: el proyecto
+      no tiene EMAIL_BACKEND configurado).
+    - SCRUM-261 / HU22-ST2: Modelar y persistir la manifestación de
+      interés.
+    - SCRUM-262 / HU22-ST3: Diseñar el flujo de manifestación de interés
+      para un lote (comprador -> servicio -> persistencia -> notificación
+      in-app -> panel del productor).
+    - SCRUM-263 / HU22-ST4: Validar permisos y existencia del lote antes
+      de registrar el interés.
+
+    Estas pruebas también protegen el "contrato" de datos (claves del
+    diccionario que retorna `registrar_manifestacion_interes`) del que
+    ya dependen las subtareas ST5-ST8 de Luis Francisco
+    (rama francisco-epi6-hu22, commits b5ce830/e440b53/1211c21).
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            nombre="Finca El Mirador", productor_id=self.productor_id, municipio=self.municipio
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca, fecha_cosecha="2026-09-01", cantidad_total=Decimal("300.00")
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTEHU22",
+            cosecha=self.cosecha,
+            cantidad=Decimal("100.00"),
+            publicado_en_catalogo=True,
+        )
+
+    def _datos(self, **extra):
+        datos = {
+            "lote_o_id": self.lote,
+            "comprador_id": self.comprador_id,
+            "comprador_correo": "comprador@example.com",
+            "cantidad_kg": "20.00",
+            "mensaje": "Me interesa este lote, ¿sigue disponible?",
+            "telefono_contacto": "3001234567",
+        }
+        datos.update(extra)
+        return datos
+
+    # --------------------------- ST2: persistencia ---------------------------
+
+    def test_la_manifestacion_queda_persistida_en_base_de_datos(self):
+        resultado = registrar_manifestacion_interes(**self._datos())
+        self.assertEqual(ManifestacionInteres.objects.count(), 1)
+        manifestacion = ManifestacionInteres.objects.get()
+        self.assertEqual(manifestacion.lote_id, self.lote.pk)
+        self.assertEqual(str(manifestacion.comprador_id), str(self.comprador_id))
+        self.assertEqual(manifestacion.cantidad_kg, Decimal("20.00"))
+        self.assertEqual(manifestacion.mensaje, "Me interesa este lote, ¿sigue disponible?")
+        self.assertEqual(resultado["id"], f"INT-{manifestacion.pk:06d}")
+
+    def test_se_pueden_registrar_varias_manifestaciones_sobre_el_mismo_lote(self):
+        registrar_manifestacion_interes(**self._datos())
+        otro_comprador = uuid.uuid4()
+        registrar_manifestacion_interes(**self._datos(comprador_id=otro_comprador, cantidad_kg="5.00"))
+        self.assertEqual(ManifestacionInteres.objects.filter(lote=self.lote).count(), 2)
+
+    def test_el_contrato_de_respuesta_mantiene_las_claves_que_ya_usan_las_subtareas_st5_st8(self):
+        resultado = registrar_manifestacion_interes(**self._datos())
+        claves_esperadas = {
+            "id", "lote_id", "lote_codigo", "finca_nombre", "productor_id",
+            "productor_nombre", "productor_correo", "comprador_id", "comprador_correo",
+            "cantidad_kg", "mensaje", "telefono_contacto", "fecha_registro",
+            "estado", "notificado",
+        }
+        self.assertEqual(set(resultado.keys()), claves_esperadas)
+        self.assertEqual(resultado["lote_codigo"], "LOTEHU22")
+        self.assertEqual(resultado["estado"], ManifestacionInteres.EstadoManifestacion.REGISTRADO)
+
+    def test_acepta_identificar_el_lote_por_codigo_en_lugar_del_objeto(self):
+        resultado = registrar_manifestacion_interes(**self._datos(lote_o_id="LOTEHU22"))
+        self.assertEqual(resultado["lote_id"], self.lote.pk)
+
+    def test_la_cantidad_de_interes_es_opcional(self):
+        resultado = registrar_manifestacion_interes(**self._datos(cantidad_kg=None))
+        self.assertIsNone(resultado["cantidad_kg"])
+        self.assertIsNone(ManifestacionInteres.objects.get().cantidad_kg)
+
+    # --------------------------- ST1: notificación in-app ---------------------------
+
+    def test_al_registrarse_queda_notificado_de_inmediato_sin_usar_correo(self):
+        resultado = registrar_manifestacion_interes(**self._datos())
+        manifestacion = ManifestacionInteres.objects.get()
+        self.assertTrue(resultado["notificado"])
+        self.assertIsNotNone(manifestacion.notificado_en)
+
+    def test_el_productor_puede_listar_las_manifestaciones_recibidas_sobre_sus_lotes(self):
+        registrar_manifestacion_interes(**self._datos())
+        otro_productor_id = uuid.uuid4()
+        otra_finca = Finca.objects.create(
+            nombre="Finca Ajena", productor_id=otro_productor_id, municipio=self.municipio
+        )
+        otra_cosecha = Cosecha.objects.create(
+            finca=otra_finca, fecha_cosecha="2026-09-02", cantidad_total=Decimal("50.00")
+        )
+        otro_lote = Lote.objects.create(
+            codigo="LOTEAJENO", cosecha=otra_cosecha, cantidad=Decimal("50.00"), publicado_en_catalogo=True
+        )
+        registrar_manifestacion_interes(**self._datos(lote_o_id=otro_lote, comprador_id=uuid.uuid4()))
+
+        recibidas = listar_manifestaciones_interes_productor(productor_id=self.productor_id)
+        self.assertEqual(recibidas.count(), 1)
+        self.assertEqual(recibidas.first().lote_id, self.lote.pk)
+
+    def test_marcar_como_vista_actualiza_estado_y_fecha(self):
+        registrar_manifestacion_interes(**self._datos())
+        manifestacion = ManifestacionInteres.objects.get()
+        self.assertFalse(manifestacion.vista_por_productor)
+
+        marcar_manifestacion_interes_vista(manifestacion_id=manifestacion.pk, productor_id=self.productor_id)
+
+        manifestacion.refresh_from_db()
+        self.assertTrue(manifestacion.vista_por_productor)
+        self.assertIsNotNone(manifestacion.vista_en)
+
+    def test_listar_solo_no_vistas_excluye_las_ya_marcadas(self):
+        registrar_manifestacion_interes(**self._datos())
+        manifestacion = ManifestacionInteres.objects.get()
+        marcar_manifestacion_interes_vista(manifestacion_id=manifestacion.pk, productor_id=self.productor_id)
+
+        pendientes = listar_manifestaciones_interes_productor(productor_id=self.productor_id, solo_no_vistas=True)
+        self.assertEqual(pendientes.count(), 0)
+
+    # --------------------------- ST4: permisos y existencia del lote ---------------------------
+
+    def test_rechaza_marcar_como_vista_una_manifestacion_de_un_lote_que_no_es_del_productor(self):
+        registrar_manifestacion_interes(**self._datos())
+        manifestacion = ManifestacionInteres.objects.get()
+        productor_ajeno = uuid.uuid4()
+        with self.assertRaises(ValidationError) as ctx:
+            marcar_manifestacion_interes_vista(manifestacion_id=manifestacion.pk, productor_id=productor_ajeno)
+        self.assertIn("permiso", ctx.exception.message_dict)
+        manifestacion.refresh_from_db()
+        self.assertFalse(manifestacion.vista_por_productor)
+
+    def test_rechaza_lote_inexistente(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(lote_o_id=999999))
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertEqual(ManifestacionInteres.objects.count(), 0)
+
+    def test_rechaza_lote_inactivo(self):
+        self.lote.activo = False
+        self.lote.save(update_fields=["activo"])
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos())
+        self.assertIn("lote", ctx.exception.message_dict)
+
+    def test_rechaza_lote_no_publicado_en_catalogo(self):
+        self.lote.publicado_en_catalogo = False
+        self.lote.save(update_fields=["publicado_en_catalogo"])
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos())
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertEqual(ManifestacionInteres.objects.count(), 0)
+
+    def test_rechaza_sin_comprador_identificado(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(comprador_id=None))
+        self.assertIn("comprador", ctx.exception.message_dict)
+
+    def test_rechaza_que_el_propio_productor_manifieste_interes_sobre_su_lote(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(comprador_id=self.productor_id))
+        self.assertIn("comprador", ctx.exception.message_dict)
+        self.assertEqual(ManifestacionInteres.objects.count(), 0)
+
+    def test_rechaza_cantidad_no_positiva(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(cantidad_kg="0"))
+        self.assertIn("cantidad_kg", ctx.exception.message_dict)
+
+    def test_rechaza_cantidad_mayor_al_stock_disponible_del_lote(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(cantidad_kg="500.00"))
+        self.assertIn("cantidad_kg", ctx.exception.message_dict)
+        self.assertEqual(ManifestacionInteres.objects.count(), 0)
+
+    def test_rechaza_mensaje_demasiado_largo(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_manifestacion_interes(**self._datos(mensaje="x" * 1001))
+        self.assertIn("mensaje", ctx.exception.message_dict)
+
+    def test_operacion_atomica_no_guarda_nada_si_falla_una_validacion(self):
+        with self.assertRaises(ValidationError):
+            registrar_manifestacion_interes(**self._datos(cantidad_kg="500.00"))
+        self.assertFalse(ManifestacionInteres.objects.exists())
+
+    def test_no_se_puede_borrar_un_lote_con_manifestaciones_de_interes(self):
+        registrar_manifestacion_interes(**self._datos())
+        with self.assertRaises(ProtectedError):
+            self.lote.delete()
+        self.assertTrue(Lote.objects.filter(pk=self.lote.pk).exists())
