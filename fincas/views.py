@@ -125,6 +125,7 @@ def _resolver_productor_id(request):
     return None
 
 
+@permiso_requerido_sesion("fincas.crear")
 def registrar_finca_view(request):
     """
     Vista web para captura y persistencia de fincas (SCRUM-96 / HU06-ST3).
@@ -638,6 +639,7 @@ def alternar_estado_municipio_web_view(request, pk):
     return redirect("admin_municipios")
 
 
+@permiso_requerido_sesion("fincas.consultar")
 def mis_fincas_view(request):
     """
     Vista web "Mis Fincas" (SCRUM-92 / HU06-ST6).
@@ -874,6 +876,7 @@ def api_caracteristicas_calidad_view(request, lote_id):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@permiso_requerido_sesion("cosechas.crear")
 def registrar_cosecha_view(request):
     """
     Vista web de registro de cosechas (complemento de HU-13, ver nota en
@@ -929,6 +932,7 @@ def registrar_cosecha_view(request):
     )
 
 
+@permiso_requerido_sesion("lotes.crear")
 def registrar_lote_view(request):
     """
     Vista web de registro de lotes (HU13-ST4 / SCRUM-144): formulario
@@ -1014,6 +1018,7 @@ def registrar_lote_view(request):
     )
 
 
+@permiso_requerido_sesion("lotes.consultar")
 def mis_lotes_view(request):
     """
     Vista web de listado de lotes del productor autenticado, con filtro
@@ -1317,6 +1322,7 @@ def detalle_lote_view(request, pk):
     )
 
 
+@permiso_requerido_sesion("trazabilidad.registrar_etapa")
 def registrar_etapa_beneficio_view(request, pk):
     """
     Formulario web para registrar una nueva etapa de beneficio sobre un
@@ -1383,6 +1389,7 @@ def registrar_etapa_beneficio_view(request, pk):
 # VISTAS WEB DE PUBLICACIÓN Y DESPUBLICACIÓN EN CATÁLOGO (HU-19 / SCRUM-228)
 # ==============================================================================
 
+@permiso_requerido_sesion("catalogo.publicar_lote")
 def publicar_lote_web_view(request, pk):
     """
     Acción web para publicar un lote desde la pantalla 'Mis Lotes'
@@ -1432,6 +1439,7 @@ def publicar_lote_web_view(request, pk):
     return redirect("mis_lotes")
 
 
+@permiso_requerido_sesion("manifestaciones_interes.crear")
 def manifestar_interes_lote_web_view(request, pk):
     """
     Accion web para que un comprador manifieste interes sobre un lote
@@ -1481,6 +1489,7 @@ def manifestar_interes_lote_web_view(request, pk):
     return redirect("catalogo")
 
 
+@permiso_requerido_sesion("catalogo.publicar_lote")
 def despublicar_lote_web_view(request, pk):
     """
     Acción web para retirar un lote del catálogo público
