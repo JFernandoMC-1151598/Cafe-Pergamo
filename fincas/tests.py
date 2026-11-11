@@ -21,6 +21,7 @@ import json
 import uuid
 from datetime import date
 from decimal import Decimal
+import os
 from unittest.mock import MagicMock, patch
 
 from django import forms as forms_module
@@ -10639,13 +10640,18 @@ class PanelManifestacionesInteresProductorHU22Tests(TestCase):
         self.assertContains(respuesta, "Manifestar Interés")
 
 
+def _entorno_qr(valor):
+    """Fija el dominio público del QR (QR_BASE_URL) e ignora RENDER_EXTERNAL_URL durante la prueba."""
+    return patch.dict(os.environ, {"QR_BASE_URL": valor, "RENDER_EXTERNAL_URL": ""})
+
+
 class UrlPublicaCodigoQRTests(TestCase):
     """
     HU18 (SCRUM-22) - El QR debe ser escaneable desde un celular.
 
     Un QR que solo codifica la ruta relativa ('/trazabilidad/lote/<CODIGO>/') no
     abre nada al escanearse. El contenido del QR debe ser la URL absoluta del
-    dominio público (settings.QR_BASE_URL), y los QR ya guardados con ruta
+    dominio público (variable de entorno QR_BASE_URL), y los QR ya guardados con ruta
     relativa deben poder regenerarse (comando `sincronizar_qr_lotes`).
     """
 
@@ -10670,32 +10676,32 @@ class UrlPublicaCodigoQRTests(TestCase):
             cantidad_disponible=Decimal("1000.00"),
             activo=True,
         )
-        with override_settings(QR_BASE_URL=""):
+        with _entorno_qr(""):
             self.lote = crear_lote(
                 cosecha_id=cosecha.pk, cantidad=Decimal("100.00"), codigo="LOTEURL01"
             )
 
-    @override_settings(QR_BASE_URL="")
+    @_entorno_qr("")
     def test_sin_dominio_configurado_el_payload_es_ruta_relativa(self):
         self.assertEqual(
             construir_payload_qr_lote(self.lote), "/trazabilidad/lote/LOTEURL01/"
         )
 
-    @override_settings(QR_BASE_URL=DOMINIO)
+    @_entorno_qr(DOMINIO)
     def test_con_dominio_configurado_el_payload_es_url_absoluta(self):
         self.assertEqual(
             construir_payload_qr_lote(self.lote),
             f"{self.DOMINIO}/trazabilidad/lote/LOTEURL01/",
         )
 
-    @override_settings(QR_BASE_URL=DOMINIO + "/")
+    @_entorno_qr(DOMINIO + "/")
     def test_barra_final_del_dominio_no_duplica_separador(self):
         self.assertEqual(
             construir_payload_qr_lote(self.lote),
             f"{self.DOMINIO}/trazabilidad/lote/LOTEURL01/",
         )
 
-    @override_settings(QR_BASE_URL=DOMINIO)
+    @_entorno_qr(DOMINIO)
     def test_base_url_explicita_tiene_prioridad_sobre_la_configuracion(self):
         self.assertEqual(
             construir_payload_qr_lote(self.lote, base_url="http://192.168.1.15:8000"),
@@ -10707,7 +10713,7 @@ class UrlPublicaCodigoQRTests(TestCase):
         self.assertEqual(qr_antes.payload_url, "/trazabilidad/lote/LOTEURL01/")
         imagen_antes = qr_antes.imagen_base64
 
-        with override_settings(QR_BASE_URL=self.DOMINIO):
+        with _entorno_qr(self.DOMINIO):
             sincronizar_o_generar_qr_lote(self.lote)
 
         qr_despues = CodigoQRLote.objects.get(lote=self.lote)
@@ -10720,7 +10726,7 @@ class UrlPublicaCodigoQRTests(TestCase):
     def test_comando_sincronizar_qr_lotes_actualiza_y_es_idempotente(self):
         from io import StringIO
 
-        with override_settings(QR_BASE_URL=self.DOMINIO):
+        with _entorno_qr(self.DOMINIO):
             salida = StringIO()
             call_command("sincronizar_qr_lotes", stdout=salida)
             self.assertIn("1 actualizados de 1 lotes", salida.getvalue())
@@ -10733,7 +10739,7 @@ class UrlPublicaCodigoQRTests(TestCase):
             call_command("sincronizar_qr_lotes", stdout=segunda)
             self.assertIn("0 actualizados de 1 lotes", segunda.getvalue())
 
-    @override_settings(QR_BASE_URL=DOMINIO)
+    @_entorno_qr(DOMINIO)
     def test_la_imagen_descargable_codifica_la_url_publica(self):
         with patch("fincas.services.qrcode.QRCode") as qr_mock:
             qr_mock.return_value.make_image.return_value.save = lambda buf, **kw: buf.write(b"PNG")

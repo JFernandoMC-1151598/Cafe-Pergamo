@@ -17,11 +17,11 @@ import base64
 from datetime import date
 from decimal import Decimal
 import io
+import os
 import re
 from typing import Any, Dict, List, Optional, Union
 import uuid
 
-from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
 from django.db.models import Count, Q
@@ -1860,16 +1860,19 @@ def extraer_codigo_lote_desde_qr(identificador_qr: str) -> str:
 def construir_payload_qr_lote(lote_o_codigo: Union[Lote, str, int], base_url: Optional[str] = None) -> str:
     """
     Construye la carga útil (URL canónica de consulta) que se codifica en la matriz del QR.
-    Si se proporciona `base_url`, retorna la URL absoluta completa (ej. 'https://cafepergamo.com/trazabilidad/lote/LOT-001/').
-    Si no, usa `settings.QR_BASE_URL` (dominio público configurado por entorno) para que el QR
-    sea escaneable desde un celular; solo si tampoco está configurada retorna la ruta relativa
-    canónica ('/trazabilidad/lote/LOT-001/'), que un lector de QR no puede abrir.
+    Prioriza `base_url` explícito, luego la variable de entorno `QR_BASE_URL`,
+    luego la variable automática de Render `RENDER_EXTERNAL_URL`, y finalmente la ruta relativa.
     """
     codigo = extraer_codigo_lote_normalizado(lote_o_codigo)
     ruta_relativa = f"/trazabilidad/lote/{codigo}/"
-    base = base_url or getattr(settings, "QR_BASE_URL", "")
-    if base:
-        return f"{base.rstrip('/')}{ruta_relativa}"
+    effective_base = (
+        (base_url.strip() if base_url else None)
+        or os.getenv("QR_BASE_URL", "").strip()
+        or os.getenv("RENDER_EXTERNAL_URL", "").strip()
+        or None
+    )
+    if effective_base:
+        return f"{effective_base.rstrip('/')}{ruta_relativa}"
     return ruta_relativa
 
 
