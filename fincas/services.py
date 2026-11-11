@@ -17,6 +17,7 @@ import base64
 from datetime import date
 from decimal import Decimal
 import io
+import os
 import re
 from typing import Any, Dict, List, Optional, Union
 import uuid
@@ -1570,13 +1571,19 @@ def extraer_codigo_lote_desde_qr(identificador_qr: str) -> str:
 def construir_payload_qr_lote(lote_o_codigo: Union[Lote, str, int], base_url: Optional[str] = None) -> str:
     """
     Construye la carga útil (URL canónica de consulta) que se codifica en la matriz del QR.
-    Si se proporciona `base_url`, retorna la URL absoluta completa (ej. 'https://cafepergamo.com/trazabilidad/lote/LOT-001/').
-    De lo contrario, retorna la ruta relativa canónica ('/trazabilidad/lote/LOT-001/').
+    Prioriza `base_url` explícito, luego la variable de entorno `QR_BASE_URL`,
+    luego la variable automática de Render `RENDER_EXTERNAL_URL`, y finalmente la ruta relativa.
     """
     codigo = extraer_codigo_lote_normalizado(lote_o_codigo)
     ruta_relativa = f"/trazabilidad/lote/{codigo}/"
-    if base_url:
-        return f"{base_url.rstrip('/')}{ruta_relativa}"
+    effective_base = (
+        (base_url.strip() if base_url else None)
+        or os.getenv("QR_BASE_URL", "").strip()
+        or os.getenv("RENDER_EXTERNAL_URL", "").strip()
+        or None
+    )
+    if effective_base:
+        return f"{effective_base.rstrip('/')}{ruta_relativa}"
     return ruta_relativa
 
 
@@ -2085,6 +2092,7 @@ def sanitizar_ficha_por_visibilidad(
 def obtener_bytes_descarga_qr_lote(
     lote_o_id: Union[Lote, int, str],
     *,
+    base_url: Optional[str] = None,
     box_size: int = 12,
     border: int = 4,
     error_correction: str = "M",
@@ -2104,10 +2112,11 @@ def obtener_bytes_descarga_qr_lote(
         lote_obj = _resolver_lote(lote_o_id)
         qr_obj = getattr(lote_obj, "codigo_qr", None)
         if not qr_obj:
-            qr_obj = sincronizar_o_generar_qr_lote(lote_obj)
+            qr_obj = sincronizar_o_generar_qr_lote(lote_obj, base_url=base_url)
 
     png_bytes = generar_matriz_qr_lote(
         lote_o_codigo=lote_obj,
+        base_url=base_url,
         box_size=box_size,
         border=border,
         error_correction=error_correction,
