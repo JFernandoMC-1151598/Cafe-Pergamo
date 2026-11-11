@@ -6126,7 +6126,9 @@ class EtapasBeneficioHU14Tests(TestCase):
         _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
         response = self.client.get(reverse("mis_lotes"))
         self.assertContains(response, self.url_detalle)
-        self.assertContains(response, self.url_registro)
+        # Un solo botón "Estado" (cambiar estado + registrar etapa), sin botón "Etapa" aparte.
+        self.assertContains(response, reverse("lote_cambiar_estado", kwargs={"pk": self.lote.pk}))
+        self.assertNotContains(response, self.url_registro)
 
     # ---------------------------- HU14-ST2 ----------------------------
     def test_historial_vacio_muestra_estado_claro(self):
@@ -11101,3 +11103,108 @@ class ProcesoBeneficioCondicionalTests(FixtureEstadosLoteBase):
         self.assertEqual(resp.status_code, 200)
         self.assertNotContains(resp, "Ver JSON API")
         self.assertContains(resp, "Imprimir Ficha")
+
+
+class PublicadoYMiCatalogoTests(FixtureEstadosLoteBase):
+    """
+    El estado "Publicado" es una publicacion real en el catalogo, y el productor
+    ve en "Mi Catalogo" unicamente SUS lotes publicados.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.publicado = self._estado("PUBLICADO", "Disponible para Venta")
+
+    def _lote_publicable(self, codigo, estado):
+        lote = self._lote(codigo, estado)
+        CaracteristicasCalidad.objects.create(
+            lote=lote, humedad=Decimal("11.00"), merma=Decimal("5.00"),
+            puntaje_taza=Decimal("84.00"), perfil_sensorial="Dulce",
+        )
+        return lote
+
+    # ----------------------- estado Publicado -----------------------
+    def test_pasar_a_publicado_publica_de_verdad_en_el_catalogo(self):
+        lote = self._lote_publicable("LOTEPUB01", self.almacenado)
+        cambiar_estado_lote(
+            lote_o_id=lote, estado_lote_id=self.publicado.pk, productor_id=self.productor_id
+        )
+        lote.refresh_from_db()
+        self.assertEqual(lote.estado_lote, self.publicado)
+        self.assertTrue(lote.publicado_en_catalogo)
+
+    def test_publicado_sin_datos_completos_no_cambia_nada(self):
+        lote = self._lote("LOTEPUB02", self.almacenado)  # sin calidad registrada
+        with self.assertRaises(ValidationError) as ctx:
+            cambiar_estado_lote(
+                lote_o_id=lote, estado_lote_id=self.publicado.pk, productor_id=self.productor_id
+            )
+        self.assertIn("publicacion", ctx.exception.message_dict)
+        lote.refresh_from_db()
+        self.assertEqual(lote.estado_lote, self.almacenado)
+        self.assertFalse(lote.publicado_en_catalogo)
+
+    def test_publicar_con_el_boton_del_catalogo_lleva_el_lote_al_estado_publicado(self):
+        lote = self._lote_publicable("LOTEPUB03", self.recoleccion)
+        publicar_lote_en_catalogo(lote_id=lote.pk, productor_id=self.productor_id)
+        lote.refresh_from_db()
+        self.assertEqual(lote.estado_lote, self.publicado)
+        self.assertTrue(lote.publicado_en_catalogo)
+
+    # ----------------------------- Mi Catalogo -----------------------------
+    def _lote_publicado_de_otro_productor(self, codigo):
+        finca = Finca.objects.create(
+            nombre="Finca Ajena", productor_id=uuid.uuid4(),
+            municipio=Municipio.objects.filter(nombre="Toledo").first(), activo=True,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca, variedad=self.cosecha.variedad, fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("500.00"), cantidad_disponible=Decimal("500.00"), activo=True,
+        )
+        return Lote.objects.create(
+            codigo=codigo, cosecha=cosecha, cantidad=Decimal("80.00"),
+            proceso_beneficio=self.proceso, publicado_en_catalogo=True,
+        )
+
+    def test_mi_catalogo_muestra_solo_los_lotes_publicados_del_productor(self):
+        propio = self._lote("LOTEMIO01", self.recoleccion)
+        propio.publicado_en_catalogo = True
+        propio.save(update_fields=["publicado_en_catalogo"], sincronizar_qr=False)
+        sin_publicar = self._lote("LOTEMIO02", self.recoleccion)
+        ajeno = self._lote_publicado_de_otro_productor("LOTEAJENO1")
+
+        resp = self.client.get(reverse("catalogo"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "LOTEMIO01")
+        self.assertNotContains(resp, "LOTEMIO02")
+        self.assertNotContains(resp, ajeno.codigo)
+        self.assertContains(resp, "Mi Catálogo")
+        self.assertNotContains(resp, "Catálogo Comercial de Cafés Especiales")
+
+    def test_comprador_y_anonimo_siguen_viendo_el_catalogo_comercial_completo(self):
+        propio = self._lote("LOTEMIO03", self.recoleccion)
+        propio.publicado_en_catalogo = True
+        propio.save(update_fields=["publicado_en_catalogo"], sincronizar_qr=False)
+        ajeno = self._lote_publicado_de_otro_productor("LOTEAJENO2")
+
+        comprador = Client()
+        _iniciar_sesion_comprador(comprador)
+        anonimo = Client()
+        for cliente in (comprador, anonimo):
+            resp = cliente.get(reverse("catalogo"))
+            self.assertContains(resp, "LOTEMIO03")
+            self.assertContains(resp, ajeno.codigo)
+            self.assertContains(resp, "Catálogo Comercial")
+            self.assertNotContains(resp, "Mi Catálogo")
+
+    def test_las_opciones_de_filtro_de_mi_catalogo_solo_incluyen_lo_propio(self):
+        propio = self._lote("LOTEMIO04", self.recoleccion)
+        propio.publicado_en_catalogo = True
+        propio.save(update_fields=["publicado_en_catalogo"], sincronizar_qr=False)
+        otro_proceso = ProcesoBeneficio.objects.create(codigo="NAT_AJENO", nombre="Natural Ajeno", activo=True)
+        ajeno = self._lote_publicado_de_otro_productor("LOTEAJENO3")
+        ajeno.proceso_beneficio = otro_proceso
+        ajeno.save(update_fields=["proceso_beneficio"], sincronizar_qr=False)
+
+        resp = self.client.get(reverse("catalogo"))
+        self.assertNotContains(resp, "Natural Ajeno")

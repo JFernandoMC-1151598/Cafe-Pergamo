@@ -211,11 +211,9 @@
                             <a href="{% url 'lote_detalle' lote.id %}" class="btn btn-outline-secondary btn-sm" title="Ver historial de beneficio">
                                 <i class="bi bi-clock-history me-1"></i>Historial
                             </a>
-                            <a href="{% url 'lote_cambiar_estado' lote.id %}" class="btn btn-outline-secondary btn-sm" title="Cambiar el estado del lote">
+                            <!-- Un solo botón: cambia el estado del lote y, si pasa a "En Beneficio", registra la etapa -->
+                            <a href="{% url 'lote_cambiar_estado' lote.id %}" class="btn btn-outline-success btn-sm" title="Cambiar el estado del lote (y registrar la etapa de beneficio)">
                                 <i class="bi bi-arrow-left-right me-1"></i>Estado
-                            </a>
-                            <a href="{% url 'lote_etapa_registro' lote.id %}" class="btn btn-outline-success btn-sm" title="Registrar nueva etapa de beneficio">
-                                <i class="bi bi-plus-circle me-1"></i>Etapa
                             </a>
                             <!-- HU-18: Visualización y gestión de Código QR del lote -->
                             <button type="button" class="btn btn-outline-dark btn-sm" data-bs-toggle="modal" data-bs-target="#modalQRLote{{ lote.id }}" title="Ver y gestionar Código QR del lote">

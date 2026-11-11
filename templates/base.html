@@ -53,7 +53,7 @@
                         <a class="nav-link" href="{% url 'home' %}">Inicio</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" href="{% url 'catalogo' %}">Catálogo Comercial</a>
+                        <a class="nav-link" href="{% url 'catalogo' %}">{% if rol_actual == "PRODUCTOR" %}Mi Catálogo{% else %}Catálogo Comercial{% endif %}</a>
                     </li>
                     {% if rol_actual|tiene_permiso:"usuarios.administrar" %}
                     <li class="nav-item">

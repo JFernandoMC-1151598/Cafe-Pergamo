@@ -1215,6 +1215,7 @@ def publicar_lote_en_catalogo(
         if precio_dec is not None:
             update_fields.append("precio_referencial")
         lote.save(update_fields=update_fields)
+        _alinear_estado_con_publicacion(lote)
 
         snapshot = generar_snapshot_trazabilidad(lote)
         BitacoraPublicacionLote.objects.create(
@@ -1293,7 +1294,7 @@ OPCIONES_PUNTAJE_MINIMO_CATALOGO = (80, 84, 86, 88)
 PARAMETROS_FILTRO_CATALOGO = ("municipio", "variedad", "proceso", "puntaje_min", "q")
 
 
-def lotes_disponibles_en_catalogo():
+def lotes_disponibles_en_catalogo(productor_id=None):
     """
     Queryset base de lotes "disponibles" en el catálogo público
     (SCRUM-248 / HU20-ST4). El criterio de aceptación de la HU-20 exige que
@@ -1304,15 +1305,21 @@ def lotes_disponibles_en_catalogo():
     - Cantidad mayor a 0 kg.
     - Cosecha y finca de origen activas (un lote publicado cuya finca se
       inactivó después no debe seguir ofreciéndose).
+
+    Si se indica `productor_id` ("Mi Catálogo" del productor), se limita a
+    los lotes de las fincas de ese productor: nunca los de otros.
     """
+    lotes = Lote.objects.filter(
+        publicado_en_catalogo=True,
+        activo=True,
+        cantidad__gt=Decimal("0.00"),
+        cosecha__activo=True,
+        cosecha__finca__activo=True,
+    )
+    if productor_id is not None:
+        lotes = lotes.filter(cosecha__finca__productor_id=productor_id)
     return (
-        Lote.objects.filter(
-            publicado_en_catalogo=True,
-            activo=True,
-            cantidad__gt=Decimal("0.00"),
-            cosecha__activo=True,
-            cosecha__finca__activo=True,
-        )
+        lotes
         .select_related(
             "cosecha__finca__municipio",
             "cosecha__variedad",
@@ -1391,6 +1398,7 @@ def filtrar_catalogo_lotes(
     proceso: Optional[int] = None,
     puntaje_min: Optional[Decimal] = None,
     q: Optional[str] = None,
+    productor_id=None,
 ):
     """
     Consulta filtrada de lotes disponibles en el catálogo
@@ -1407,7 +1415,7 @@ def filtrar_catalogo_lotes(
     - q: búsqueda de texto en código del lote, finca, vereda, municipio y
       perfil sensorial.
     """
-    lotes = lotes_disponibles_en_catalogo()
+    lotes = lotes_disponibles_en_catalogo(productor_id=productor_id)
 
     if municipio:
         lotes = lotes.filter(cosecha__finca__municipio_id=municipio)
@@ -1429,7 +1437,7 @@ def filtrar_catalogo_lotes(
     return lotes
 
 
-def obtener_opciones_filtro_catalogo() -> dict:
+def obtener_opciones_filtro_catalogo(productor_id=None) -> dict:
     """
     Opciones para los controles de filtro de la interfaz (SCRUM-246 / HU20-ST1).
 
@@ -1437,7 +1445,7 @@ def obtener_opciones_filtro_catalogo() -> dict:
     lote disponible en el catálogo: así el comprador nunca elige una opción
     que por construcción devolvería cero resultados.
     """
-    base = lotes_disponibles_en_catalogo()
+    base = lotes_disponibles_en_catalogo(productor_id=productor_id)
     return {
         "municipios": Municipio.objects.filter(
             pk__in=base.values("cosecha__finca__municipio_id")
@@ -1468,6 +1476,30 @@ ORDEN_FASES_ESTADO_LOTE = (
     "PUBLICADO",
     "VENDIDO",
 )
+
+
+CODIGO_ESTADO_PUBLICADO = "PUBLICADO"
+
+
+def _alinear_estado_con_publicacion(lote: Lote) -> bool:
+    """
+    Publicar un lote en el catálogo lo lleva al estado general 'Publicado'
+    (si aún está en una fase anterior). Nunca retrocede ni toca estados
+    personalizados, y no falla si el catálogo no tiene activo ese estado.
+    """
+    actual = lote.estado_lote
+    if actual is not None:
+        codigo_actual = (actual.codigo or "").strip().upper()
+        if codigo_actual not in ORDEN_FASES_ESTADO_LOTE:
+            return False
+        if ORDEN_FASES_ESTADO_LOTE.index(codigo_actual) >= ORDEN_FASES_ESTADO_LOTE.index(CODIGO_ESTADO_PUBLICADO):
+            return False
+    destino = EstadoLote.objects.filter(codigo__iexact=CODIGO_ESTADO_PUBLICADO, activo=True).first()
+    if not destino:
+        return False
+    lote.estado_lote = destino
+    lote.save(update_fields=["estado_lote"], sincronizar_qr=False)
+    return True
 
 
 def _es_estado_beneficio(estado) -> bool:
@@ -1585,6 +1617,8 @@ def cambiar_estado_lote(
     - El lote solo avanza por la secuencia de fases (ORDEN_FASES_ESTADO_LOTE);
       no puede retroceder. Quedarse en 'En Beneficio' sí se permite, para
       registrar nuevas etapas.
+    - Pasar a 'Publicado' publica de verdad el lote en el catálogo (mismas
+      validaciones de HU-19); si no cumple, no se cambia nada.
     - Estados personalizados fuera de la secuencia se aceptan sin restricción
       de orden.
     - Atómico: si falla la etapa, el estado no cambia. Si se indica
@@ -1648,7 +1682,13 @@ def cambiar_estado_lote(
                 campo_fecha="fecha_etapa",
             )
 
-        if actual is None or actual.pk != destino.pk:
+        # 'Publicado' es una publicación real en el catálogo: aplica las mismas
+        # validaciones de HU-19 y, si faltan datos, el cambio entero se cancela.
+        if (destino.codigo or "").strip().upper() == CODIGO_ESTADO_PUBLICADO and not lote.publicado_en_catalogo:
+            publicar_lote_en_catalogo(lote_id=lote.pk, productor_id=productor_id)
+            lote.refresh_from_db()
+
+        if lote.estado_lote_id != destino.pk:
             lote.estado_lote = destino
             lote.save(update_fields=["estado_lote"], sincronizar_qr=False)
 
