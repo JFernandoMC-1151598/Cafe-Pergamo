@@ -211,6 +211,9 @@
                             <a href="{% url 'lote_detalle' lote.id %}" class="btn btn-outline-secondary btn-sm" title="Ver historial de beneficio">
                                 <i class="bi bi-clock-history me-1"></i>Historial
                             </a>
+                            <a href="{% url 'lote_cambiar_estado' lote.id %}" class="btn btn-outline-secondary btn-sm" title="Cambiar el estado del lote">
+                                <i class="bi bi-arrow-left-right me-1"></i>Estado
+                            </a>
                             <a href="{% url 'lote_etapa_registro' lote.id %}" class="btn btn-outline-success btn-sm" title="Registrar nueva etapa de beneficio">
                                 <i class="bi bi-plus-circle me-1"></i>Etapa
                             </a>

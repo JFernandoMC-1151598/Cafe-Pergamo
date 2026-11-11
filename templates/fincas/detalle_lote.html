@@ -40,6 +40,9 @@
                                 <p class="text-muted small mb-0">Registrado el {{ lote.creado_en|date:"d/m/Y" }}</p>
                             </div>
                         </div>
+                        <a href="{% url 'lote_cambiar_estado' lote.pk %}" class="btn btn-outline-pergamo px-4 fw-semibold" id="btn-cambiar-estado">
+                            <i class="bi bi-arrow-left-right me-1"></i> Cambiar estado
+                        </a>
                         <a href="{% url 'lote_etapa_registro' lote.pk %}" class="btn btn-primary bg-primary px-4 fw-semibold" id="btn-nueva-etapa">
                             <i class="bi bi-plus-circle me-1"></i> Nueva etapa de beneficio
                         </a>

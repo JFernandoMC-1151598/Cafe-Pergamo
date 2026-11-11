@@ -499,6 +499,52 @@ class CosechaRegistroForm(forms.ModelForm):
         )
 
 
+def _campos_etapa_condicional():
+    """Campos 'etapa de beneficio' + fecha, visibles solo si el estado del lote es 'En Beneficio'."""
+    from django.utils import timezone
+
+    return {
+        "etapa_beneficio": forms.ChoiceField(
+            required=False,
+            label="Etapa de beneficio",
+            choices=[("", "Seleccione la etapa de beneficio...")] + list(EtapaBeneficio.TipoEtapa.choices),
+            widget=forms.Select(attrs={"class": "form-select", "id": "id_etapa_beneficio"}),
+            error_messages={"invalid_choice": "La etapa seleccionada no es una etapa de beneficio válida."},
+        ),
+        "fecha_etapa": forms.DateField(
+            required=False,
+            label="Fecha de la etapa",
+            initial=timezone.localdate,
+            widget=forms.DateInput(
+                format="%Y-%m-%d",
+                attrs={"class": "form-control", "id": "id_fecha_etapa", "type": "date"},
+            ),
+            error_messages={"invalid": "Ingrese una fecha válida."},
+        ),
+    }
+
+
+def _limpiar_etapa_condicional(form, cleaned):
+    """
+    Regla de negocio: si el estado elegido es 'En Beneficio', la etapa y su
+    fecha son obligatorias; con cualquier otro estado se descartan.
+    """
+    from .services import _es_estado_beneficio
+
+    estado = cleaned.get("estado_lote")
+    if estado is None:
+        return cleaned
+    if _es_estado_beneficio(estado):
+        if not cleaned.get("etapa_beneficio") and "etapa_beneficio" not in form.errors:
+            form.add_error("etapa_beneficio", "Debe indicar la etapa de beneficio en la que se encuentra el lote.")
+        if not cleaned.get("fecha_etapa") and "fecha_etapa" not in form.errors:
+            form.add_error("fecha_etapa", "Debe indicar la fecha de la etapa.")
+    else:
+        cleaned["etapa_beneficio"] = ""
+        cleaned["fecha_etapa"] = None
+    return cleaned
+
+
 class LoteRegistroForm(forms.Form):
     """
     Formulario de registro de lotes (HU13-ST4 / SCRUM-144): el productor
@@ -585,6 +631,7 @@ class LoteRegistroForm(forms.Form):
 
     def __init__(self, *args, productor_id=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.fields.update(_campos_etapa_condicional())
         self.fields["cosecha"].queryset = (
             Cosecha.objects.filter(
                 finca__productor_id=productor_id,
@@ -610,6 +657,53 @@ class LoteRegistroForm(forms.Form):
         if codigo and not codigo.isalnum():
             raise forms.ValidationError("El código del lote debe ser alfanumérico (sin espacios ni símbolos).")
         return codigo
+
+    def clean(self):
+        return _limpiar_etapa_condicional(self, super().clean())
+
+
+class CambiarEstadoLoteForm(forms.Form):
+    """
+    Cambio de estado general de un lote existente. Solo cuando el nuevo estado
+    es 'En Beneficio' aparece (y es obligatoria) la etapa de beneficio exacta.
+    """
+
+    estado_lote = forms.ModelChoiceField(
+        queryset=EstadoLote.objects.none(),
+        required=True,
+        label="Nuevo estado del lote",
+        empty_label="Seleccione el nuevo estado del lote...",
+        widget=forms.Select(attrs={"class": "form-select", "id": "id_estado_lote"}),
+        error_messages={
+            "required": "Debe seleccionar el nuevo estado del lote.",
+            "invalid_choice": "El estado seleccionado no está activo o no es válido.",
+        },
+    )
+
+    observaciones = forms.CharField(
+        required=False,
+        label="Observaciones",
+        max_length=OBSERVACIONES_ETAPA_MAX,
+        validators=[validar_observaciones_etapa],
+        widget=forms.Textarea(attrs={
+            "class": "form-control",
+            "id": "id_observaciones",
+            "maxlength": str(OBSERVACIONES_ETAPA_MAX),
+            "rows": 3,
+            "placeholder": "Opcional: detalle de la etapa (solo se guarda con el estado 'En Beneficio').",
+        }),
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields.update(_campos_etapa_condicional())
+        self.fields["estado_lote"].queryset = EstadoLote.objects.filter(activo=True).order_by("orden", "nombre")
+
+    def clean_observaciones(self):
+        return (self.cleaned_data.get("observaciones") or "").strip()
+
+    def clean(self):
+        return _limpiar_etapa_condicional(self, super().clean())
 
 
 class EtapaBeneficioForm(forms.ModelForm):

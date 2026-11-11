@@ -26,6 +26,7 @@ from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 import qrcode
 from qrcode.constants import (
     ERROR_CORRECT_H,
@@ -386,6 +387,8 @@ def crear_lote(
     codigo: Optional[str] = None,
     proceso_beneficio_id=None,
     estado_lote_id=None,
+    etapa_beneficio=None,
+    fecha_etapa=None,
 ) -> Lote:
     """
     Crea un lote de café a partir de una cosecha existente, descontando
@@ -432,6 +435,13 @@ def crear_lote(
             raise ValidationError(
                 {"estado_lote": "El estado seleccionado no está activo o no existe."}
             )
+
+    # Regla de negocio: la etapa de beneficio se indica solo si (y siempre que)
+    # el lote nace en el estado 'En Beneficio'.
+    _validar_etapa_segun_estado(estado, etapa_beneficio)
+    fecha_etapa_normalizada = (
+        _normalizar_fecha_etapa(fecha_etapa) if _es_estado_beneficio(estado) else None
+    )
 
     with transaction.atomic():
         try:
@@ -486,6 +496,15 @@ def crear_lote(
         # refleje el nuevo saldo (o viceversa).
         cosecha.cantidad_disponible = cosecha.cantidad_disponible - cantidad
         cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
+
+        if _es_estado_beneficio(estado):
+            _crear_etapa_beneficio(
+                lote,
+                etapa_beneficio,
+                fecha_etapa_normalizada,
+                campo_etapa="etapa_beneficio",
+                campo_fecha="fecha_etapa",
+            )
 
         # HU18-ST1 (SCRUM-174): Generación y persistencia automática del código QR asociado al lote
         sincronizar_o_generar_qr_lote(lote)
@@ -1434,10 +1453,11 @@ def obtener_opciones_filtro_catalogo() -> dict:
 # ==============================================================================
 
 # Fases generales del ciclo de vida del lote (catálogo EstadoLote), en orden.
-# El estado del lote solo avanza por esta secuencia; nunca retrocede.
+# Al cambiar el estado manualmente, el lote solo avanza por esta secuencia.
+CODIGO_ESTADO_BENEFICIO = "BENEFICIO"
 ORDEN_FASES_ESTADO_LOTE = (
     "RECOLECCION",
-    "BENEFICIO",
+    CODIGO_ESTADO_BENEFICIO,
     "SECADO",
     "ALMACENADO",
     "CATACION",
@@ -1445,46 +1465,53 @@ ORDEN_FASES_ESTADO_LOTE = (
     "VENDIDO",
 )
 
-# Fase del lote a la que corresponde cada etapa de beneficio registrada.
-FASE_POR_ETAPA_BENEFICIO = {
-    EtapaBeneficio.TipoEtapa.DESPULPADO: "BENEFICIO",
-    EtapaBeneficio.TipoEtapa.FERMENTACION: "BENEFICIO",
-    EtapaBeneficio.TipoEtapa.LAVADO: "BENEFICIO",
-    EtapaBeneficio.TipoEtapa.SECADO: "SECADO",
-}
+
+def _es_estado_beneficio(estado) -> bool:
+    return bool(estado) and (estado.codigo or "").strip().upper() == CODIGO_ESTADO_BENEFICIO
 
 
-def _avanzar_estado_lote_por_etapa(lote: Lote, etapa: str) -> bool:
-    """
-    Mantiene coherente el estado general del lote con las etapas de beneficio.
+def lote_esta_en_beneficio(lote: Lote) -> bool:
+    """True si el estado general del lote es 'En Beneficio' (única fase en la que se registran etapas)."""
+    return _es_estado_beneficio(lote.estado_lote)
 
-    Al registrar una etapa, el estado del lote avanza a la fase que le
-    corresponde (despulpado/fermentación/lavado -> En Beneficio; secado ->
-    En Secado) solo si esa fase es posterior a la actual: registrar una
-    etapa atrasada o repetida nunca hace retroceder el lote. Si el estado
-    actual es uno personalizado (fuera de la secuencia) o el catálogo no
-    tiene activa la fase destino, no se modifica nada y no falla el registro.
-    Retorna True si el estado cambió.
-    """
-    codigo_destino = FASE_POR_ETAPA_BENEFICIO.get(etapa)
-    if not codigo_destino:
-        return False
 
-    actual = lote.estado_lote
-    if actual is not None:
-        codigo_actual = (actual.codigo or "").strip().upper()
-        if codigo_actual not in ORDEN_FASES_ESTADO_LOTE:
-            return False
-        if ORDEN_FASES_ESTADO_LOTE.index(codigo_actual) >= ORDEN_FASES_ESTADO_LOTE.index(codigo_destino):
-            return False
+def _normalizar_fecha_etapa(fecha, campo="fecha_etapa"):
+    """Convierte la fecha recibida (date, 'AAAA-MM-DD' o vacía = hoy) en un date."""
+    if fecha in (None, ""):
+        return timezone.localdate()
+    if isinstance(fecha, str):
+        parseada = parse_date(fecha.strip())
+        if parseada is None:
+            raise ValidationError({campo: "Ingrese una fecha válida (AAAA-MM-DD)."})
+        return parseada
+    return fecha
 
-    destino = EstadoLote.objects.filter(codigo__iexact=codigo_destino, activo=True).first()
-    if not destino:
-        return False
 
-    lote.estado_lote = destino
-    lote.save(update_fields=["estado_lote"], sincronizar_qr=False)
-    return True
+def _crear_etapa_beneficio(lote, etapa, fecha, observaciones="", *, campo_etapa="etapa", campo_fecha="fecha"):
+    """Valida (modelo) y guarda una etapa de beneficio; renombra los campos de error si hace falta."""
+    nueva = EtapaBeneficio(
+        lote=lote, etapa=etapa, fecha=fecha, observaciones=observaciones or "",
+    )
+    try:
+        nueva.full_clean(exclude=["activo"])
+    except ValidationError as exc:
+        errores = exc.message_dict if hasattr(exc, "message_dict") else {"__all__": exc.messages}
+        mapa = {"etapa": campo_etapa, "fecha": campo_fecha}
+        raise ValidationError({mapa.get(campo, campo): msgs for campo, msgs in errores.items()})
+    nueva.save()
+    return nueva
+
+
+def _validar_etapa_segun_estado(estado, etapa_beneficio):
+    """Regla de negocio: la etapa se indica si y solo si el estado destino es 'En Beneficio'."""
+    if _es_estado_beneficio(estado) and not etapa_beneficio:
+        raise ValidationError({
+            "etapa_beneficio": "Si el lote está 'En Beneficio', debe indicar la etapa de beneficio en la que se encuentra."
+        })
+    if not _es_estado_beneficio(estado) and etapa_beneficio:
+        raise ValidationError({
+            "etapa_beneficio": "La etapa de beneficio solo se indica cuando el estado del lote es 'En Beneficio'."
+        })
 
 
 def registrar_etapa_beneficio(
@@ -1506,8 +1533,8 @@ def registrar_etapa_beneficio(
       ese productor.
     - Solo permite lotes activos. La etapa nunca se elimina físicamente
       (RNF-14): queda disponible de inmediato en el historial del lote.
-    - Avanza el estado general del lote a la fase que corresponde a la etapa
-      (ver `_avanzar_estado_lote_por_etapa`), sin hacerlo retroceder jamás.
+    - Solo se registran etapas mientras el estado general del lote es
+      'En Beneficio' (para cambiarlo ver `cambiar_estado_lote`).
 
     Lanza `ValidationError` con errores por campo (`etapa`, `fecha`,
     `observaciones`) o `lote` / `permiso` para errores de contexto.
@@ -1521,16 +1548,88 @@ def registrar_etapa_beneficio(
         if not lote.activo:
             raise ValidationError({"lote": "No se pueden registrar etapas en un lote inactivo."})
 
-        nueva = EtapaBeneficio(
-            lote=lote,
-            etapa=etapa,
-            fecha=fecha,
-            observaciones=observaciones or "",
-        )
-        nueva.full_clean(exclude=["activo"])
-        nueva.save()
-        _avanzar_estado_lote_por_etapa(lote, nueva.etapa)
-        return nueva
+        if not lote_esta_en_beneficio(lote):
+            raise ValidationError({
+                "lote": (
+                    "Solo se pueden registrar etapas de beneficio mientras el lote está en el estado "
+                    "'En Beneficio'. Cambie primero el estado del lote."
+                )
+            })
+
+        return _crear_etapa_beneficio(lote, etapa, fecha, observaciones)
+
+
+def cambiar_estado_lote(
+    *,
+    lote_o_id,
+    estado_lote_id,
+    etapa_beneficio=None,
+    fecha_etapa=None,
+    observaciones="",
+    productor_id=None,
+) -> Lote:
+    """
+    Cambia el estado general del lote (HU14 / SCRUM-18).
+
+    Reglas de negocio:
+    - Si el estado destino es 'En Beneficio', es obligatorio indicar la etapa
+      de beneficio en la que está (se registra en el historial con su fecha,
+      por defecto hoy). Para cualquier otro estado la etapa no aplica.
+    - El lote solo avanza por la secuencia de fases (ORDEN_FASES_ESTADO_LOTE);
+      no puede retroceder. Quedarse en 'En Beneficio' sí se permite, para
+      registrar nuevas etapas.
+    - Estados personalizados fuera de la secuencia se aceptan sin restricción
+      de orden.
+    - Atómico: si falla la etapa, el estado no cambia. Si se indica
+      `productor_id`, el lote debe ser de ese productor.
+    """
+    with transaction.atomic():
+        lote = _resolver_lote(lote_o_id)
+        lote = Lote.objects.select_for_update().select_related(
+            "estado_lote", "cosecha__finca"
+        ).get(pk=lote.pk)
+
+        if productor_id is not None and str(lote.cosecha.finca.productor_id) != str(productor_id):
+            raise ValidationError({"permiso": "No tiene permiso para cambiar el estado de este lote."})
+        if not lote.activo:
+            raise ValidationError({"lote": "No se puede cambiar el estado de un lote inactivo."})
+
+        destino = EstadoLote.objects.filter(pk=estado_lote_id, activo=True).first()
+        if destino is None:
+            raise ValidationError({"estado_lote": "El estado seleccionado no está activo o no existe."})
+
+        actual = lote.estado_lote
+        es_beneficio = _es_estado_beneficio(destino)
+        if actual is not None and actual.pk == destino.pk and not es_beneficio:
+            raise ValidationError({"estado_lote": f"El lote ya se encuentra en el estado '{destino.nombre}'."})
+
+        if actual is not None:
+            codigo_actual = (actual.codigo or "").strip().upper()
+            codigo_destino = (destino.codigo or "").strip().upper()
+            if codigo_actual in ORDEN_FASES_ESTADO_LOTE and codigo_destino in ORDEN_FASES_ESTADO_LOTE:
+                if ORDEN_FASES_ESTADO_LOTE.index(codigo_destino) < ORDEN_FASES_ESTADO_LOTE.index(codigo_actual):
+                    raise ValidationError({
+                        "estado_lote": (
+                            f"El lote no puede retroceder de '{actual.nombre}' a '{destino.nombre}'."
+                        )
+                    })
+
+        _validar_etapa_segun_estado(destino, etapa_beneficio)
+        if es_beneficio:
+            _crear_etapa_beneficio(
+                lote,
+                etapa_beneficio,
+                _normalizar_fecha_etapa(fecha_etapa),
+                observaciones,
+                campo_etapa="etapa_beneficio",
+                campo_fecha="fecha_etapa",
+            )
+
+        if actual is None or actual.pk != destino.pk:
+            lote.estado_lote = destino
+            lote.save(update_fields=["estado_lote"], sincronizar_qr=False)
+
+    return lote
 
 
 # ==============================================================================
