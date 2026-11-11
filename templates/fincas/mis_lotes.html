@@ -76,6 +76,7 @@
                     <th>Finca y Variedad</th>
                     <th>Proceso y Calidad</th>
                     <th>Cantidad</th>
+                    <th>Estado del lote</th>
                     <th>Estado comercial</th>
                     <th>Catálogo Público</th>
                     <th class="text-end">Acciones</th>
@@ -154,6 +155,14 @@
                         </div>
                     </td>
                     <td class="small">
+                        <!-- Fase general del ciclo de vida (Recolección, En Beneficio, ...); se cambia con el botón "Estado" -->
+                        {% if lote.estado_lote %}
+                            <span class="badge bg-secondary-subtle text-dark border px-2 py-1">{{ lote.estado_lote.nombre }}</span>
+                        {% else %}
+                            <span class="text-muted fst-italic">Sin estado</span>
+                        {% endif %}
+                    </td>
+                    <td class="small">
                         {% if lote.estado_comercial == 'DISPONIBLE' %}
                             <span class="badge bg-success text-white px-2 py-1">
                                 <i class="bi bi-check-circle me-1"></i>Disponible
@@ -211,9 +220,14 @@
                             <a href="{% url 'lote_detalle' lote.id %}" class="btn btn-outline-secondary btn-sm" title="Ver historial de beneficio">
                                 <i class="bi bi-clock-history me-1"></i>Historial
                             </a>
-                            <a href="{% url 'lote_etapa_registro' lote.id %}" class="btn btn-outline-success btn-sm" title="Registrar nueva etapa de beneficio">
-                                <i class="bi bi-plus-circle me-1"></i>Etapa
+                            <!-- Un solo botón: cambia el estado del lote y, si pasa a "En Beneficio", registra la etapa -->
+                            <a href="{% url 'lote_cambiar_estado' lote.id %}" class="btn btn-outline-success btn-sm" title="Cambiar el estado del lote (y registrar la etapa de beneficio)">
+                                <i class="bi bi-arrow-left-right me-1"></i>Estado
                             </a>
+                            <!-- Trazabilidad del lote: línea de tiempo desplegable sin salir del listado -->
+                            <button type="button" class="btn btn-outline-pergamo btn-sm" data-bs-toggle="collapse" data-bs-target="#traza-{{ lote.id }}" aria-expanded="false" aria-controls="traza-{{ lote.id }}" title="Ver la trazabilidad completa del lote">
+                                <i class="bi bi-diagram-3 me-1"></i>Trazabilidad
+                            </button>
                             <!-- HU-18: Visualización y gestión de Código QR del lote -->
                             <button type="button" class="btn btn-outline-dark btn-sm" data-bs-toggle="modal" data-bs-target="#modalQRLote{{ lote.id }}" title="Ver y gestionar Código QR del lote">
                                 <i class="bi bi-qr-code me-1"></i>QR
@@ -239,6 +253,81 @@
                                 </button>
                             {% endif %}
                         {% endif %}
+                    </td>
+                </tr>
+
+                <!-- Trazabilidad del lote: Finca → Cosecha → Lote → Etapas → Calidad → Estado → Publicación -->
+                <tr class="collapse" id="traza-{{ lote.id }}">
+                    <td colspan="8" class="bg-light">
+                        <div class="p-3">
+                            <h6 class="text-uppercase fw-bold text-muted small mb-3">
+                                <i class="bi bi-diagram-3 me-1 text-success"></i>Trazabilidad del lote {{ lote.codigo }}
+                            </h6>
+                            <ol class="list-unstyled mb-0 ms-2 border-start border-2 border-success-subtle ps-4 small">
+                                <li class="mb-3 position-relative">
+                                    <i class="bi bi-geo-alt-fill text-success position-absolute" style="left:-2.2rem;"></i>
+                                    <span class="fw-semibold text-dark">Finca</span>
+                                    <div class="text-secondary">
+                                        {{ lote.cosecha.finca.nombre }}{% if lote.cosecha.finca.municipio %} · {{ lote.cosecha.finca.municipio.nombre }}{% endif %}{% if lote.cosecha.finca.vereda %} · Vereda {{ lote.cosecha.finca.vereda }}{% endif %}
+                                    </div>
+                                </li>
+                                <li class="mb-3 position-relative">
+                                    <i class="bi bi-basket-fill text-success position-absolute" style="left:-2.2rem;"></i>
+                                    <span class="fw-semibold text-dark">Cosecha</span>
+                                    <div class="text-secondary">
+                                        {{ lote.cosecha.fecha_cosecha|date:"d/m/Y" }} · {% if lote.cosecha.variedad %}{{ lote.cosecha.variedad.nombre }}{% else %}Sin variedad{% endif %} · {{ lote.cosecha.cantidad_total }} kg en total
+                                    </div>
+                                </li>
+                                <li class="mb-3 position-relative">
+                                    <i class="bi bi-box-seam-fill text-success position-absolute" style="left:-2.2rem;"></i>
+                                    <span class="fw-semibold text-dark">Lote {{ lote.codigo }}</span>
+                                    <div class="text-secondary">{{ lote.cantidad }} kg · creado el {{ lote.creado_en|date:"d/m/Y" }}</div>
+                                </li>
+                                <li class="mb-3 position-relative">
+                                    <i class="bi bi-gear-fill text-success position-absolute" style="left:-2.2rem;"></i>
+                                    <span class="fw-semibold text-dark">Beneficio</span>
+                                    <div class="text-secondary">
+                                        {% if lote.proceso_beneficio %}Proceso: {{ lote.proceso_beneficio.nombre }}{% else %}Aún sin proceso de beneficio definido{% endif %}
+                                    </div>
+                                    {% if lote.etapas_activas %}
+                                    <div class="d-flex flex-wrap gap-2 mt-1">
+                                        {% for etapa in lote.etapas_activas %}
+                                        <span class="badge bg-info-subtle text-info border border-info-subtle">
+                                            {{ etapa.get_etapa_display }} · {{ etapa.fecha|date:"d/m/Y" }}
+                                        </span>
+                                        {% endfor %}
+                                    </div>
+                                    {% else %}
+                                    <div class="text-muted fst-italic">Sin etapas de beneficio registradas</div>
+                                    {% endif %}
+                                </li>
+                                <li class="mb-3 position-relative">
+                                    <i class="bi bi-award-fill text-success position-absolute" style="left:-2.2rem;"></i>
+                                    <span class="fw-semibold text-dark">Calidad</span>
+                                    <div class="text-secondary">
+                                        {% if lote.caracteristicas_calidad %}
+                                            {% if lote.caracteristicas_calidad.puntaje_taza %}{{ lote.caracteristicas_calidad.puntaje_taza }} pts SCA{% endif %}
+                                            {% if lote.caracteristicas_calidad.humedad %} · {{ lote.caracteristicas_calidad.humedad }}% humedad{% endif %}
+                                        {% else %}
+                                            <span class="fst-italic">Sin calidad registrada</span>
+                                        {% endif %}
+                                    </div>
+                                </li>
+                                <li class="mb-3 position-relative">
+                                    <i class="bi bi-flag-fill text-success position-absolute" style="left:-2.2rem;"></i>
+                                    <span class="fw-semibold text-dark">Estado del lote</span>
+                                    <div class="text-secondary">{% if lote.estado_lote %}{{ lote.estado_lote.nombre }}{% else %}Sin estado{% endif %}</div>
+                                </li>
+                                <li class="position-relative">
+                                    <i class="bi bi-shop text-success position-absolute" style="left:-2.2rem;"></i>
+                                    <span class="fw-semibold text-dark">Publicación</span>
+                                    <div class="text-secondary">
+                                        {% if lote.publicado_en_catalogo %}Publicado en el catálogo{% if lote.fecha_publicacion %} el {{ lote.fecha_publicacion|date:"d/m/Y" }}{% endif %}{% else %}No publicado en el catálogo{% endif %}
+                                        · Estado comercial: {{ lote.get_estado_comercial_display }}
+                                    </div>
+                                </li>
+                            </ol>
+                        </div>
                     </td>
                 </tr>
 

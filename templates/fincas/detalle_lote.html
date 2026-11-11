@@ -38,10 +38,14 @@
                             <div>
                                 <h1 class="h4 mb-0 fw-bold text-dark">Lote {{ lote.codigo }}</h1>
                                 <p class="text-muted small mb-0">Registrado el {{ lote.creado_en|date:"d/m/Y" }}</p>
+                                <div class="mt-1">
+                                    <span class="badge bg-secondary-subtle text-dark border" id="badge-estado-lote">Estado: {{ lote.estado_lote.nombre|default:"Sin estado" }}</span>
+                                    {% if lote.proceso_beneficio %}<span class="badge bg-info-subtle text-dark border">Proceso: {{ lote.proceso_beneficio.nombre }}</span>{% endif %}
+                                </div>
                             </div>
                         </div>
-                        <a href="{% url 'lote_etapa_registro' lote.pk %}" class="btn btn-primary bg-primary px-4 fw-semibold" id="btn-nueva-etapa">
-                            <i class="bi bi-plus-circle me-1"></i> Nueva etapa de beneficio
+                        <a href="{% url 'lote_cambiar_estado' lote.pk %}" class="btn btn-primary bg-primary px-4 fw-semibold" id="btn-cambiar-estado">
+                            <i class="bi bi-arrow-left-right me-1"></i> Cambiar estado
                         </a>
                         <a href="{% url 'lote_calidad' lote.pk %}" class="btn btn-outline-pergamo px-4 fw-semibold">
                             <i class="bi bi-award me-1"></i> Calidad
@@ -196,9 +200,9 @@
                     <div class="text-center p-4" id="historial-vacio">
                         <i class="bi bi-hourglass fs-1 text-muted mb-3 d-block"></i>
                         <h5 class="fw-bold text-dark">Este lote todavía no tiene etapas de beneficio registradas</h5>
-                        <p class="text-muted mb-4">Registra la primera etapa (despulpado, fermentación, lavado o secado) para empezar su historial.</p>
-                        <a href="{% url 'lote_etapa_registro' lote.pk %}" class="btn btn-primary bg-primary px-4 fw-semibold">
-                            <i class="bi bi-plus-circle me-1"></i> Registrar primera etapa
+                        <p class="text-muted mb-4">Pase el lote a "En Beneficio" e indique su etapa (despulpado, fermentación, lavado o secado) para empezar su historial.</p>
+                        <a href="{% url 'lote_cambiar_estado' lote.pk %}" class="btn btn-primary bg-primary px-4 fw-semibold">
+                            <i class="bi bi-arrow-left-right me-1"></i> Cambiar estado y registrar la primera etapa
                         </a>
                     </div>
                     {% endif %}

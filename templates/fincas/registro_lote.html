@@ -64,8 +64,22 @@
                             <div class="form-text small text-muted">Solo se listan cosechas suyas, activas y con saldo disponible.</div>
                         </div>
 
-                        <div class="row g-3 mb-4">
-                            <div class="col-md-6">
+                        <div class="mb-4">
+                            <label for="id_estado_lote" class="form-label fw-semibold text-dark">
+                                Estado del lote <span class="text-danger">*</span>
+                            </label>
+                            {{ form.estado_lote }}
+                            {% if form.estado_lote.errors %}
+                            <div class="small text-danger mt-1">{{ form.estado_lote.errors|join:" " }}</div>
+                            {% endif %}
+                        </div>
+
+                        <!-- Etapa de beneficio: solo aparece (y es obligatoria) cuando el estado del lote es "En Beneficio" -->
+                        <div class="row g-3 mb-4 p-3 rounded-3 bg-light border" id="bloque-etapa-beneficio" style="display: none;">
+                            <div class="col-12 small text-muted">
+                                <i class="bi bi-info-circle me-1"></i>El lote está <strong>En Beneficio</strong>: indique el proceso y en qué etapa del beneficio se encuentra.
+                            </div>
+                            <div class="col-12">
                                 <label for="id_proceso_beneficio" class="form-label fw-semibold text-dark">
                                     Proceso de beneficio <span class="text-danger">*</span>
                                 </label>
@@ -75,12 +89,21 @@
                                 {% endif %}
                             </div>
                             <div class="col-md-6">
-                                <label for="id_estado_lote" class="form-label fw-semibold text-dark">
-                                    Estado del lote <span class="text-danger">*</span>
+                                <label for="id_etapa_beneficio" class="form-label fw-semibold text-dark">
+                                    Etapa de beneficio <span class="text-danger">*</span>
                                 </label>
-                                {{ form.estado_lote }}
-                                {% if form.estado_lote.errors %}
-                                <div class="small text-danger mt-1">{{ form.estado_lote.errors|join:" " }}</div>
+                                {{ form.etapa_beneficio }}
+                                {% if form.etapa_beneficio.errors %}
+                                <div class="small text-danger mt-1">{{ form.etapa_beneficio.errors|join:" " }}</div>
+                                {% endif %}
+                            </div>
+                            <div class="col-md-6">
+                                <label for="id_fecha_etapa" class="form-label fw-semibold text-dark">
+                                    Fecha de la etapa <span class="text-danger">*</span>
+                                </label>
+                                {{ form.fecha_etapa }}
+                                {% if form.fecha_etapa.errors %}
+                                <div class="small text-danger mt-1">{{ form.fecha_etapa.errors|join:" " }}</div>
                                 {% endif %}
                             </div>
                         </div>
@@ -164,4 +187,24 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    // La etapa de beneficio solo aplica cuando el estado del lote es "En Beneficio".
+    (function () {
+        var estado = document.getElementById('id_estado_lote');
+        var bloque = document.getElementById('bloque-etapa-beneficio');
+        if (!estado || !bloque) { return; }
+        var campos = bloque.querySelectorAll('select, input');
+        function actualizar() {
+            var opcion = estado.options[estado.selectedIndex];
+            var enBeneficio = !!opcion && /^BENEFICIO\b/i.test(opcion.text.trim());
+            bloque.style.display = enBeneficio ? '' : 'none';
+            campos.forEach(function (c) { c.disabled = !enBeneficio; });
+        }
+        estado.addEventListener('change', actualizar);
+        actualizar();
+    })();
+</script>
 {% endblock %}

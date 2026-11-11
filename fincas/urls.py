@@ -27,6 +27,7 @@ urlpatterns = [
     path('lotes/<int:pk>/', views.detalle_lote_view, name='lote_detalle'),
     path('lotes/<int:pk>/calidad/', views.registrar_calidad_lote_view, name='lote_calidad'),
     path('lotes/<int:pk>/etapas/nueva/', views.registrar_etapa_beneficio_view, name='lote_etapa_registro'),
+    path('lotes/<int:pk>/estado/', views.cambiar_estado_lote_view, name='lote_cambiar_estado'),
     path('lotes/<int:pk>/manifestar-interes/', views.manifestar_interes_lote_web_view, name='lote_manifestar_interes_web'),
     path('lotes/<int:pk>/publicar/', views.publicar_lote_web_view, name='lote_publicar'),
     path('lotes/<int:pk>/despublicar/', views.despublicar_lote_web_view, name='lote_despublicar'),

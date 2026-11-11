@@ -30,7 +30,7 @@ from typing import Optional
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db.models import Count, Q
+from django.db.models import Count, Prefetch, Q
 from django.http import Http404, HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
@@ -46,6 +46,7 @@ from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from .forms import (
     CaracteristicasCalidadForm,
     CosechaRegistroForm,
+    CambiarEstadoLoteForm,
     EtapaBeneficioForm,
     FincaRegistroForm,
     FincaModelForm,
@@ -98,6 +99,9 @@ from .services import (
     marcar_manifestacion_interes_vista,
     registrar_auditoria_ficha_digital,
     registrar_etapa_beneficio,
+    resumen_trazabilidad_productor,
+    cambiar_estado_lote,
+    lote_esta_en_beneficio,
     registrar_manifestacion_interes,
     resolver_lote_desde_qr,
     sanitizar_ficha_por_visibilidad,
@@ -742,7 +746,11 @@ def mis_fincas_view(request):
     return render(
         request,
         "fincas/mis_fincas.html",
-        {"fincas": fincas, "fincas_geo": fincas_geo},
+        {
+            "fincas": fincas,
+            "fincas_geo": fincas_geo,
+            "trazabilidad": resumen_trazabilidad_productor(productor_id),
+        },
     )
 
 
@@ -866,6 +874,8 @@ def api_crear_lote_view(request):
             codigo=request.data.get("codigo"),
             proceso_beneficio_id=request.data.get("proceso_beneficio_id"),
             estado_lote_id=request.data.get("estado_lote_id"),
+            etapa_beneficio=request.data.get("etapa_beneficio") or None,
+            fecha_etapa=request.data.get("fecha_etapa") or None,
         )
     except ValidationError as exc:
         detalle = exc.message_dict if hasattr(exc, "message_dict") else {"error": exc.messages}
@@ -1067,10 +1077,13 @@ def registrar_lote_view(request):
                     cosecha_id=cosecha.pk,
                     cantidad=form.cleaned_data["cantidad"],
                     codigo=form.cleaned_data.get("codigo") or None,
-                    proceso_beneficio_id=form.cleaned_data[
-                        "proceso_beneficio"
-                    ].pk,
+                    proceso_beneficio_id=(
+                        form.cleaned_data["proceso_beneficio"].pk
+                        if form.cleaned_data.get("proceso_beneficio") else None
+                    ),
                     estado_lote_id=form.cleaned_data["estado_lote"].pk,
+                    etapa_beneficio=form.cleaned_data.get("etapa_beneficio") or None,
+                    fecha_etapa=form.cleaned_data.get("fecha_etapa"),
                 )
             except ValidationError as exc:
                 # Traduce los errores de negocio de crear_lote() (que no
@@ -1144,8 +1157,16 @@ def mis_lotes_view(request):
             "cosecha__finca__municipio",
             "cosecha__variedad",
             "proceso_beneficio",
+            "estado_lote",
             "caracteristicas_calidad",
             "codigo_qr",
+        )
+        .prefetch_related(
+            Prefetch(
+                "etapas_beneficio",
+                queryset=EtapaBeneficio.objects.filter(activo=True),
+                to_attr="etapas_activas",
+            )
         )
         .order_by("-creado_en")
     )
@@ -2086,6 +2107,14 @@ def registrar_etapa_beneficio_view(request, pk):
 
     lote = _obtener_lote_del_productor(productor_id, pk)
 
+    if not lote_esta_en_beneficio(lote):
+        messages.warning(
+            request,
+            "Las etapas de beneficio solo se registran cuando el lote está 'En Beneficio'. "
+            "Cambie primero el estado del lote."
+        )
+        return redirect("lote_cambiar_estado", pk=lote.pk)
+
     if request.method == "POST":
         form = EtapaBeneficioForm(request.POST)
         if form.is_valid():
@@ -2129,6 +2158,63 @@ def registrar_etapa_beneficio_view(request, pk):
         "fincas/registro_etapa_beneficio.html",
         {"form": form, "lote": lote},
     )
+
+
+@permiso_requerido_sesion("trazabilidad.registrar_etapa")
+def cambiar_estado_lote_view(request, pk):
+    """
+    Cambia el estado general de un lote del productor. Si el nuevo estado es
+    'En Beneficio', el formulario pide además la etapa de beneficio exacta
+    (despulpado, fermentación, lavado o secado) y su fecha.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(request, "Debe iniciar sesión con su cuenta de productor para cambiar el estado de un lote.")
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    lote = _obtener_lote_del_productor(productor_id, pk)
+
+    if request.method == "POST":
+        form = CambiarEstadoLoteForm(request.POST, lote=lote)
+        if form.is_valid():
+            try:
+                lote = cambiar_estado_lote(
+                    lote_o_id=lote,
+                    estado_lote_id=form.cleaned_data["estado_lote"].pk,
+                    etapa_beneficio=form.cleaned_data.get("etapa_beneficio") or None,
+                    fecha_etapa=form.cleaned_data.get("fecha_etapa"),
+                    observaciones=form.cleaned_data.get("observaciones", ""),
+                    productor_id=productor_id,
+                    proceso_beneficio_id=(
+                        form.cleaned_data["proceso_beneficio"].pk
+                        if form.cleaned_data.get("proceso_beneficio") else None
+                    ),
+                )
+            except ValidationError as exc:
+                errores = exc.message_dict if hasattr(exc, "message_dict") else {"__all__": exc.messages}
+                for campo, lista_errores in errores.items():
+                    destino = campo if campo in form.fields else None
+                    for error in lista_errores:
+                        form.add_error(destino, error)
+                messages.error(
+                    request,
+                    "Por favor revise los errores señalados en el formulario antes de continuar."
+                )
+            else:
+                messages.success(
+                    request,
+                    f"El lote '{lote.codigo}' ahora está en el estado '{lote.estado_lote.nombre}'."
+                )
+                return redirect("lote_detalle", pk=lote.pk)
+        else:
+            messages.error(
+                request,
+                "Por favor revise los errores señalados en el formulario antes de continuar."
+            )
+    else:
+        form = CambiarEstadoLoteForm(initial={"estado_lote": lote.estado_lote_id}, lote=lote)
+
+    return render(request, "fincas/cambiar_estado_lote.html", {"form": form, "lote": lote})
 
 
 # ==============================================================================

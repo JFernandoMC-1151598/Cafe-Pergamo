@@ -24,8 +24,9 @@ import uuid
 
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 import qrcode
 from qrcode.constants import (
     ERROR_CORRECT_H,
@@ -386,6 +387,8 @@ def crear_lote(
     codigo: Optional[str] = None,
     proceso_beneficio_id=None,
     estado_lote_id=None,
+    etapa_beneficio=None,
+    fecha_etapa=None,
 ) -> Lote:
     """
     Crea un lote de café a partir de una cosecha existente, descontando
@@ -432,6 +435,17 @@ def crear_lote(
             raise ValidationError(
                 {"estado_lote": "El estado seleccionado no está activo o no existe."}
             )
+
+    # Regla de negocio: la etapa de beneficio se indica solo si (y siempre que)
+    # el lote nace en el estado 'En Beneficio'.
+    _validar_etapa_segun_estado(estado, etapa_beneficio)
+    if _es_estado_beneficio(estado) and proceso is None:
+        raise ValidationError({
+            "proceso_beneficio": "Si el lote está 'En Beneficio', debe indicar el proceso de beneficio."
+        })
+    fecha_etapa_normalizada = (
+        _normalizar_fecha_etapa(fecha_etapa) if _es_estado_beneficio(estado) else None
+    )
 
     with transaction.atomic():
         try:
@@ -486,6 +500,15 @@ def crear_lote(
         # refleje el nuevo saldo (o viceversa).
         cosecha.cantidad_disponible = cosecha.cantidad_disponible - cantidad
         cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
+
+        if _es_estado_beneficio(estado):
+            _crear_etapa_beneficio(
+                lote,
+                etapa_beneficio,
+                fecha_etapa_normalizada,
+                campo_etapa="etapa_beneficio",
+                campo_fecha="fecha_etapa",
+            )
 
         # HU18-ST1 (SCRUM-174): Generación y persistencia automática del código QR asociado al lote
         sincronizar_o_generar_qr_lote(lote)
@@ -1192,6 +1215,7 @@ def publicar_lote_en_catalogo(
         if precio_dec is not None:
             update_fields.append("precio_referencial")
         lote.save(update_fields=update_fields)
+        _alinear_estado_con_publicacion(lote)
 
         snapshot = generar_snapshot_trazabilidad(lote)
         BitacoraPublicacionLote.objects.create(
@@ -1270,7 +1294,7 @@ OPCIONES_PUNTAJE_MINIMO_CATALOGO = (80, 84, 86, 88)
 PARAMETROS_FILTRO_CATALOGO = ("municipio", "variedad", "proceso", "puntaje_min", "q")
 
 
-def lotes_disponibles_en_catalogo():
+def lotes_disponibles_en_catalogo(productor_id=None):
     """
     Queryset base de lotes "disponibles" en el catálogo público
     (SCRUM-248 / HU20-ST4). El criterio de aceptación de la HU-20 exige que
@@ -1281,15 +1305,21 @@ def lotes_disponibles_en_catalogo():
     - Cantidad mayor a 0 kg.
     - Cosecha y finca de origen activas (un lote publicado cuya finca se
       inactivó después no debe seguir ofreciéndose).
+
+    Si se indica `productor_id` ("Mi Catálogo" del productor), se limita a
+    los lotes de las fincas de ese productor: nunca los de otros.
     """
+    lotes = Lote.objects.filter(
+        publicado_en_catalogo=True,
+        activo=True,
+        cantidad__gt=Decimal("0.00"),
+        cosecha__activo=True,
+        cosecha__finca__activo=True,
+    )
+    if productor_id is not None:
+        lotes = lotes.filter(cosecha__finca__productor_id=productor_id)
     return (
-        Lote.objects.filter(
-            publicado_en_catalogo=True,
-            activo=True,
-            cantidad__gt=Decimal("0.00"),
-            cosecha__activo=True,
-            cosecha__finca__activo=True,
-        )
+        lotes
         .select_related(
             "cosecha__finca__municipio",
             "cosecha__variedad",
@@ -1368,6 +1398,7 @@ def filtrar_catalogo_lotes(
     proceso: Optional[int] = None,
     puntaje_min: Optional[Decimal] = None,
     q: Optional[str] = None,
+    productor_id=None,
 ):
     """
     Consulta filtrada de lotes disponibles en el catálogo
@@ -1384,7 +1415,7 @@ def filtrar_catalogo_lotes(
     - q: búsqueda de texto en código del lote, finca, vereda, municipio y
       perfil sensorial.
     """
-    lotes = lotes_disponibles_en_catalogo()
+    lotes = lotes_disponibles_en_catalogo(productor_id=productor_id)
 
     if municipio:
         lotes = lotes.filter(cosecha__finca__municipio_id=municipio)
@@ -1406,7 +1437,7 @@ def filtrar_catalogo_lotes(
     return lotes
 
 
-def obtener_opciones_filtro_catalogo() -> dict:
+def obtener_opciones_filtro_catalogo(productor_id=None) -> dict:
     """
     Opciones para los controles de filtro de la interfaz (SCRUM-246 / HU20-ST1).
 
@@ -1414,7 +1445,7 @@ def obtener_opciones_filtro_catalogo() -> dict:
     lote disponible en el catálogo: así el comprador nunca elige una opción
     que por construcción devolvería cero resultados.
     """
-    base = lotes_disponibles_en_catalogo()
+    base = lotes_disponibles_en_catalogo(productor_id=productor_id)
     return {
         "municipios": Municipio.objects.filter(
             pk__in=base.values("cosecha__finca__municipio_id")
@@ -1430,8 +1461,161 @@ def obtener_opciones_filtro_catalogo() -> dict:
 
 
 # ==============================================================================
+# TRAZABILIDAD DE LA PRODUCCIÓN DEL PRODUCTOR (gráficos de "Mis Fincas")
+# ==============================================================================
+
+def resumen_trazabilidad_productor(productor_id) -> dict:
+    """
+    Resumen de la trazabilidad de TODA la producción de un productor, para los
+    gráficos de "Mis Fincas": cosecha -> lotes -> estado y proceso de beneficio.
+
+    Solo cuenta lo del productor indicado (fincas, cosechas y lotes activos),
+    nunca datos de otros productores. Los valores van como números simples
+    (float/int) para poder serializarse a JSON tal cual.
+    """
+    cosechas = (
+        Cosecha.objects.filter(
+            finca__productor_id=productor_id, finca__activo=True, activo=True
+        )
+        .select_related("finca", "variedad")
+        .annotate(num_lotes=Count("lotes", filter=Q(lotes__activo=True)))
+        .order_by("fecha_cosecha", "id")
+    )
+    detalle_cosechas = []
+    kg_total = Decimal("0.00")
+    kg_en_lotes = Decimal("0.00")
+    for cosecha in cosechas:
+        en_lotes = cosecha.cantidad_total - cosecha.cantidad_disponible
+        kg_total += cosecha.cantidad_total
+        kg_en_lotes += en_lotes
+        detalle_cosechas.append({
+            "etiqueta": f"{cosecha.finca.nombre} · {cosecha.fecha_cosecha:%d/%m/%Y}",
+            "finca": cosecha.finca.nombre,
+            "variedad": cosecha.variedad.nombre if cosecha.variedad else "Sin variedad",
+            "total_kg": float(cosecha.cantidad_total),
+            "en_lotes_kg": float(en_lotes),
+            "disponible_kg": float(cosecha.cantidad_disponible),
+            "lotes": cosecha.num_lotes,
+        })
+
+    lotes = Lote.objects.filter(
+        cosecha__finca__productor_id=productor_id,
+        cosecha__finca__activo=True,
+        cosecha__activo=True,
+        activo=True,
+    )
+
+    def _distribucion(campo_nombre, etiqueta_vacia):
+        filas = (
+            lotes.values(campo_nombre)
+            .annotate(total=Count("id"))
+            .order_by("-total", campo_nombre)
+        )
+        return [
+            {"nombre": fila[campo_nombre] or etiqueta_vacia, "total": fila["total"]}
+            for fila in filas
+        ]
+
+    return {
+        "total_cosechas": len(detalle_cosechas),
+        "total_lotes": lotes.count(),
+        "kg_total": float(kg_total),
+        "kg_en_lotes": float(kg_en_lotes),
+        "cosechas": detalle_cosechas,
+        "por_estado": _distribucion("estado_lote__nombre", "Sin estado"),
+        "por_proceso": _distribucion("proceso_beneficio__nombre", "Sin proceso"),
+    }
+
+
+# ==============================================================================
 # ETAPAS DE BENEFICIO DEL LOTE (HU-14 / SCRUM-18)
 # ==============================================================================
+
+# Fases generales del ciclo de vida del lote (catálogo EstadoLote), en orden.
+# Al cambiar el estado manualmente, el lote solo avanza por esta secuencia.
+CODIGO_ESTADO_BENEFICIO = "BENEFICIO"
+ORDEN_FASES_ESTADO_LOTE = (
+    "RECOLECCION",
+    CODIGO_ESTADO_BENEFICIO,
+    "SECADO",
+    "ALMACENADO",
+    "CATACION",
+    "PUBLICADO",
+    "VENDIDO",
+)
+
+
+CODIGO_ESTADO_PUBLICADO = "PUBLICADO"
+
+
+def _alinear_estado_con_publicacion(lote: Lote) -> bool:
+    """
+    Publicar un lote en el catálogo lo lleva al estado general 'Publicado'
+    (si aún está en una fase anterior). Nunca retrocede ni toca estados
+    personalizados, y no falla si el catálogo no tiene activo ese estado.
+    """
+    actual = lote.estado_lote
+    if actual is not None:
+        codigo_actual = (actual.codigo or "").strip().upper()
+        if codigo_actual not in ORDEN_FASES_ESTADO_LOTE:
+            return False
+        if ORDEN_FASES_ESTADO_LOTE.index(codigo_actual) >= ORDEN_FASES_ESTADO_LOTE.index(CODIGO_ESTADO_PUBLICADO):
+            return False
+    destino = EstadoLote.objects.filter(codigo__iexact=CODIGO_ESTADO_PUBLICADO, activo=True).first()
+    if not destino:
+        return False
+    lote.estado_lote = destino
+    lote.save(update_fields=["estado_lote"], sincronizar_qr=False)
+    return True
+
+
+def _es_estado_beneficio(estado) -> bool:
+    return bool(estado) and (estado.codigo or "").strip().upper() == CODIGO_ESTADO_BENEFICIO
+
+
+def lote_esta_en_beneficio(lote: Lote) -> bool:
+    """True si el estado general del lote es 'En Beneficio' (única fase en la que se registran etapas)."""
+    return _es_estado_beneficio(lote.estado_lote)
+
+
+def _normalizar_fecha_etapa(fecha, campo="fecha_etapa"):
+    """Convierte la fecha recibida (date, 'AAAA-MM-DD' o vacía = hoy) en un date."""
+    if fecha in (None, ""):
+        return timezone.localdate()
+    if isinstance(fecha, str):
+        parseada = parse_date(fecha.strip())
+        if parseada is None:
+            raise ValidationError({campo: "Ingrese una fecha válida (AAAA-MM-DD)."})
+        return parseada
+    return fecha
+
+
+def _crear_etapa_beneficio(lote, etapa, fecha, observaciones="", *, campo_etapa="etapa", campo_fecha="fecha"):
+    """Valida (modelo) y guarda una etapa de beneficio; renombra los campos de error si hace falta."""
+    nueva = EtapaBeneficio(
+        lote=lote, etapa=etapa, fecha=fecha, observaciones=observaciones or "",
+    )
+    try:
+        nueva.full_clean(exclude=["activo"])
+    except ValidationError as exc:
+        errores = exc.message_dict if hasattr(exc, "message_dict") else {"__all__": exc.messages}
+        mapa = {"etapa": campo_etapa, "fecha": campo_fecha}
+        raise ValidationError({mapa.get(campo, campo): msgs for campo, msgs in errores.items()})
+    nueva.save()
+    return nueva
+
+
+def _validar_etapa_segun_estado(estado, etapa_beneficio):
+    """Regla de negocio: la etapa se indica si y solo si el estado destino es 'En Beneficio'."""
+    if _es_estado_beneficio(estado) and not etapa_beneficio:
+        raise ValidationError({
+            "etapa_beneficio": "Si el lote está 'En Beneficio', debe indicar la etapa de beneficio en la que se encuentra."
+        })
+    if not _es_estado_beneficio(estado) and etapa_beneficio:
+        raise ValidationError({
+            "etapa_beneficio": "La etapa de beneficio solo se indica cuando el estado del lote es 'En Beneficio'."
+        })
+
 
 def registrar_etapa_beneficio(
     *,
@@ -1452,6 +1636,8 @@ def registrar_etapa_beneficio(
       ese productor.
     - Solo permite lotes activos. La etapa nunca se elimina físicamente
       (RNF-14): queda disponible de inmediato en el historial del lote.
+    - Solo se registran etapas mientras el estado general del lote es
+      'En Beneficio' (para cambiarlo ver `cambiar_estado_lote`).
 
     Lanza `ValidationError` con errores por campo (`etapa`, `fecha`,
     `observaciones`) o `lote` / `permiso` para errores de contexto.
@@ -1465,15 +1651,118 @@ def registrar_etapa_beneficio(
         if not lote.activo:
             raise ValidationError({"lote": "No se pueden registrar etapas en un lote inactivo."})
 
-        nueva = EtapaBeneficio(
-            lote=lote,
-            etapa=etapa,
-            fecha=fecha,
-            observaciones=observaciones or "",
-        )
-        nueva.full_clean(exclude=["activo"])
-        nueva.save()
-        return nueva
+        if not lote_esta_en_beneficio(lote):
+            raise ValidationError({
+                "lote": (
+                    "Solo se pueden registrar etapas de beneficio mientras el lote está en el estado "
+                    "'En Beneficio'. Cambie primero el estado del lote."
+                )
+            })
+
+        return _crear_etapa_beneficio(lote, etapa, fecha, observaciones)
+
+
+def cambiar_estado_lote(
+    *,
+    lote_o_id,
+    estado_lote_id,
+    etapa_beneficio=None,
+    fecha_etapa=None,
+    observaciones="",
+    productor_id=None,
+    proceso_beneficio_id=None,
+) -> Lote:
+    """
+    Cambia el estado general del lote (HU14 / SCRUM-18).
+
+    Reglas de negocio:
+    - Si el estado destino es 'En Beneficio', es obligatorio indicar la etapa
+      de beneficio en la que está (se registra en el historial con su fecha,
+      por defecto hoy) y, si el lote aún no tiene proceso de beneficio, el
+      proceso (queda fijo desde ese momento). Para cualquier otro estado la
+      etapa no aplica.
+    - El lote solo avanza por la secuencia de fases (ORDEN_FASES_ESTADO_LOTE);
+      no puede retroceder. Quedarse en 'En Beneficio' sí se permite, para
+      registrar nuevas etapas.
+    - Pasar a 'Publicado' publica de verdad el lote en el catálogo (mismas
+      validaciones de HU-19); si no cumple, no se cambia nada.
+    - Estados personalizados fuera de la secuencia se aceptan sin restricción
+      de orden.
+    - Atómico: si falla la etapa, el estado no cambia. Si se indica
+      `productor_id`, el lote debe ser de ese productor.
+    """
+    with transaction.atomic():
+        lote = _resolver_lote(lote_o_id)
+        # of=("self",): en PostgreSQL FOR UPDATE no puede aplicarse al lado
+        # anulable de un LEFT JOIN (estado_lote es opcional), así que solo se
+        # bloquea la fila del lote y las tablas unidas se leen sin bloqueo.
+        lote = Lote.objects.select_for_update(of=("self",)).select_related(
+            "estado_lote", "cosecha__finca"
+        ).get(pk=lote.pk)
+
+        if productor_id is not None and str(lote.cosecha.finca.productor_id) != str(productor_id):
+            raise ValidationError({"permiso": "No tiene permiso para cambiar el estado de este lote."})
+        if not lote.activo:
+            raise ValidationError({"lote": "No se puede cambiar el estado de un lote inactivo."})
+
+        destino = EstadoLote.objects.filter(pk=estado_lote_id, activo=True).first()
+        if destino is None:
+            raise ValidationError({"estado_lote": "El estado seleccionado no está activo o no existe."})
+
+        actual = lote.estado_lote
+        es_beneficio = _es_estado_beneficio(destino)
+        if actual is not None and actual.pk == destino.pk and not es_beneficio:
+            raise ValidationError({"estado_lote": f"El lote ya se encuentra en el estado '{destino.nombre}'."})
+
+        if actual is not None:
+            codigo_actual = (actual.codigo or "").strip().upper()
+            codigo_destino = (destino.codigo or "").strip().upper()
+            if codigo_actual in ORDEN_FASES_ESTADO_LOTE and codigo_destino in ORDEN_FASES_ESTADO_LOTE:
+                if ORDEN_FASES_ESTADO_LOTE.index(codigo_destino) < ORDEN_FASES_ESTADO_LOTE.index(codigo_actual):
+                    raise ValidationError({
+                        "estado_lote": (
+                            f"El lote no puede retroceder de '{actual.nombre}' a '{destino.nombre}'."
+                        )
+                    })
+
+        _validar_etapa_segun_estado(destino, etapa_beneficio)
+        if es_beneficio:
+            if lote.proceso_beneficio_id is None:
+                if proceso_beneficio_id is None:
+                    raise ValidationError({
+                        "proceso_beneficio": "Debe indicar el proceso de beneficio del lote."
+                    })
+                proceso = ProcesoBeneficio.objects.filter(pk=proceso_beneficio_id, activo=True).first()
+                if proceso is None:
+                    raise ValidationError({
+                        "proceso_beneficio": "El proceso seleccionado no está activo o no existe."
+                    })
+                lote.proceso_beneficio = proceso
+                lote.save(update_fields=["proceso_beneficio"], sincronizar_qr=False)
+            elif proceso_beneficio_id not in (None, "") and str(proceso_beneficio_id) != str(lote.proceso_beneficio_id):
+                raise ValidationError({
+                    "proceso_beneficio": "El proceso de beneficio del lote ya está definido y no se puede cambiar."
+                })
+            _crear_etapa_beneficio(
+                lote,
+                etapa_beneficio,
+                _normalizar_fecha_etapa(fecha_etapa),
+                observaciones,
+                campo_etapa="etapa_beneficio",
+                campo_fecha="fecha_etapa",
+            )
+
+        # 'Publicado' es una publicación real en el catálogo: aplica las mismas
+        # validaciones de HU-19 y, si faltan datos, el cambio entero se cancela.
+        if (destino.codigo or "").strip().upper() == CODIGO_ESTADO_PUBLICADO and not lote.publicado_en_catalogo:
+            publicar_lote_en_catalogo(lote_id=lote.pk, productor_id=productor_id)
+            lote.refresh_from_db()
+
+        if lote.estado_lote_id != destino.pk:
+            lote.estado_lote = destino
+            lote.save(update_fields=["estado_lote"], sincronizar_qr=False)
+
+    return lote
 
 
 # ==============================================================================
