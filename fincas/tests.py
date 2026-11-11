@@ -10731,3 +10731,103 @@ class UrlPublicaCodigoQRTests(TestCase):
         qr_mock.return_value.add_data.assert_called_with(
             f"{self.DOMINIO}/trazabilidad/lote/LOTEURL01/"
         )
+
+
+class EstadoLoteSincronizadoConEtapasTests(TestCase):
+    """
+    HU14 (SCRUM-18) - El estado general del lote debe ser coherente con las
+    etapas de beneficio registradas: la primera etapa lo pasa a "En Beneficio",
+    el secado a "En Secado", y nunca retrocede.
+    """
+
+    def _estado(self, codigo, nombre, activo=True):
+        estado, _ = EstadoLote.objects.get_or_create(
+            codigo=codigo, defaults={"nombre": nombre, "activo": activo}
+        )
+        return estado
+
+    def setUp(self):
+        self.productor_id = uuid.uuid4()
+        municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        finca = Finca.objects.create(
+            nombre="Finca Estados", productor_id=self.productor_id,
+            municipio=municipio, activo=True,
+        )
+        variedad = VariedadCafe.objects.create(nombre="Caturra Estados", especie="Arábica", activo=True)
+        self.cosecha = Cosecha.objects.create(
+            finca=finca, variedad=variedad, fecha_cosecha=date(2026, 10, 1),
+            cantidad_total=Decimal("1000.00"), cantidad_disponible=Decimal("1000.00"),
+            activo=True,
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO_EST", nombre="Lavado Estados", activo=True
+        )
+        self.recoleccion = self._estado("RECOLECCION", "Recolección")
+        self.beneficio = self._estado("BENEFICIO", "En Beneficio")
+        self.secado = self._estado("SECADO", "En Secado")
+        self.almacenado = self._estado("ALMACENADO", "Almacenado / Pergamino")
+
+    def _lote(self, codigo, estado):
+        return crear_lote(
+            cosecha_id=self.cosecha.pk, cantidad=Decimal("100.00"), codigo=codigo,
+            proceso_beneficio_id=self.proceso.pk,
+            estado_lote_id=estado.pk if estado else None,
+        )
+
+    def _etapa(self, lote, etapa):
+        return registrar_etapa_beneficio(
+            lote_o_id=lote, etapa=etapa, fecha=date(2026, 10, 5),
+            productor_id=self.productor_id,
+        )
+
+    def test_primera_etapa_pasa_el_lote_de_recoleccion_a_beneficio(self):
+        lote = self._lote("LOTEEST01", self.recoleccion)
+        self._etapa(lote, "DESPULPADO")
+        lote.refresh_from_db()
+        self.assertEqual(lote.estado_lote, self.beneficio)
+
+    def test_etapa_secado_pasa_el_lote_a_secado(self):
+        lote = self._lote("LOTEEST02", self.recoleccion)
+        self._etapa(lote, "DESPULPADO")
+        self._etapa(lote, "SECADO")
+        lote.refresh_from_db()
+        self.assertEqual(lote.estado_lote, self.secado)
+
+    def test_el_estado_nunca_retrocede(self):
+        lote = self._lote("LOTEEST03", self.almacenado)
+        self._etapa(lote, "DESPULPADO")
+        self._etapa(lote, "SECADO")
+        lote.refresh_from_db()
+        self.assertEqual(lote.estado_lote, self.almacenado)
+
+    def test_etapa_atrasada_no_hace_retroceder_de_secado_a_beneficio(self):
+        lote = self._lote("LOTEEST04", self.recoleccion)
+        self._etapa(lote, "SECADO")
+        self._etapa(lote, "LAVADO")
+        lote.refresh_from_db()
+        self.assertEqual(lote.estado_lote, self.secado)
+
+    def test_lote_sin_estado_recibe_el_de_la_fase(self):
+        lote = self._lote("LOTEEST05", None)
+        self.assertIsNone(lote.estado_lote)
+        self._etapa(lote, "FERMENTACION")
+        lote.refresh_from_db()
+        self.assertEqual(lote.estado_lote, self.beneficio)
+
+    def test_estado_personalizado_fuera_de_la_secuencia_no_se_toca(self):
+        personalizado = self._estado("EN_REVISION", "En revisión")
+        lote = self._lote("LOTEEST06", personalizado)
+        self._etapa(lote, "DESPULPADO")
+        lote.refresh_from_db()
+        self.assertEqual(lote.estado_lote, personalizado)
+
+    def test_si_la_fase_destino_esta_inactiva_se_registra_la_etapa_sin_fallar(self):
+        lote = self._lote("LOTEEST07", self.recoleccion)
+        self.beneficio.activo = False
+        self.beneficio.save()
+        etapa = self._etapa(lote, "DESPULPADO")
+        lote.refresh_from_db()
+        self.assertEqual(lote.estado_lote, self.recoleccion)
+        self.assertTrue(EtapaBeneficio.objects.filter(pk=etapa.pk).exists())

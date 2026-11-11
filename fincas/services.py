@@ -1433,6 +1433,60 @@ def obtener_opciones_filtro_catalogo() -> dict:
 # ETAPAS DE BENEFICIO DEL LOTE (HU-14 / SCRUM-18)
 # ==============================================================================
 
+# Fases generales del ciclo de vida del lote (catálogo EstadoLote), en orden.
+# El estado del lote solo avanza por esta secuencia; nunca retrocede.
+ORDEN_FASES_ESTADO_LOTE = (
+    "RECOLECCION",
+    "BENEFICIO",
+    "SECADO",
+    "ALMACENADO",
+    "CATACION",
+    "PUBLICADO",
+    "VENDIDO",
+)
+
+# Fase del lote a la que corresponde cada etapa de beneficio registrada.
+FASE_POR_ETAPA_BENEFICIO = {
+    EtapaBeneficio.TipoEtapa.DESPULPADO: "BENEFICIO",
+    EtapaBeneficio.TipoEtapa.FERMENTACION: "BENEFICIO",
+    EtapaBeneficio.TipoEtapa.LAVADO: "BENEFICIO",
+    EtapaBeneficio.TipoEtapa.SECADO: "SECADO",
+}
+
+
+def _avanzar_estado_lote_por_etapa(lote: Lote, etapa: str) -> bool:
+    """
+    Mantiene coherente el estado general del lote con las etapas de beneficio.
+
+    Al registrar una etapa, el estado del lote avanza a la fase que le
+    corresponde (despulpado/fermentación/lavado -> En Beneficio; secado ->
+    En Secado) solo si esa fase es posterior a la actual: registrar una
+    etapa atrasada o repetida nunca hace retroceder el lote. Si el estado
+    actual es uno personalizado (fuera de la secuencia) o el catálogo no
+    tiene activa la fase destino, no se modifica nada y no falla el registro.
+    Retorna True si el estado cambió.
+    """
+    codigo_destino = FASE_POR_ETAPA_BENEFICIO.get(etapa)
+    if not codigo_destino:
+        return False
+
+    actual = lote.estado_lote
+    if actual is not None:
+        codigo_actual = (actual.codigo or "").strip().upper()
+        if codigo_actual not in ORDEN_FASES_ESTADO_LOTE:
+            return False
+        if ORDEN_FASES_ESTADO_LOTE.index(codigo_actual) >= ORDEN_FASES_ESTADO_LOTE.index(codigo_destino):
+            return False
+
+    destino = EstadoLote.objects.filter(codigo__iexact=codigo_destino, activo=True).first()
+    if not destino:
+        return False
+
+    lote.estado_lote = destino
+    lote.save(update_fields=["estado_lote"], sincronizar_qr=False)
+    return True
+
+
 def registrar_etapa_beneficio(
     *,
     lote_o_id,
@@ -1452,6 +1506,8 @@ def registrar_etapa_beneficio(
       ese productor.
     - Solo permite lotes activos. La etapa nunca se elimina físicamente
       (RNF-14): queda disponible de inmediato en el historial del lote.
+    - Avanza el estado general del lote a la fase que corresponde a la etapa
+      (ver `_avanzar_estado_lote_por_etapa`), sin hacerlo retroceder jamás.
 
     Lanza `ValidationError` con errores por campo (`etapa`, `fecha`,
     `observaciones`) o `lote` / `permiso` para errores de contexto.
@@ -1473,6 +1529,7 @@ def registrar_etapa_beneficio(
         )
         nueva.full_clean(exclude=["activo"])
         nueva.save()
+        _avanzar_estado_lote_por_etapa(lote, nueva.etapa)
         return nueva
 
 
