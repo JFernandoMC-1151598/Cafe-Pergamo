@@ -76,6 +76,7 @@
                     <th>Finca y Variedad</th>
                     <th>Proceso y Calidad</th>
                     <th>Cantidad</th>
+                    <th>Estado del lote</th>
                     <th>Estado comercial</th>
                     <th>Catálogo Público</th>
                     <th class="text-end">Acciones</th>
@@ -152,6 +153,14 @@
                         <div class="text-muted small mt-1">
                             Saldo cosecha: {{ lote.cosecha.cantidad_disponible }} kg
                         </div>
+                    </td>
+                    <td class="small">
+                        <!-- Fase general del ciclo de vida (Recolección, En Beneficio, ...); se cambia con el botón "Estado" -->
+                        {% if lote.estado_lote %}
+                            <span class="badge bg-secondary-subtle text-dark border px-2 py-1">{{ lote.estado_lote.nombre }}</span>
+                        {% else %}
+                            <span class="text-muted fst-italic">Sin estado</span>
+                        {% endif %}
                     </td>
                     <td class="small">
                         {% if lote.estado_comercial == 'DISPONIBLE' %}

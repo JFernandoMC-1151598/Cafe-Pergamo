@@ -11208,3 +11208,17 @@ class PublicadoYMiCatalogoTests(FixtureEstadosLoteBase):
 
         resp = self.client.get(reverse("catalogo"))
         self.assertNotContains(resp, "Natural Ajeno")
+
+    def test_mis_lotes_y_detalle_muestran_el_estado_del_lote(self):
+        lote = self._lote("LOTEVER01", self.recoleccion)
+        resp = self.client.get(reverse("mis_lotes"))
+        self.assertContains(resp, "Estado del lote")
+        self.assertContains(resp, "Recolección")
+        cambiar_estado_lote(
+            lote_o_id=lote, estado_lote_id=self.beneficio.pk,
+            etapa_beneficio="LAVADO", productor_id=self.productor_id,
+        )
+        resp = self.client.get(reverse("mis_lotes"))
+        self.assertContains(resp, "En Beneficio")
+        detalle = self.client.get(reverse("lote_detalle", kwargs={"pk": lote.pk}))
+        self.assertContains(detalle, "Estado: En Beneficio")

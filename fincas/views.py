@@ -1152,6 +1152,7 @@ def mis_lotes_view(request):
             "cosecha__finca__municipio",
             "cosecha__variedad",
             "proceso_beneficio",
+            "estado_lote",
             "caracteristicas_calidad",
             "codigo_qr",
         )

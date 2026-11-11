@@ -38,6 +38,10 @@
                             <div>
                                 <h1 class="h4 mb-0 fw-bold text-dark">Lote {{ lote.codigo }}</h1>
                                 <p class="text-muted small mb-0">Registrado el {{ lote.creado_en|date:"d/m/Y" }}</p>
+                                <div class="mt-1">
+                                    <span class="badge bg-secondary-subtle text-dark border" id="badge-estado-lote">Estado: {{ lote.estado_lote.nombre|default:"Sin estado" }}</span>
+                                    {% if lote.proceso_beneficio %}<span class="badge bg-info-subtle text-dark border">Proceso: {{ lote.proceso_beneficio.nombre }}</span>{% endif %}
+                                </div>
                             </div>
                         </div>
                         <a href="{% url 'lote_cambiar_estado' lote.pk %}" class="btn btn-primary bg-primary px-4 fw-semibold" id="btn-cambiar-estado">
