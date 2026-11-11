@@ -2378,6 +2378,7 @@ def sanitizar_ficha_por_visibilidad(
 def obtener_bytes_descarga_qr_lote(
     lote_o_id: Union[Lote, int, str],
     *,
+    base_url: Optional[str] = None,
     box_size: int = 12,
     border: int = 4,
     error_correction: str = "M",
@@ -2397,10 +2398,11 @@ def obtener_bytes_descarga_qr_lote(
         lote_obj = _resolver_lote(lote_o_id)
         qr_obj = getattr(lote_obj, "codigo_qr", None)
         if not qr_obj:
-            qr_obj = sincronizar_o_generar_qr_lote(lote_obj)
+            qr_obj = sincronizar_o_generar_qr_lote(lote_obj, base_url=base_url)
 
     png_bytes = generar_matriz_qr_lote(
         lote_o_codigo=lote_obj,
+        base_url=base_url,
         box_size=box_size,
         border=border,
         error_correction=error_correction,
