@@ -32,7 +32,7 @@ from django.core.management import call_command
 from django.db import IntegrityError, models
 from django.db.models.deletion import ProtectedError
 from django.http import HttpResponse, JsonResponse
-from django.test import Client, RequestFactory, SimpleTestCase, TestCase
+from django.test import Client, RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import AccessToken
@@ -10627,3 +10627,107 @@ class PanelManifestacionesInteresProductorHU22Tests(TestCase):
         respuesta = self.client.get(reverse("catalogo"))
         self.assertEqual(respuesta.status_code, 200)
         self.assertContains(respuesta, "Manifestar Interés")
+
+
+class UrlPublicaCodigoQRTests(TestCase):
+    """
+    HU18 (SCRUM-22) - El QR debe ser escaneable desde un celular.
+
+    Un QR que solo codifica la ruta relativa ('/trazabilidad/lote/<CODIGO>/') no
+    abre nada al escanearse. El contenido del QR debe ser la URL absoluta del
+    dominio público (settings.QR_BASE_URL), y los QR ya guardados con ruta
+    relativa deben poder regenerarse (comando `sincronizar_qr_lotes`).
+    """
+
+    DOMINIO = "https://cafe-pergamo.onrender.com"
+
+    def setUp(self):
+        municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        finca = Finca.objects.create(
+            nombre="Finca URL QR",
+            productor_id=uuid.uuid4(),
+            municipio=municipio,
+            activo=True,
+        )
+        variedad = VariedadCafe.objects.create(nombre="Castillo URL", especie="Arábica", activo=True)
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            variedad=variedad,
+            fecha_cosecha=date(2026, 10, 20),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("1000.00"),
+            activo=True,
+        )
+        with override_settings(QR_BASE_URL=""):
+            self.lote = crear_lote(
+                cosecha_id=cosecha.pk, cantidad=Decimal("100.00"), codigo="LOTEURL01"
+            )
+
+    @override_settings(QR_BASE_URL="")
+    def test_sin_dominio_configurado_el_payload_es_ruta_relativa(self):
+        self.assertEqual(
+            construir_payload_qr_lote(self.lote), "/trazabilidad/lote/LOTEURL01/"
+        )
+
+    @override_settings(QR_BASE_URL=DOMINIO)
+    def test_con_dominio_configurado_el_payload_es_url_absoluta(self):
+        self.assertEqual(
+            construir_payload_qr_lote(self.lote),
+            f"{self.DOMINIO}/trazabilidad/lote/LOTEURL01/",
+        )
+
+    @override_settings(QR_BASE_URL=DOMINIO + "/")
+    def test_barra_final_del_dominio_no_duplica_separador(self):
+        self.assertEqual(
+            construir_payload_qr_lote(self.lote),
+            f"{self.DOMINIO}/trazabilidad/lote/LOTEURL01/",
+        )
+
+    @override_settings(QR_BASE_URL=DOMINIO)
+    def test_base_url_explicita_tiene_prioridad_sobre_la_configuracion(self):
+        self.assertEqual(
+            construir_payload_qr_lote(self.lote, base_url="http://192.168.1.15:8000"),
+            "http://192.168.1.15:8000/trazabilidad/lote/LOTEURL01/",
+        )
+
+    def test_qr_existente_con_ruta_relativa_se_regenera_al_configurar_dominio(self):
+        qr_antes = CodigoQRLote.objects.get(lote=self.lote)
+        self.assertEqual(qr_antes.payload_url, "/trazabilidad/lote/LOTEURL01/")
+        imagen_antes = qr_antes.imagen_base64
+
+        with override_settings(QR_BASE_URL=self.DOMINIO):
+            sincronizar_o_generar_qr_lote(self.lote)
+
+        qr_despues = CodigoQRLote.objects.get(lote=self.lote)
+        self.assertEqual(
+            qr_despues.payload_url, f"{self.DOMINIO}/trazabilidad/lote/LOTEURL01/"
+        )
+        self.assertNotEqual(qr_despues.imagen_base64, imagen_antes)
+        self.assertEqual(CodigoQRLote.objects.filter(lote=self.lote).count(), 1)
+
+    def test_comando_sincronizar_qr_lotes_actualiza_y_es_idempotente(self):
+        from io import StringIO
+
+        with override_settings(QR_BASE_URL=self.DOMINIO):
+            salida = StringIO()
+            call_command("sincronizar_qr_lotes", stdout=salida)
+            self.assertIn("1 actualizados de 1 lotes", salida.getvalue())
+            self.assertEqual(
+                CodigoQRLote.objects.get(lote=self.lote).payload_url,
+                f"{self.DOMINIO}/trazabilidad/lote/LOTEURL01/",
+            )
+
+            segunda = StringIO()
+            call_command("sincronizar_qr_lotes", stdout=segunda)
+            self.assertIn("0 actualizados de 1 lotes", segunda.getvalue())
+
+    @override_settings(QR_BASE_URL=DOMINIO)
+    def test_la_imagen_descargable_codifica_la_url_publica(self):
+        with patch("fincas.services.qrcode.QRCode") as qr_mock:
+            qr_mock.return_value.make_image.return_value.save = lambda buf, **kw: buf.write(b"PNG")
+            obtener_bytes_descarga_qr_lote(self.lote)
+        qr_mock.return_value.add_data.assert_called_with(
+            f"{self.DOMINIO}/trazabilidad/lote/LOTEURL01/"
+        )

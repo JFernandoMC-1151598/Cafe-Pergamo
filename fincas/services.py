@@ -21,6 +21,7 @@ import re
 from typing import Any, Dict, List, Optional, Union
 import uuid
 
+from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
 from django.db.models import Q
@@ -1571,12 +1572,15 @@ def construir_payload_qr_lote(lote_o_codigo: Union[Lote, str, int], base_url: Op
     """
     Construye la carga útil (URL canónica de consulta) que se codifica en la matriz del QR.
     Si se proporciona `base_url`, retorna la URL absoluta completa (ej. 'https://cafepergamo.com/trazabilidad/lote/LOT-001/').
-    De lo contrario, retorna la ruta relativa canónica ('/trazabilidad/lote/LOT-001/').
+    Si no, usa `settings.QR_BASE_URL` (dominio público configurado por entorno) para que el QR
+    sea escaneable desde un celular; solo si tampoco está configurada retorna la ruta relativa
+    canónica ('/trazabilidad/lote/LOT-001/'), que un lector de QR no puede abrir.
     """
     codigo = extraer_codigo_lote_normalizado(lote_o_codigo)
     ruta_relativa = f"/trazabilidad/lote/{codigo}/"
-    if base_url:
-        return f"{base_url.rstrip('/')}{ruta_relativa}"
+    base = base_url or getattr(settings, "QR_BASE_URL", "")
+    if base:
+        return f"{base.rstrip('/')}{ruta_relativa}"
     return ruta_relativa
 
 

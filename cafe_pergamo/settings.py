@@ -280,3 +280,14 @@ LOGIN_RESET_ON_SUCCESS = True
 AXES_FAILURE_LIMIT = LOGIN_FAILURE_LIMIT
 AXES_COOLOFF_TIME = LOGIN_COOLOFF_MINUTES / 60.0  # 0.25 horas = 15 minutos
 AXES_RESET_ON_SUCCESS = LOGIN_RESET_ON_SUCCESS
+
+# ==============================================================================
+# URL PÚBLICA PARA LOS CÓDIGOS QR (HU18 / SCRUM-22)
+# ==============================================================================
+# Dominio público desde el que se abre la ficha digital al escanear un QR
+# (ej. https://cafe-pergamo.onrender.com). Si el QR solo codificara la ruta
+# relativa ('/trazabilidad/lote/<CODIGO>/'), el celular leería texto plano y
+# no abriría nada. Prioridad: QR_BASE_URL (manual) -> RENDER_EXTERNAL_URL
+# (Render la define sola en cada Web Service) -> vacío (ruta relativa, útil
+# en pruebas locales sin celular).
+QR_BASE_URL = (os.getenv('QR_BASE_URL') or os.getenv('RENDER_EXTERNAL_URL') or '').strip().rstrip('/')
