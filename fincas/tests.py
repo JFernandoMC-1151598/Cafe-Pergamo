@@ -81,6 +81,7 @@ from fincas.services import (
     obtener_opciones_filtro_catalogo,
     publicar_lote_en_catalogo,
     registrar_etapa_beneficio,
+    resumen_trazabilidad_productor,
     transicionar_estado_comercial,
     registrar_manifestacion_interes,
     validar_lote_para_publicacion,
@@ -11222,3 +11223,113 @@ class PublicadoYMiCatalogoTests(FixtureEstadosLoteBase):
         self.assertContains(resp, "En Beneficio")
         detalle = self.client.get(reverse("lote_detalle", kwargs={"pk": lote.pk}))
         self.assertContains(detalle, "Estado: En Beneficio")
+
+
+class TrazabilidadProductorTests(FixtureEstadosLoteBase):
+    """
+    Trazabilidad del productor: sin el enlace "Trazabilidad" del menu,
+    linea de tiempo de cada lote en "Mis Lotes" y graficos de la produccion
+    completa (cosechas -> lotes) en "Mis Fincas", solo con datos propios.
+    """
+
+    def _otro_productor_con_lote(self):
+        finca = Finca.objects.create(
+            nombre="Finca Vecina", productor_id=uuid.uuid4(),
+            municipio=Municipio.objects.filter(nombre="Toledo").first(), activo=True,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca, variedad=self.cosecha.variedad, fecha_cosecha=date(2026, 9, 1),
+            cantidad_total=Decimal("700.00"), cantidad_disponible=Decimal("600.00"), activo=True,
+        )
+        Lote.objects.create(
+            codigo="LOTEVECINO1", cosecha=cosecha, cantidad=Decimal("100.00"),
+            proceso_beneficio=self.proceso, estado_lote=self.recoleccion,
+        )
+
+    # ----------------------------- menu -----------------------------
+    def test_el_productor_no_ve_el_enlace_trazabilidad_en_el_menu(self):
+        resp = self.client.get(reverse("mis_fincas"))
+        self.assertNotContains(resp, reverse("administrar_trazabilidad"))
+
+    def test_otro_rol_conserva_el_enlace_trazabilidad_en_el_menu(self):
+        admin = Client()
+        _iniciar_sesion_con_rol(admin, "ADMINISTRADOR")
+        resp = admin.get(reverse("catalogo"))
+        self.assertContains(resp, reverse("administrar_trazabilidad"))
+
+    # ------------------------ servicio de resumen ------------------------
+    def test_resumen_cuenta_cosechas_lotes_estados_y_procesos(self):
+        self._lote("LOTETRZ01", self.recoleccion)
+        self._lote("LOTETRZ02", self.recoleccion)
+        self._lote("LOTETRZ03", self.almacenado)
+        self._otro_productor_con_lote()
+
+        resumen = resumen_trazabilidad_productor(self.productor_id)
+        self.assertEqual(resumen["total_cosechas"], 1)
+        self.assertEqual(resumen["total_lotes"], 3)
+        self.assertEqual(resumen["kg_total"], 1000.0)
+        self.assertEqual(resumen["kg_en_lotes"], 300.0)
+        cosecha = resumen["cosechas"][0]
+        self.assertEqual(cosecha["lotes"], 3)
+        self.assertEqual(cosecha["disponible_kg"], 700.0)
+        self.assertEqual(cosecha["en_lotes_kg"], 300.0)
+        estados = {f["nombre"]: f["total"] for f in resumen["por_estado"]}
+        self.assertEqual(estados, {"Recolección": 2, "Almacenado / Pergamino": 1})
+        self.assertEqual(resumen["por_proceso"], [{"nombre": "Lavado Estados", "total": 3}])
+
+    def test_resumen_no_cuenta_lotes_inactivos_ni_de_otros_productores(self):
+        lote = self._lote("LOTETRZ04", self.recoleccion)
+        Lote.objects.filter(pk=lote.pk).update(activo=False)
+        self._otro_productor_con_lote()
+        resumen = resumen_trazabilidad_productor(self.productor_id)
+        self.assertEqual(resumen["total_lotes"], 0)
+        self.assertEqual(resumen["cosechas"][0]["lotes"], 0)
+
+    def test_resumen_etiqueta_los_lotes_sin_estado_ni_proceso(self):
+        Lote.objects.create(codigo="LOTETRZ05", cosecha=self.cosecha, cantidad=Decimal("50.00"))
+        resumen = resumen_trazabilidad_productor(self.productor_id)
+        self.assertEqual(resumen["por_estado"], [{"nombre": "Sin estado", "total": 1}])
+        self.assertEqual(resumen["por_proceso"], [{"nombre": "Sin proceso", "total": 1}])
+
+    # ------------------------- graficos en Mis Fincas -------------------------
+    def test_mis_fincas_muestra_los_graficos_solo_con_datos_propios(self):
+        self._lote("LOTETRZ06", self.recoleccion)
+        self._otro_productor_con_lote()
+        resp = self.client.get(reverse("mis_fincas"))
+        self.assertContains(resp, "Trazabilidad de mi producción")
+        for canvas in (
+            "grafico-kg-cosecha", "grafico-lotes-cosecha",
+            "grafico-lotes-estado", "grafico-lotes-proceso", "datos-trazabilidad",
+        ):
+            self.assertContains(resp, canvas)
+        self.assertContains(resp, "Finca Estados")
+        self.assertNotContains(resp, "Finca Vecina")
+
+    def test_mis_fincas_sin_cosechas_muestra_mensaje_en_vez_de_graficos(self):
+        Cosecha.objects.filter(pk=self.cosecha.pk).update(activo=False)
+        resp = self.client.get(reverse("mis_fincas"))
+        self.assertContains(resp, "Aún no tienes cosechas registradas")
+        self.assertNotContains(resp, "grafico-kg-cosecha")
+
+    # ------------------------ linea de tiempo en Mis Lotes ------------------------
+    def test_mis_lotes_incluye_la_linea_de_tiempo_con_etapas_y_proceso(self):
+        lote = self._lote(
+            "LOTETRZ07", self.beneficio, etapa_beneficio="FERMENTACION",
+            fecha_etapa=date(2026, 10, 5),
+        )
+        resp = self.client.get(reverse("mis_lotes"))
+        self.assertContains(resp, f'id="traza-{lote.pk}"')
+        self.assertContains(resp, f"#traza-{lote.pk}")
+        self.assertContains(resp, "Trazabilidad del lote LOTETRZ07")
+        self.assertContains(resp, "Fermentación · 05/10/2026")
+        self.assertContains(resp, "Proceso: Lavado Estados")
+
+    def test_mis_lotes_linea_de_tiempo_omite_etapas_inactivas(self):
+        lote = self._lote(
+            "LOTETRZ08", self.beneficio, etapa_beneficio="DESPULPADO",
+            fecha_etapa=date(2026, 10, 5),
+        )
+        EtapaBeneficio.objects.filter(lote=lote).update(activo=False)
+        resp = self.client.get(reverse("mis_lotes"))
+        self.assertContains(resp, "Sin etapas de beneficio registradas")
+        self.assertNotContains(resp, "Despulpado · 05/10/2026")

@@ -62,6 +62,44 @@
         </div>
     </div>
 
+    <!-- Trazabilidad de la producción: cosechas → lotes de cada cosecha → estado y proceso -->
+    <div class="card border-0 shadow-sm rounded-4 mb-4">
+        <div class="card-body p-4">
+            <h6 class="text-uppercase fw-bold text-muted small mb-3">
+                <i class="bi bi-diagram-3 me-1 text-success"></i> Trazabilidad de mi producción
+            </h6>
+            {% if trazabilidad.total_cosechas %}
+            {{ trazabilidad|json_script:"datos-trazabilidad" }}
+            <div class="row g-3 mb-4 text-center">
+                <div class="col-6 col-md-3"><div class="fs-4 fw-bold text-dark">{{ trazabilidad.total_cosechas }}</div><div class="small text-muted">Cosechas</div></div>
+                <div class="col-6 col-md-3"><div class="fs-4 fw-bold text-dark">{{ trazabilidad.total_lotes }}</div><div class="small text-muted">Lotes</div></div>
+                <div class="col-6 col-md-3"><div class="fs-4 fw-bold text-dark">{{ trazabilidad.kg_total|floatformat:"-2" }} kg</div><div class="small text-muted">Cosechados</div></div>
+                <div class="col-6 col-md-3"><div class="fs-4 fw-bold text-dark">{{ trazabilidad.kg_en_lotes|floatformat:"-2" }} kg</div><div class="small text-muted">Ya en lotes</div></div>
+            </div>
+            <div class="row g-4">
+                <div class="col-12 col-lg-6">
+                    <h6 class="small fw-semibold text-dark">Kg por cosecha</h6>
+                    <div style="position: relative; height: 300px;"><canvas id="grafico-kg-cosecha" aria-label="Kilogramos por cosecha: total, en lotes y disponible" role="img"></canvas></div>
+                </div>
+                <div class="col-12 col-lg-6">
+                    <h6 class="small fw-semibold text-dark">Lotes por cosecha (coloreado por finca)</h6>
+                    <div style="position: relative; height: 300px;"><canvas id="grafico-lotes-cosecha" aria-label="Cantidad de lotes por cosecha" role="img"></canvas></div>
+                </div>
+                <div class="col-12 col-md-6">
+                    <h6 class="small fw-semibold text-dark">Lotes por estado del lote</h6>
+                    <div style="position: relative; height: 280px;"><canvas id="grafico-lotes-estado" aria-label="Lotes por estado del lote" role="img"></canvas></div>
+                </div>
+                <div class="col-12 col-md-6">
+                    <h6 class="small fw-semibold text-dark">Lotes por proceso de beneficio</h6>
+                    <div style="position: relative; height: 280px;"><canvas id="grafico-lotes-proceso" aria-label="Lotes por proceso de beneficio" role="img"></canvas></div>
+                </div>
+            </div>
+            {% else %}
+            <p class="text-muted mb-0">Aún no tienes cosechas registradas. Cuando registres cosechas y lotes verás aquí su trazabilidad completa.</p>
+            {% endif %}
+        </div>
+    </div>
+
     <!-- Listado en tarjetas: incluye tambien las fincas sin georreferenciación -->
     <div class="row row-cols-1 row-cols-md-2 row-cols-lg-3 g-4">
         {% for finca in fincas %}
@@ -109,4 +147,9 @@
 
 {% block extra_js %}
 <script src="{% static 'js/mis_fincas.js' %}"></script>
+{% if trazabilidad.total_cosechas %}
+<!-- Chart.js para los gráficos de trazabilidad -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="{% static 'js/trazabilidad_graficos.js' %}"></script>
+{% endif %}
 {% endblock %}

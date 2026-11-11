@@ -73,9 +73,12 @@
                             <li class="nav-item">
                                 <a class="nav-link" href="{% url 'lista_variedades' %}">Variedades de café</a>
                             </li>
+                            {% if rol_actual != "PRODUCTOR" %}
+                            <!-- Catálogo de procesos/estados: el productor ve la trazabilidad de sus lotes en "Mis Lotes" y "Mis Fincas" -->
                             <li class="nav-item">
                                 <a class="nav-link" href="{% url 'administrar_trazabilidad' %}">Trazabilidad</a>
                             </li>
+                            {% endif %}
                         {% endif %}
                     {% endwith %}
                 </ul>

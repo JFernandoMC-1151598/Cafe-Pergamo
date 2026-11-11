@@ -30,7 +30,7 @@ from typing import Optional
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db.models import Count, Q
+from django.db.models import Count, Prefetch, Q
 from django.http import Http404, HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
@@ -99,6 +99,7 @@ from .services import (
     marcar_manifestacion_interes_vista,
     registrar_auditoria_ficha_digital,
     registrar_etapa_beneficio,
+    resumen_trazabilidad_productor,
     cambiar_estado_lote,
     lote_esta_en_beneficio,
     registrar_manifestacion_interes,
@@ -745,7 +746,11 @@ def mis_fincas_view(request):
     return render(
         request,
         "fincas/mis_fincas.html",
-        {"fincas": fincas, "fincas_geo": fincas_geo},
+        {
+            "fincas": fincas,
+            "fincas_geo": fincas_geo,
+            "trazabilidad": resumen_trazabilidad_productor(productor_id),
+        },
     )
 
 
@@ -1155,6 +1160,13 @@ def mis_lotes_view(request):
             "estado_lote",
             "caracteristicas_calidad",
             "codigo_qr",
+        )
+        .prefetch_related(
+            Prefetch(
+                "etapas_beneficio",
+                queryset=EtapaBeneficio.objects.filter(activo=True),
+                to_attr="etapas_activas",
+            )
         )
         .order_by("-creado_en")
     )

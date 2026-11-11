@@ -24,7 +24,7 @@ import uuid
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 import qrcode
@@ -1457,6 +1457,73 @@ def obtener_opciones_filtro_catalogo(productor_id=None) -> dict:
             pk__in=base.values("proceso_beneficio_id")
         ).order_by("orden", "nombre"),
         "puntajes_minimos": OPCIONES_PUNTAJE_MINIMO_CATALOGO,
+    }
+
+
+# ==============================================================================
+# TRAZABILIDAD DE LA PRODUCCIÓN DEL PRODUCTOR (gráficos de "Mis Fincas")
+# ==============================================================================
+
+def resumen_trazabilidad_productor(productor_id) -> dict:
+    """
+    Resumen de la trazabilidad de TODA la producción de un productor, para los
+    gráficos de "Mis Fincas": cosecha -> lotes -> estado y proceso de beneficio.
+
+    Solo cuenta lo del productor indicado (fincas, cosechas y lotes activos),
+    nunca datos de otros productores. Los valores van como números simples
+    (float/int) para poder serializarse a JSON tal cual.
+    """
+    cosechas = (
+        Cosecha.objects.filter(
+            finca__productor_id=productor_id, finca__activo=True, activo=True
+        )
+        .select_related("finca", "variedad")
+        .annotate(num_lotes=Count("lotes", filter=Q(lotes__activo=True)))
+        .order_by("fecha_cosecha", "id")
+    )
+    detalle_cosechas = []
+    kg_total = Decimal("0.00")
+    kg_en_lotes = Decimal("0.00")
+    for cosecha in cosechas:
+        en_lotes = cosecha.cantidad_total - cosecha.cantidad_disponible
+        kg_total += cosecha.cantidad_total
+        kg_en_lotes += en_lotes
+        detalle_cosechas.append({
+            "etiqueta": f"{cosecha.finca.nombre} · {cosecha.fecha_cosecha:%d/%m/%Y}",
+            "finca": cosecha.finca.nombre,
+            "variedad": cosecha.variedad.nombre if cosecha.variedad else "Sin variedad",
+            "total_kg": float(cosecha.cantidad_total),
+            "en_lotes_kg": float(en_lotes),
+            "disponible_kg": float(cosecha.cantidad_disponible),
+            "lotes": cosecha.num_lotes,
+        })
+
+    lotes = Lote.objects.filter(
+        cosecha__finca__productor_id=productor_id,
+        cosecha__finca__activo=True,
+        cosecha__activo=True,
+        activo=True,
+    )
+
+    def _distribucion(campo_nombre, etiqueta_vacia):
+        filas = (
+            lotes.values(campo_nombre)
+            .annotate(total=Count("id"))
+            .order_by("-total", campo_nombre)
+        )
+        return [
+            {"nombre": fila[campo_nombre] or etiqueta_vacia, "total": fila["total"]}
+            for fila in filas
+        ]
+
+    return {
+        "total_cosechas": len(detalle_cosechas),
+        "total_lotes": lotes.count(),
+        "kg_total": float(kg_total),
+        "kg_en_lotes": float(kg_en_lotes),
+        "cosechas": detalle_cosechas,
+        "por_estado": _distribucion("estado_lote__nombre", "Sin estado"),
+        "por_proceso": _distribucion("proceso_beneficio__nombre", "Sin proceso"),
     }
 
 
