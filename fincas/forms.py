@@ -535,6 +535,8 @@ def _limpiar_etapa_condicional(form, cleaned):
     if estado is None:
         return cleaned
     if _es_estado_beneficio(estado):
+        if "proceso_beneficio" in form.fields and not cleaned.get("proceso_beneficio") and "proceso_beneficio" not in form.errors:
+            form.add_error("proceso_beneficio", "Debe seleccionar el proceso de beneficio del lote.")
         if not cleaned.get("etapa_beneficio") and "etapa_beneficio" not in form.errors:
             form.add_error("etapa_beneficio", "Debe indicar la etapa de beneficio en la que se encuentra el lote.")
         if not cleaned.get("fecha_etapa") and "fecha_etapa" not in form.errors:
@@ -542,6 +544,8 @@ def _limpiar_etapa_condicional(form, cleaned):
     else:
         cleaned["etapa_beneficio"] = ""
         cleaned["fecha_etapa"] = None
+        if "proceso_beneficio" in form.fields:
+            cleaned["proceso_beneficio"] = None
     return cleaned
 
 
@@ -572,14 +576,14 @@ class LoteRegistroForm(forms.Form):
         },
     )
 
+    # Solo aplica (y es obligatorio) cuando el lote está 'En Beneficio'; ver _limpiar_etapa_condicional.
     proceso_beneficio = forms.ModelChoiceField(
         queryset=ProcesoBeneficio.objects.none(),
-        required=True,
+        required=False,
         label="Proceso de beneficio",
         empty_label="Seleccione un proceso de beneficio...",
         widget=forms.Select(attrs={"class": "form-select", "id": "id_proceso_beneficio"}),
         error_messages={
-            "required": "Debe seleccionar un proceso de beneficio.",
             "invalid_choice": "El proceso seleccionado no está activo o no es válido.",
         },
     )
@@ -694,10 +698,20 @@ class CambiarEstadoLoteForm(forms.Form):
         }),
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, lote=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields.update(_campos_etapa_condicional())
         self.fields["estado_lote"].queryset = EstadoLote.objects.filter(activo=True).order_by("orden", "nombre")
+        # El proceso se define una sola vez: solo se pide si el lote aún no tiene uno.
+        if lote is not None and lote.proceso_beneficio_id is None:
+            self.fields["proceso_beneficio"] = forms.ModelChoiceField(
+                queryset=ProcesoBeneficio.objects.filter(activo=True).order_by("orden", "nombre"),
+                required=False,
+                label="Proceso de beneficio",
+                empty_label="Seleccione un proceso de beneficio...",
+                widget=forms.Select(attrs={"class": "form-select", "id": "id_proceso_beneficio"}),
+                error_messages={"invalid_choice": "El proceso seleccionado no está activo o no es válido."},
+            )
 
     def clean_observaciones(self):
         return (self.cleaned_data.get("observaciones") or "").strip()

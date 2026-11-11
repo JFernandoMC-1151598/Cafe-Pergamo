@@ -1072,9 +1072,10 @@ def registrar_lote_view(request):
                     cosecha_id=cosecha.pk,
                     cantidad=form.cleaned_data["cantidad"],
                     codigo=form.cleaned_data.get("codigo") or None,
-                    proceso_beneficio_id=form.cleaned_data[
-                        "proceso_beneficio"
-                    ].pk,
+                    proceso_beneficio_id=(
+                        form.cleaned_data["proceso_beneficio"].pk
+                        if form.cleaned_data.get("proceso_beneficio") else None
+                    ),
                     estado_lote_id=form.cleaned_data["estado_lote"].pk,
                     etapa_beneficio=form.cleaned_data.get("etapa_beneficio") or None,
                     fecha_etapa=form.cleaned_data.get("fecha_etapa"),
@@ -2161,7 +2162,7 @@ def cambiar_estado_lote_view(request, pk):
     lote = _obtener_lote_del_productor(productor_id, pk)
 
     if request.method == "POST":
-        form = CambiarEstadoLoteForm(request.POST)
+        form = CambiarEstadoLoteForm(request.POST, lote=lote)
         if form.is_valid():
             try:
                 lote = cambiar_estado_lote(
@@ -2171,6 +2172,10 @@ def cambiar_estado_lote_view(request, pk):
                     fecha_etapa=form.cleaned_data.get("fecha_etapa"),
                     observaciones=form.cleaned_data.get("observaciones", ""),
                     productor_id=productor_id,
+                    proceso_beneficio_id=(
+                        form.cleaned_data["proceso_beneficio"].pk
+                        if form.cleaned_data.get("proceso_beneficio") else None
+                    ),
                 )
             except ValidationError as exc:
                 errores = exc.message_dict if hasattr(exc, "message_dict") else {"__all__": exc.messages}
@@ -2194,7 +2199,7 @@ def cambiar_estado_lote_view(request, pk):
                 "Por favor revise los errores señalados en el formulario antes de continuar."
             )
     else:
-        form = CambiarEstadoLoteForm(initial={"estado_lote": lote.estado_lote_id})
+        form = CambiarEstadoLoteForm(initial={"estado_lote": lote.estado_lote_id}, lote=lote)
 
     return render(request, "fincas/cambiar_estado_lote.html", {"form": form, "lote": lote})
 

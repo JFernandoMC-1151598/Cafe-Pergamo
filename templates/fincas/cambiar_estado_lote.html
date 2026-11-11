@@ -74,8 +74,20 @@
                         <!-- Solo aparece (y es obligatoria) cuando el nuevo estado es "En Beneficio" -->
                         <div class="row g-3 mb-3 p-3 rounded-3 bg-light border" id="bloque-etapa-beneficio" style="display: none;">
                             <div class="col-12 small text-muted">
-                                <i class="bi bi-info-circle me-1"></i>El lote está <strong>En Beneficio</strong>: indique en qué etapa se encuentra.
+                                <i class="bi bi-info-circle me-1"></i>El lote está <strong>En Beneficio</strong>: indique {% if form.proceso_beneficio %}el proceso y {% endif %}en qué etapa se encuentra.
                             </div>
+                            {% if form.proceso_beneficio %}
+                            <div class="col-12">
+                                <label for="id_proceso_beneficio" class="form-label fw-semibold text-dark">
+                                    Proceso de beneficio <span class="text-danger">*</span>
+                                </label>
+                                {{ form.proceso_beneficio }}
+                                {% if form.proceso_beneficio.errors %}
+                                <div class="small text-danger mt-1">{{ form.proceso_beneficio.errors|join:" " }}</div>
+                                {% endif %}
+                                <div class="form-text small text-muted">Se define una sola vez y no se puede cambiar después.</div>
+                            </div>
+                            {% endif %}
                             <div class="col-md-6">
                                 <label for="id_etapa_beneficio" class="form-label fw-semibold text-dark">
                                     Etapa de beneficio <span class="text-danger">*</span>

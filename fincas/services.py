@@ -439,6 +439,10 @@ def crear_lote(
     # Regla de negocio: la etapa de beneficio se indica solo si (y siempre que)
     # el lote nace en el estado 'En Beneficio'.
     _validar_etapa_segun_estado(estado, etapa_beneficio)
+    if _es_estado_beneficio(estado) and proceso is None:
+        raise ValidationError({
+            "proceso_beneficio": "Si el lote está 'En Beneficio', debe indicar el proceso de beneficio."
+        })
     fecha_etapa_normalizada = (
         _normalizar_fecha_etapa(fecha_etapa) if _es_estado_beneficio(estado) else None
     )
@@ -1567,6 +1571,7 @@ def cambiar_estado_lote(
     fecha_etapa=None,
     observaciones="",
     productor_id=None,
+    proceso_beneficio_id=None,
 ) -> Lote:
     """
     Cambia el estado general del lote (HU14 / SCRUM-18).
@@ -1574,7 +1579,9 @@ def cambiar_estado_lote(
     Reglas de negocio:
     - Si el estado destino es 'En Beneficio', es obligatorio indicar la etapa
       de beneficio en la que está (se registra en el historial con su fecha,
-      por defecto hoy). Para cualquier otro estado la etapa no aplica.
+      por defecto hoy) y, si el lote aún no tiene proceso de beneficio, el
+      proceso (queda fijo desde ese momento). Para cualquier otro estado la
+      etapa no aplica.
     - El lote solo avanza por la secuencia de fases (ORDEN_FASES_ESTADO_LOTE);
       no puede retroceder. Quedarse en 'En Beneficio' sí se permite, para
       registrar nuevas etapas.
@@ -1616,6 +1623,22 @@ def cambiar_estado_lote(
 
         _validar_etapa_segun_estado(destino, etapa_beneficio)
         if es_beneficio:
+            if lote.proceso_beneficio_id is None:
+                if proceso_beneficio_id is None:
+                    raise ValidationError({
+                        "proceso_beneficio": "Debe indicar el proceso de beneficio del lote."
+                    })
+                proceso = ProcesoBeneficio.objects.filter(pk=proceso_beneficio_id, activo=True).first()
+                if proceso is None:
+                    raise ValidationError({
+                        "proceso_beneficio": "El proceso seleccionado no está activo o no existe."
+                    })
+                lote.proceso_beneficio = proceso
+                lote.save(update_fields=["proceso_beneficio"], sincronizar_qr=False)
+            elif proceso_beneficio_id not in (None, "") and str(proceso_beneficio_id) != str(lote.proceso_beneficio_id):
+                raise ValidationError({
+                    "proceso_beneficio": "El proceso de beneficio del lote ya está definido y no se puede cambiar."
+                })
             _crear_etapa_beneficio(
                 lote,
                 etapa_beneficio,

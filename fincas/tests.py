@@ -10740,12 +10740,8 @@ class UrlPublicaCodigoQRTests(TestCase):
         )
 
 
-class EstadoLoteYEtapaBeneficioTests(TestCase):
-    """
-    HU14 (SCRUM-18) - La etapa de beneficio solo existe cuando el estado del
-    lote es "En Beneficio": se pide al crear el lote en ese estado o al
-    cambiarle el estado, y solo se registran etapas mientras esté en él.
-    """
+class FixtureEstadosLoteBase(TestCase):
+    """Fixture comun (productor con sesion, cosecha, proceso y estados) de las pruebas de estado/etapa/proceso."""
 
     def _estado(self, codigo, nombre):
         return EstadoLote.objects.get_or_create(
@@ -10789,6 +10785,14 @@ class EstadoLoteYEtapaBeneficioTests(TestCase):
             proceso_beneficio_id=self.proceso.pk,
             estado_lote_id=estado.pk if estado else None, **extra,
         )
+
+
+class EstadoLoteYEtapaBeneficioTests(FixtureEstadosLoteBase):
+    """
+    HU14 (SCRUM-18) - La etapa de beneficio solo existe cuando el estado del
+    lote es "En Beneficio": se pide al crear el lote en ese estado o al
+    cambiarle el estado, y solo se registran etapas mientras esté en él.
+    """
 
     # ------------------------- crear_lote -------------------------
     def test_crear_lote_en_beneficio_exige_la_etapa(self):
@@ -10990,3 +10994,110 @@ class EstadoLoteYEtapaBeneficioTests(TestCase):
         self.assertEqual(resp.status_code, 302)
         lote = Lote.objects.get(codigo="LOTEEST22")
         self.assertFalse(EtapaBeneficio.objects.filter(lote=lote).exists())
+
+
+class ProcesoBeneficioCondicionalTests(FixtureEstadosLoteBase):
+    """
+    El proceso de beneficio (Lavado, Honey, Natural...) tambien solo se pide
+    cuando el lote esta "En Beneficio", y queda fijo desde ese momento.
+    """
+
+    def _lote_sin_proceso(self, codigo, estado):
+        return crear_lote(
+            cosecha_id=self.cosecha.pk, cantidad=Decimal("100.00"), codigo=codigo,
+            estado_lote_id=estado.pk,
+        )
+
+    def test_formulario_de_lote_tiene_el_proceso_dentro_del_bloque_de_beneficio(self):
+        html = self.client.get(reverse("lote_registro")).content.decode()
+        self.assertLess(html.index('id="bloque-etapa-beneficio"'), html.index('id="id_proceso_beneficio"'))
+
+    def test_registro_web_en_recoleccion_no_pide_proceso(self):
+        resp = self.client.post(reverse("lote_registro"), {
+            "cosecha": self.cosecha.pk, "estado_lote": self.recoleccion.pk,
+            "cantidad": "30.00", "codigo": "LOTEPRO01",
+        })
+        self.assertEqual(resp.status_code, 302)
+        self.assertIsNone(Lote.objects.get(codigo="LOTEPRO01").proceso_beneficio)
+
+    def test_registro_web_en_beneficio_sin_proceso_muestra_error(self):
+        resp = self.client.post(reverse("lote_registro"), {
+            "cosecha": self.cosecha.pk, "estado_lote": self.beneficio.pk,
+            "cantidad": "30.00", "codigo": "LOTEPRO02",
+            "etapa_beneficio": "LAVADO", "fecha_etapa": "2026-10-05",
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Debe seleccionar el proceso de beneficio")
+        self.assertFalse(Lote.objects.filter(codigo="LOTEPRO02").exists())
+
+    def test_registro_web_en_beneficio_con_proceso_y_etapa_crea_todo(self):
+        resp = self.client.post(reverse("lote_registro"), {
+            "cosecha": self.cosecha.pk, "estado_lote": self.beneficio.pk,
+            "proceso_beneficio": self.proceso.pk, "cantidad": "30.00", "codigo": "LOTEPRO03",
+            "etapa_beneficio": "DESPULPADO", "fecha_etapa": "2026-10-05",
+        })
+        self.assertEqual(resp.status_code, 302)
+        lote = Lote.objects.get(codigo="LOTEPRO03")
+        self.assertEqual(lote.proceso_beneficio, self.proceso)
+        self.assertEqual(EtapaBeneficio.objects.get(lote=lote).etapa, "DESPULPADO")
+
+    def test_crear_lote_en_beneficio_sin_proceso_falla_en_el_servicio(self):
+        with self.assertRaises(ValidationError) as ctx:
+            crear_lote(
+                cosecha_id=self.cosecha.pk, cantidad=Decimal("10.00"), codigo="LOTEPRO04",
+                estado_lote_id=self.beneficio.pk, etapa_beneficio="LAVADO",
+            )
+        self.assertIn("proceso_beneficio", ctx.exception.message_dict)
+
+    def test_cambiar_a_beneficio_un_lote_sin_proceso_lo_exige_y_luego_queda_fijo(self):
+        lote = self._lote_sin_proceso("LOTEPRO05", self.recoleccion)
+        with self.assertRaises(ValidationError) as ctx:
+            cambiar_estado_lote(
+                lote_o_id=lote, estado_lote_id=self.beneficio.pk,
+                etapa_beneficio="DESPULPADO", productor_id=self.productor_id,
+            )
+        self.assertIn("proceso_beneficio", ctx.exception.message_dict)
+        lote.refresh_from_db()
+        self.assertIsNone(lote.proceso_beneficio)
+        self.assertEqual(lote.estado_lote, self.recoleccion)
+
+        cambiar_estado_lote(
+            lote_o_id=lote, estado_lote_id=self.beneficio.pk, etapa_beneficio="DESPULPADO",
+            proceso_beneficio_id=self.proceso.pk, productor_id=self.productor_id,
+        )
+        lote.refresh_from_db()
+        self.assertEqual(lote.proceso_beneficio, self.proceso)
+
+        otro = ProcesoBeneficio.objects.create(codigo="HONEY_EST", nombre="Honey Estados", activo=True)
+        with self.assertRaises(ValidationError) as ctx:
+            cambiar_estado_lote(
+                lote_o_id=lote, estado_lote_id=self.beneficio.pk, etapa_beneficio="SECADO",
+                proceso_beneficio_id=otro.pk, productor_id=self.productor_id,
+            )
+        self.assertIn("proceso_beneficio", ctx.exception.message_dict)
+
+    def test_pantalla_cambiar_estado_pide_proceso_solo_si_el_lote_no_lo_tiene(self):
+        sin = self._lote_sin_proceso("LOTEPRO06", self.recoleccion)
+        con = self._lote("LOTEPRO07", self.recoleccion)
+        resp_sin = self.client.get(reverse("lote_cambiar_estado", kwargs={"pk": sin.pk}))
+        resp_con = self.client.get(reverse("lote_cambiar_estado", kwargs={"pk": con.pk}))
+        self.assertContains(resp_sin, 'id="id_proceso_beneficio"')
+        self.assertNotContains(resp_con, 'id="id_proceso_beneficio"')
+
+    def test_vista_cambiar_estado_guarda_el_proceso_elegido(self):
+        lote = self._lote_sin_proceso("LOTEPRO08", self.recoleccion)
+        resp = self.client.post(reverse("lote_cambiar_estado", kwargs={"pk": lote.pk}), {
+            "estado_lote": self.beneficio.pk, "proceso_beneficio": self.proceso.pk,
+            "etapa_beneficio": "FERMENTACION", "fecha_etapa": "2026-10-07",
+        })
+        self.assertRedirects(resp, reverse("lote_detalle", kwargs={"pk": lote.pk}))
+        lote.refresh_from_db()
+        self.assertEqual(lote.proceso_beneficio, self.proceso)
+        self.assertEqual(lote.estado_lote, self.beneficio)
+
+    def test_ficha_digital_ya_no_muestra_el_boton_ver_json_api(self):
+        lote = self._lote("LOTEPRO09", self.recoleccion)
+        resp = self.client.get(reverse("lote_ficha_digital_web", kwargs={"codigo": lote.codigo}))
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, "Ver JSON API")
+        self.assertContains(resp, "Imprimir Ficha")

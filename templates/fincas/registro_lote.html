@@ -64,8 +64,22 @@
                             <div class="form-text small text-muted">Solo se listan cosechas suyas, activas y con saldo disponible.</div>
                         </div>
 
-                        <div class="row g-3 mb-4">
-                            <div class="col-md-6">
+                        <div class="mb-4">
+                            <label for="id_estado_lote" class="form-label fw-semibold text-dark">
+                                Estado del lote <span class="text-danger">*</span>
+                            </label>
+                            {{ form.estado_lote }}
+                            {% if form.estado_lote.errors %}
+                            <div class="small text-danger mt-1">{{ form.estado_lote.errors|join:" " }}</div>
+                            {% endif %}
+                        </div>
+
+                        <!-- Etapa de beneficio: solo aparece (y es obligatoria) cuando el estado del lote es "En Beneficio" -->
+                        <div class="row g-3 mb-4 p-3 rounded-3 bg-light border" id="bloque-etapa-beneficio" style="display: none;">
+                            <div class="col-12 small text-muted">
+                                <i class="bi bi-info-circle me-1"></i>El lote está <strong>En Beneficio</strong>: indique el proceso y en qué etapa del beneficio se encuentra.
+                            </div>
+                            <div class="col-12">
                                 <label for="id_proceso_beneficio" class="form-label fw-semibold text-dark">
                                     Proceso de beneficio <span class="text-danger">*</span>
                                 </label>
@@ -73,22 +87,6 @@
                                 {% if form.proceso_beneficio.errors %}
                                 <div class="small text-danger mt-1">{{ form.proceso_beneficio.errors|join:" " }}</div>
                                 {% endif %}
-                            </div>
-                            <div class="col-md-6">
-                                <label for="id_estado_lote" class="form-label fw-semibold text-dark">
-                                    Estado del lote <span class="text-danger">*</span>
-                                </label>
-                                {{ form.estado_lote }}
-                                {% if form.estado_lote.errors %}
-                                <div class="small text-danger mt-1">{{ form.estado_lote.errors|join:" " }}</div>
-                                {% endif %}
-                            </div>
-                        </div>
-
-                        <!-- Etapa de beneficio: solo aparece (y es obligatoria) cuando el estado del lote es "En Beneficio" -->
-                        <div class="row g-3 mb-4 p-3 rounded-3 bg-light border" id="bloque-etapa-beneficio" style="display: none;">
-                            <div class="col-12 small text-muted">
-                                <i class="bi bi-info-circle me-1"></i>El lote está <strong>En Beneficio</strong>: indique en qué etapa del beneficio se encuentra.
                             </div>
                             <div class="col-md-6">
                                 <label for="id_etapa_beneficio" class="form-label fw-semibold text-dark">
