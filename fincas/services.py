@@ -1693,7 +1693,10 @@ def cambiar_estado_lote(
     """
     with transaction.atomic():
         lote = _resolver_lote(lote_o_id)
-        lote = Lote.objects.select_for_update().select_related(
+        # of=("self",): en PostgreSQL FOR UPDATE no puede aplicarse al lado
+        # anulable de un LEFT JOIN (estado_lote es opcional), así que solo se
+        # bloquea la fila del lote y las tablas unidas se leen sin bloqueo.
+        lote = Lote.objects.select_for_update(of=("self",)).select_related(
             "estado_lote", "cosecha__finca"
         ).get(pk=lote.pk)
 
