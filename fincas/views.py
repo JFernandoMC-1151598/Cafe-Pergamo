@@ -105,6 +105,7 @@ from .services import (
     registrar_etapa_beneficio,
     registrar_venta_lote,
     obtener_venta_lote,
+    obtener_historial_comercial_lote,
     resumen_trazabilidad_productor,
     cambiar_estado_lote,
     lote_esta_en_beneficio,
@@ -890,6 +891,99 @@ def api_crear_lote_view(request):
         return Response(detalle, status=status.HTTP_400_BAD_REQUEST)
 
     return Response(LoteSerializer(lote).data, status=status.HTTP_201_CREATED)
+
+
+def _serializar_evento_historial_comercial(evento):
+    """Convierte un evento del historial consolidado a valores JSON seguros."""
+    fecha = evento["fecha"]
+    if hasattr(fecha, "isoformat"):
+        fecha = fecha.isoformat()
+
+    fecha_estimada_cierre = evento.get("fecha_estimada_cierre")
+    if fecha_estimada_cierre is not None and hasattr(fecha_estimada_cierre, "isoformat"):
+        fecha_estimada_cierre = fecha_estimada_cierre.isoformat()
+
+    cantidad_kg = evento.get("cantidad_kg")
+    precio_por_kg = evento.get("precio_por_kg")
+    presupuesto = evento.get("presupuesto")
+    precio_total = evento.get("precio_total")
+
+    return {
+        "tipo_operacion": evento["tipo_operacion"],
+        "tipo": evento["tipo"],
+        "fecha": fecha,
+        "comprador_id": str(evento["comprador_id"]),
+        "comprador_correo": evento.get("comprador_correo", ""),
+        "registrado_por_id": (
+            str(evento["registrado_por_id"])
+            if evento.get("registrado_por_id") is not None
+            else None
+        ),
+        "cantidad_kg": str(cantidad_kg) if cantidad_kg is not None else None,
+        "precio_por_kg": str(precio_por_kg) if precio_por_kg is not None else None,
+        "presupuesto": str(presupuesto) if presupuesto is not None else None,
+        "precio_total": str(precio_total) if precio_total is not None else None,
+        "codigo_comprobante": evento.get("codigo_comprobante"),
+        "estado": evento["estado"],
+        "estado_display": evento["estado_display"],
+        "observaciones": evento.get("observaciones", ""),
+        "fecha_estimada_cierre": fecha_estimada_cierre,
+    }
+
+
+@api_view(["GET"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_historial_comercial_lote_view(request, pk):
+    """
+    HU25-ST2 (SCRUM-280): consulta GET de la línea de tiempo comercial de un lote.
+    Solo el productor dueño puede consultar el historial de su lote.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        return Response(
+            {"error": "Debe autenticarse como productor para consultar el historial comercial."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    rol = _resolver_rol_codigo(request)
+    if rol and str(rol).upper() != "PRODUCTOR":
+        return Response(
+            {"error": "Acceso denegado.", "detalles": {"permiso": "Solo el rol Productor puede consultar este historial."}},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        resultado = obtener_historial_comercial_lote(
+            lote_id=pk,
+            productor_id=productor_id,
+        )
+    except ValidationError as exc:
+        detalles = exc.message_dict if hasattr(exc, "message_dict") else {"error": str(exc)}
+        if "permiso" in detalles:
+            return Response(
+                {"error": "Acceso denegado.", "detalles": detalles},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return Response(
+            {"error": "Lote no encontrado.", "detalles": detalles},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    eventos = [
+        _serializar_evento_historial_comercial(evento)
+        for evento in resultado["eventos"]
+    ]
+    return Response(
+        {
+            "lote_id": resultado["lote_id"],
+            "lote_codigo": resultado["lote_codigo"],
+            "productor_id": resultado["productor_id"],
+            "total_eventos": len(eventos),
+            "eventos": eventos,
+        },
+        status=status.HTTP_200_OK,
+    )
 
 
 @api_view(["GET"])

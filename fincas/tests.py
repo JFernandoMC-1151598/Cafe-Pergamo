@@ -12518,3 +12518,124 @@ class HU25ST4HistorialComercialConsultaTests(TestCase):
         self.assertIn("lote", contexto.exception.message_dict)
 
 
+class HU25ST2HistorialComercialApiTests(TestCase):
+    """HU25-ST2 / SCRUM-280: endpoint GET del historial comercial por lote."""
+
+    def setUp(self):
+        self.productor_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.municipio = Municipio.objects.create(
+            codigo="HU25-ST2-MUN",
+            nombre="Municipio HU25 ST2",
+            departamento="Norte de Santander",
+        )
+        self.finca = Finca.objects.create(
+            nombre="Finca API HU25",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha=date(2026, 11, 10),
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-HU25-ST2",
+            cosecha=self.cosecha,
+            cantidad=Decimal("50.00"),
+        )
+
+    def test_get_historial_devuelve_eventos_vacios_en_200(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+
+        respuesta = self.client.get(
+            reverse("api_lote_historial_comercial", kwargs={"pk": self.lote.pk})
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta.json()["lote_codigo"], "LOTE-HU25-ST2")
+        self.assertEqual(respuesta.json()["eventos"], [])
+        self.assertEqual(respuesta.json()["total_eventos"], 0)
+
+    def test_get_historial_productor_ajeno_responde_403(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.otro_productor_id)
+
+        respuesta = self.client.get(
+            reverse("api_lote_historial_comercial", kwargs={"pk": self.lote.pk})
+        )
+
+        self.assertEqual(respuesta.status_code, 403)
+        self.assertIn("permiso", respuesta.json()["detalles"])
+
+    def test_get_historial_lote_inexistente_responde_404(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+
+        respuesta = self.client.get(
+            reverse("api_lote_historial_comercial", kwargs={"pk": 999999})
+        )
+
+        self.assertEqual(respuesta.status_code, 404)
+        self.assertIn("lote", respuesta.json()["detalles"])
+
+    def test_get_historial_sin_sesion_responde_401(self):
+        respuesta = self.client.get(
+            reverse("api_lote_historial_comercial", kwargs={"pk": self.lote.pk})
+        )
+
+        self.assertEqual(respuesta.status_code, 401)
+
+    def test_get_historial_devuelve_operaciones_en_respuesta_json(self):
+        manifestacion = ManifestacionInteres.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25-api@example.com",
+            cantidad_kg=Decimal("50.00"),
+            mensaje="Manifestación API HU25",
+        )
+        negociacion = NegociacionLote.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25-api@example.com",
+            manifestacion_interes=manifestacion,
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+            cantidad_kg=Decimal("50.00"),
+            precio_propuesto_por_kg=Decimal("18000.00"),
+            precio_acordado_por_kg=Decimal("19000.00"),
+        )
+        AvanceNegociacion.objects.create(
+            negociacion=negociacion,
+            registrado_por_id=self.productor_id,
+            estado=AvanceNegociacion.EstadoAvance.ACEPTADA,
+            cantidad_kg=Decimal("50.00"),
+            precio_por_kg=Decimal("19000.00"),
+            observaciones="Avance API HU25",
+        )
+        VentaLote.objects.create(
+            negociacion=negociacion,
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25-api@example.com",
+            cantidad_kg=Decimal("50.00"),
+            precio_unitario_kg=Decimal("19000.00"),
+            precio_total=Decimal("950000.00"),
+            codigo_comprobante="VTA-HU25-ST2-0001",
+        )
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+
+        respuesta = self.client.get(
+            reverse("api_lote_historial_comercial", kwargs={"pk": self.lote.pk})
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        payload = respuesta.json()
+        tipos = [evento["tipo_operacion"] for evento in payload["eventos"]]
+        self.assertIn("MANIFESTACION", tipos)
+        self.assertIn("NEGOCIACION", tipos)
+        self.assertIn("AVANCE_NEGOCIACION", tipos)
+        self.assertIn("VENTA", tipos)
+        self.assertEqual(payload["total_eventos"], 4)
+
+
