@@ -95,9 +95,9 @@
                                         {% elif a.estado == "RECHAZADA" %}<span class="badge bg-secondary">Rechazada</span>
                                         {% else %}<span class="badge bg-warning text-dark">Abierta</span>{% endif %}
                                     </td>
-                                    <td class="text-end">{{ a.cantidad_kg }} kg</td>
-                                    <td class="text-end">${{ a.precio_por_kg }}</td>
-                                    <td class="text-end">{% if a.presupuesto %}${{ a.presupuesto }}{% else %}&mdash;{% endif %}</td>
+                                    <td class="text-end text-nowrap">{{ a.cantidad_kg }} kg</td>
+                                    <td class="text-end text-nowrap">${{ a.precio_por_kg }}</td>
+                                    <td class="text-end text-nowrap">{% if a.presupuesto %}${{ a.presupuesto }}{% else %}&mdash;{% endif %}</td>
                                     <td>{% if a.fecha_estimada_cierre %}{{ a.fecha_estimada_cierre|date:"d/m/Y" }}{% else %}&mdash;{% endif %}</td>
                                 </tr>
                                 {% if a.observaciones %}
