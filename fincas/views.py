@@ -1079,13 +1079,6 @@ def registrar_lote_view(request):
                     cosecha_id=cosecha.pk,
                     cantidad=form.cleaned_data["cantidad"],
                     codigo=form.cleaned_data.get("codigo") or None,
-                    proceso_beneficio_id=(
-                        form.cleaned_data["proceso_beneficio"].pk
-                        if form.cleaned_data.get("proceso_beneficio") else None
-                    ),
-                    estado_lote_id=form.cleaned_data["estado_lote"].pk,
-                    etapa_beneficio=form.cleaned_data.get("etapa_beneficio") or None,
-                    fecha_etapa=form.cleaned_data.get("fecha_etapa"),
                 )
             except ValidationError as exc:
                 # Traduce los errores de negocio de crear_lote() (que no

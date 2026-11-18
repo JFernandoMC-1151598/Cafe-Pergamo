@@ -555,6 +555,9 @@ class LoteRegistroForm(forms.Form):
     selecciona una de SUS cosechas con saldo disponible, ingresa la
     cantidad del lote y, opcionalmente, un código propio.
 
+    El lote siempre nace en 'Recolección': el estado, el proceso y las etapas
+    de beneficio se registran después, con el cambio de estado del lote.
+
     Este formulario solo captura y valida el FORMATO de los datos de
     entrada (que el código, si se indica, sea alfanumérico; que la
     cantidad sea positiva). Las reglas de NEGOCIO -- unicidad real del
@@ -573,30 +576,6 @@ class LoteRegistroForm(forms.Form):
         error_messages={
             "required": "Debe seleccionar la cosecha de la que proviene el lote.",
             "invalid_choice": "La cosecha seleccionada no es válida o no tiene saldo disponible.",
-        },
-    )
-
-    # Solo aplica (y es obligatorio) cuando el lote está 'En Beneficio'; ver _limpiar_etapa_condicional.
-    proceso_beneficio = forms.ModelChoiceField(
-        queryset=ProcesoBeneficio.objects.none(),
-        required=False,
-        label="Proceso de beneficio",
-        empty_label="Seleccione un proceso de beneficio...",
-        widget=forms.Select(attrs={"class": "form-select", "id": "id_proceso_beneficio"}),
-        error_messages={
-            "invalid_choice": "El proceso seleccionado no está activo o no es válido.",
-        },
-    )
-
-    estado_lote = forms.ModelChoiceField(
-        queryset=EstadoLote.objects.none(),
-        required=True,
-        label="Estado del lote",
-        empty_label="Seleccione el estado inicial del lote...",
-        widget=forms.Select(attrs={"class": "form-select", "id": "id_estado_lote"}),
-        error_messages={
-            "required": "Debe seleccionar un estado para el lote.",
-            "invalid_choice": "El estado seleccionado no está activo o no es válido.",
         },
     )
 
@@ -635,7 +614,6 @@ class LoteRegistroForm(forms.Form):
 
     def __init__(self, *args, productor_id=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields.update(_campos_etapa_condicional())
         self.fields["cosecha"].queryset = (
             Cosecha.objects.filter(
                 finca__productor_id=productor_id,
@@ -648,12 +626,6 @@ class LoteRegistroForm(forms.Form):
         self.fields["cosecha"].label_from_instance = lambda c: (
             f"{c.finca.nombre} — {c.fecha_cosecha} ({c.cantidad_disponible} kg disponibles)"
         )
-        self.fields["proceso_beneficio"].queryset = ProcesoBeneficio.objects.filter(
-            activo=True
-        ).order_by("orden", "nombre")
-        self.fields["estado_lote"].queryset = EstadoLote.objects.filter(
-            activo=True
-        ).order_by("orden", "nombre")
 
     def clean_codigo(self):
         codigo = self.cleaned_data.get("codigo", "")
@@ -661,9 +633,6 @@ class LoteRegistroForm(forms.Form):
         if codigo and not codigo.isalnum():
             raise forms.ValidationError("El código del lote debe ser alfanumérico (sin espacios ni símbolos).")
         return codigo
-
-    def clean(self):
-        return _limpiar_etapa_condicional(self, super().clean())
 
 
 class CambiarEstadoLoteForm(forms.Form):
@@ -701,7 +670,12 @@ class CambiarEstadoLoteForm(forms.Form):
     def __init__(self, *args, lote=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields.update(_campos_etapa_condicional())
-        self.fields["estado_lote"].queryset = EstadoLote.objects.filter(activo=True).order_by("orden", "nombre")
+        from .services import CODIGOS_ESTADO_RETIRADOS
+
+        estados = EstadoLote.objects.filter(activo=True).order_by("orden", "nombre")
+        for codigo in CODIGOS_ESTADO_RETIRADOS:
+            estados = estados.exclude(codigo__iexact=codigo)
+        self.fields["estado_lote"].queryset = estados
         # El proceso se define una sola vez: solo se pide si el lote aún no tiene uno.
         if lote is not None and lote.proceso_beneficio_id is None:
             self.fields["proceso_beneficio"] = forms.ModelChoiceField(

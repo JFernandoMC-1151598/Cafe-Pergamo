@@ -407,6 +407,8 @@ def crear_lote(
        de la cosecha, así que dos lotes creados al mismo tiempo contra la
        misma cosecha nunca pueden, juntos, superar su saldo (se procesan
        uno a la vez, nunca leen un saldo "desactualizado").
+    4. El lote siempre nace en el estado 'Recolección' (sin proceso ni etapas
+       de beneficio): el resto del recorrido se registra con `cambiar_estado_lote`.
     """
     if cantidad is None:
         raise ValidationError({"cantidad": "La cantidad del lote es obligatoria."})
@@ -427,26 +429,31 @@ def crear_lote(
                 {"proceso_beneficio": "El proceso seleccionado no está activo o no existe."}
             )
 
+    # Regla de negocio: un lote nuevo SIEMPRE nace en 'Recolección'. Los demás
+    # estados se alcanzan después, uno a uno, con `cambiar_estado_lote`, que sí
+    # valida el orden, el proceso de beneficio y la publicación real.
     estado = None
-    if estado_lote_id is not None:
-        estado = EstadoLote.objects.filter(
-            pk=estado_lote_id, activo=True
-        ).first()
+    if estado_lote_id not in (None, ""):
+        estado = EstadoLote.objects.filter(pk=estado_lote_id, activo=True).first()
         if estado is None:
             raise ValidationError(
                 {"estado_lote": "El estado seleccionado no está activo o no existe."}
             )
+        if (estado.codigo or "").strip().upper() != CODIGO_ESTADO_RECOLECCION:
+            raise ValidationError({
+                "estado_lote": (
+                    "Un lote nuevo siempre se crea en 'Recolección'. Para avanzarlo a otro "
+                    "estado use el cambio de estado del lote."
+                )
+            })
+    else:
+        estado = EstadoLote.objects.filter(
+            codigo__iexact=CODIGO_ESTADO_RECOLECCION, activo=True
+        ).first()
 
-    # Regla de negocio: la etapa de beneficio se indica solo si (y siempre que)
-    # el lote nace en el estado 'En Beneficio'.
+    # La etapa de beneficio solo existe cuando el lote entra a 'En Beneficio';
+    # al crear el lote no aplica.
     _validar_etapa_segun_estado(estado, etapa_beneficio)
-    if _es_estado_beneficio(estado) and proceso is None:
-        raise ValidationError({
-            "proceso_beneficio": "Si el lote está 'En Beneficio', debe indicar el proceso de beneficio."
-        })
-    fecha_etapa_normalizada = (
-        _normalizar_fecha_etapa(fecha_etapa) if _es_estado_beneficio(estado) else None
-    )
 
     with transaction.atomic():
         try:
@@ -501,15 +508,6 @@ def crear_lote(
         # refleje el nuevo saldo (o viceversa).
         cosecha.cantidad_disponible = cosecha.cantidad_disponible - cantidad
         cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
-
-        if _es_estado_beneficio(estado):
-            _crear_etapa_beneficio(
-                lote,
-                etapa_beneficio,
-                fecha_etapa_normalizada,
-                campo_etapa="etapa_beneficio",
-                campo_fecha="fecha_etapa",
-            )
 
         # HU18-ST1 (SCRUM-174): Generación y persistencia automática del código QR asociado al lote
         sincronizar_o_generar_qr_lote(lote)
@@ -1534,11 +1532,16 @@ def resumen_trazabilidad_productor(productor_id) -> dict:
 
 # Fases generales del ciclo de vida del lote (catálogo EstadoLote), en orden.
 # Al cambiar el estado manualmente, el lote solo avanza por esta secuencia.
+CODIGO_ESTADO_RECOLECCION = "RECOLECCION"
 CODIGO_ESTADO_BENEFICIO = "BENEFICIO"
+# El secado es una etapa del beneficio (EtapaBeneficio.TipoEtapa.SECADO), no una fase
+# aparte del lote: el estado "En Secado" se retiró para no duplicarla. Los lotes que
+# aún lo tengan se tratan como "En Beneficio".
+CODIGOS_ESTADO_RETIRADOS = ("SECADO",)
+CODIGO_FASE_EQUIVALENTE = {"SECADO": CODIGO_ESTADO_BENEFICIO}
 ORDEN_FASES_ESTADO_LOTE = (
-    "RECOLECCION",
+    CODIGO_ESTADO_RECOLECCION,
     CODIGO_ESTADO_BENEFICIO,
-    "SECADO",
     "ALMACENADO",
     "CATACION",
     "PUBLICADO",
@@ -1558,6 +1561,7 @@ def _alinear_estado_con_publicacion(lote: Lote) -> bool:
     actual = lote.estado_lote
     if actual is not None:
         codigo_actual = (actual.codigo or "").strip().upper()
+        codigo_actual = CODIGO_FASE_EQUIVALENTE.get(codigo_actual, codigo_actual)
         if codigo_actual not in ORDEN_FASES_ESTADO_LOTE:
             return False
         if ORDEN_FASES_ESTADO_LOTE.index(codigo_actual) >= ORDEN_FASES_ESTADO_LOTE.index(CODIGO_ESTADO_PUBLICADO):
@@ -1709,6 +1713,13 @@ def cambiar_estado_lote(
         destino = EstadoLote.objects.filter(pk=estado_lote_id, activo=True).first()
         if destino is None:
             raise ValidationError({"estado_lote": "El estado seleccionado no está activo o no existe."})
+        if (destino.codigo or "").strip().upper() in CODIGOS_ESTADO_RETIRADOS:
+            raise ValidationError({
+                "estado_lote": (
+                    f"El estado '{destino.nombre}' ya no se usa: el secado se registra como una "
+                    "etapa del beneficio, con el lote en 'En Beneficio'."
+                )
+            })
 
         actual = lote.estado_lote
         es_beneficio = _es_estado_beneficio(destino)
@@ -1717,6 +1728,7 @@ def cambiar_estado_lote(
 
         if actual is not None:
             codigo_actual = (actual.codigo or "").strip().upper()
+            codigo_actual = CODIGO_FASE_EQUIVALENTE.get(codigo_actual, codigo_actual)
             codigo_destino = (destino.codigo or "").strip().upper()
             if codigo_actual in ORDEN_FASES_ESTADO_LOTE and codigo_destino in ORDEN_FASES_ESTADO_LOTE:
                 if ORDEN_FASES_ESTADO_LOTE.index(codigo_destino) < ORDEN_FASES_ESTADO_LOTE.index(codigo_actual):
