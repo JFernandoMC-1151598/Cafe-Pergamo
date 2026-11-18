@@ -32,6 +32,7 @@ urlpatterns = [
     path('lotes/<int:pk>/publicar/', views.publicar_lote_web_view, name='lote_publicar'),
     path('lotes/<int:pk>/despublicar/', views.despublicar_lote_web_view, name='lote_despublicar'),
     path('mis-lotes/interes/', views.manifestaciones_interes_productor_view, name='mis_manifestaciones_interes'),
+    path('mis-lotes/interes/<int:pk>/negociacion/', views.negociacion_manifestacion_view, name='manifestacion_interes_negociacion'),
     path(
         'mis-lotes/interes/<int:pk>/marcar-vista/',
         views.marcar_manifestacion_interes_vista_web_view,
@@ -106,6 +107,9 @@ urlpatterns = [
 
     # API REST de Manifestación de Interés en un Lote (HU-22 / SCRUM-264)
     path('api/lotes/<int:pk>/interes/', views.api_manifestar_interes_lote_view, name='api_lote_manifestar_interes'),
+    path('api/manifestaciones-interes/<int:pk>/avances/', views.api_registrar_avance_negociacion_view, name='api_registrar_avance_negociacion'),
+
+
 
     # API REST de Registro y Consulta de Ventas (HU-24 / SCRUM-276)
     path('api/ventas/', views.api_registrar_venta_view, name='api_venta_crear'),
