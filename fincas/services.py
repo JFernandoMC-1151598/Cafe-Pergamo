@@ -24,7 +24,18 @@ import uuid
 
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import (
+    Avg,
+    Case,
+    Count,
+    DecimalField,
+    F,
+    FloatField,
+    Q,
+    Sum,
+    Value,
+    When,
+)
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 import qrcode
@@ -2814,3 +2825,278 @@ def listar_compras_comprador(*, comprador_id):
     return VentaLote.objects.select_related(
         "lote", "lote__cosecha__finca", "negociacion"
     ).filter(comprador_id=comprador_id).order_by("-fecha_venta", "-id")
+
+
+# ==============================================================================
+# SERVICIOS DE ANALÍTICA E INDICADORES (HU-26 / SCRUM-235 / SCRUM-286 / SCRUM-288)
+# ==============================================================================
+
+def resolver_rol_usuario(usuario) -> str:
+    """
+    Determina de forma uniforme el código de rol de un usuario del sistema,
+    admitiendo superusuarios, staff, perfiles con relación a Rol o usuarios anónimos.
+    """
+    if usuario is None or not getattr(usuario, "is_authenticated", True):
+        return "ANONIMO"
+    if getattr(usuario, "is_superuser", False) or getattr(usuario, "is_staff", False):
+        return "ADMINISTRADOR"
+    rol_obj = getattr(usuario, "rol", None)
+    if rol_obj:
+        if hasattr(rol_obj, "codigo"):
+            return str(rol_obj.codigo).upper()
+        return str(rol_obj).upper()
+    return "PRODUCTOR"
+
+
+def obtener_metricas_dashboard(
+    usuario=None,
+    *,
+    rol_override: Optional[str] = None,
+    filtros: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Calcula de forma consolidada, atómica y optimizada los indicadores analíticos
+    de trazabilidad y comercialización para el Dashboard de Café Pérgamo
+    (HU-26 / SCRUM-235 / HU26-ST2 / HU26-ST3).
+
+    Políticas de Aislamiento y Control de Acceso (RBAC):
+    - Rol 'ASOCIACION' o 'ADMINISTRADOR': visión panorámica de todos los lotes,
+      productores y ventas consolidadas de la región (Norte de Santander).
+    - Rol 'PRODUCTOR': aislamiento estricto sobre sus fincas, lotes y ventas propias.
+
+    Estructura de Retorno (DTO Analítico):
+    - `resumen_general`: contadores macro (total_lotes, total_fincas, total_municipios).
+    - `indicadores_trazabilidad`: lotes activos, distribución por etapas de beneficio
+      (Cosecha, Despulpado, Fermentación, Lavado, Secado), lotes por estado comercial,
+      porcentaje de completitud promedio, puntaje SCA de catación y lotes con QR.
+    - `indicadores_comercializacion`: volumen en kg (producido, vendido, disponible en catálogo),
+      ingresos totales en COP, precio promedio por kg, total de ventas y embudo de negociaciones.
+    - `distribucion_regional`: desglose de producción, ventas e ingresos por municipio.
+    - `filtros_aplicados`: parámetros de fecha, municipio o estado evaluados.
+    """
+    rol = (rol_override or resolver_rol_usuario(usuario)).upper()
+    es_asociacion_o_admin = rol in ("ADMINISTRADOR", "ASOCIACION")
+
+    filtros = filtros or {}
+    municipio_id = filtros.get("municipio_id")
+    fecha_inicio = filtros.get("fecha_inicio")
+    fecha_fin = filtros.get("fecha_fin")
+    estado_comercial = filtros.get("estado_comercial")
+    finca_id = filtros.get("finca_id")
+
+    if isinstance(fecha_inicio, str) and fecha_inicio.strip():
+        fecha_inicio = parse_date(fecha_inicio.strip())
+    if isinstance(fecha_fin, str) and fecha_fin.strip():
+        fecha_fin = parse_date(fecha_fin.strip())
+
+    # Querysets base
+    qs_fincas = Finca.objects.filter(activo=True)
+    qs_lotes = Lote.objects.filter(cosecha__finca__activo=True)
+    qs_ventas = VentaLote.objects.select_related("lote", "lote__cosecha__finca")
+    qs_negociaciones = NegociacionLote.objects.select_related("lote", "lote__cosecha__finca")
+
+    # Aislamiento RBAC por productor
+    if not es_asociacion_o_admin and usuario is not None:
+        if isinstance(usuario, (uuid.UUID, int, str)):
+            productor_id = usuario
+        elif getattr(usuario, "is_authenticated", True):
+            productor_id = getattr(usuario, "id", None) or getattr(usuario, "pk", None)
+        else:
+            productor_id = None
+        if productor_id:
+            qs_fincas = qs_fincas.filter(productor_id=productor_id)
+            qs_lotes = qs_lotes.filter(cosecha__finca__productor_id=productor_id)
+            qs_ventas = qs_ventas.filter(lote__cosecha__finca__productor_id=productor_id)
+            qs_negociaciones = qs_negociaciones.filter(lote__cosecha__finca__productor_id=productor_id)
+
+    # Filtros condicionales
+    if finca_id:
+        qs_fincas = qs_fincas.filter(pk=finca_id)
+        qs_lotes = qs_lotes.filter(cosecha__finca_id=finca_id)
+        qs_ventas = qs_ventas.filter(lote__cosecha__finca_id=finca_id)
+        qs_negociaciones = qs_negociaciones.filter(lote__cosecha__finca_id=finca_id)
+
+    if municipio_id:
+        qs_fincas = qs_fincas.filter(municipio_id=municipio_id)
+        qs_lotes = qs_lotes.filter(cosecha__finca__municipio_id=municipio_id)
+        qs_ventas = qs_ventas.filter(lote__cosecha__finca__municipio_id=municipio_id)
+        qs_negociaciones = qs_negociaciones.filter(lote__cosecha__finca__municipio_id=municipio_id)
+
+    if estado_comercial:
+        qs_lotes = qs_lotes.filter(estado_comercial=str(estado_comercial).upper())
+
+    if fecha_inicio:
+        qs_lotes = qs_lotes.filter(cosecha__fecha_cosecha__gte=fecha_inicio)
+        qs_ventas = qs_ventas.filter(fecha_venta__date__gte=fecha_inicio)
+
+    if fecha_fin:
+        qs_lotes = qs_lotes.filter(cosecha__fecha_cosecha__lte=fecha_fin)
+        qs_ventas = qs_ventas.filter(fecha_venta__date__lte=fecha_fin)
+
+    # 1. Resumen General
+    total_lotes = qs_lotes.count()
+    total_fincas = qs_fincas.count()
+    total_municipios = qs_fincas.values("municipio_id").distinct().count()
+    total_productores = qs_fincas.values("productor_id").distinct().count()
+
+    # 2. Indicadores de Trazabilidad
+    lotes_ids = list(qs_lotes.values_list("id", flat=True))
+    etapas_qs = EtapaBeneficio.objects.filter(lote_id__in=lotes_ids, activo=True)
+
+    despulpado_cnt = etapas_qs.filter(etapa=EtapaBeneficio.TipoEtapa.DESPULPADO).values("lote_id").distinct().count()
+    fermentacion_cnt = etapas_qs.filter(etapa=EtapaBeneficio.TipoEtapa.FERMENTACION).values("lote_id").distinct().count()
+    lavado_cnt = etapas_qs.filter(etapa=EtapaBeneficio.TipoEtapa.LAVADO).values("lote_id").distinct().count()
+    secado_cnt = etapas_qs.filter(etapa=EtapaBeneficio.TipoEtapa.SECADO).values("lote_id").distinct().count()
+
+    distribucion_etapas = {
+        "cosecha": total_lotes,
+        "despulpado": despulpado_cnt,
+        "fermentacion": fermentacion_cnt,
+        "lavado": lavado_cnt,
+        "secado": secado_cnt,
+    }
+
+    estados_agg = {e[0].lower(): 0 for e in Lote.EstadoComercial.choices}
+    for item in qs_lotes.values("estado_comercial").annotate(c=Count("id")):
+        k = str(item["estado_comercial"]).lower()
+        estados_agg[k] = item["c"]
+
+    calidad_qs = CaracteristicasCalidad.objects.filter(lote_id__in=lotes_ids)
+    lotes_con_evaluacion_calidad = calidad_qs.count()
+    avg_catacion = calidad_qs.filter(puntaje_taza__isnull=False).aggregate(avg_taza=Avg("puntaje_taza"))["avg_taza"]
+    puntaje_catacion_promedio = round(float(avg_catacion), 2) if avg_catacion is not None else 0.0
+
+    lotes_con_qr = CodigoQRLote.objects.filter(lote_id__in=lotes_ids).values("lote_id").distinct().count()
+
+    # Porcentaje de completitud promedio de trazabilidad
+    if total_lotes > 0:
+        georref_count = qs_lotes.filter(
+            cosecha__finca__latitud__isnull=False,
+            cosecha__finca__longitud__isnull=False,
+        ).count()
+        proceso_count = qs_lotes.filter(proceso_beneficio__isnull=False).count()
+        etapas_count = etapas_qs.values("lote_id").distinct().count()
+        calidad_count = lotes_con_evaluacion_calidad
+
+        # Ponderación técnica: Base (40) + Georref (10) + Proceso (15) + Etapas (15) + Calidad (20) = 100%
+        suma_porcentajes = (
+            (total_lotes * 40)
+            + (georref_count * 10)
+            + (proceso_count * 15)
+            + (etapas_count * 15)
+            + (calidad_count * 20)
+        )
+        porcentaje_completitud_promedio = round(float(suma_porcentajes) / total_lotes, 2)
+    else:
+        porcentaje_completitud_promedio = 0.0
+
+    # 3. Indicadores de Comercialización
+    ventas_agg = qs_ventas.aggregate(
+        total_kg=Sum("cantidad_kg"),
+        total_cop=Sum("precio_total"),
+        total_ventas=Count("id"),
+    )
+    volumen_vendido_kg = float(ventas_agg["total_kg"] or Decimal("0.00"))
+    ingresos_totales_cop = float(ventas_agg["total_cop"] or Decimal("0.00"))
+    total_ventas_concretadas = ventas_agg["total_ventas"] or 0
+
+    precio_promedio_kg_cop = (
+        round(ingresos_totales_cop / volumen_vendido_kg, 2)
+        if volumen_vendido_kg > 0
+        else 0.0
+    )
+
+    volumen_disp_agg = (
+        qs_lotes.filter(publicado_en_catalogo=True)
+        .exclude(estado_comercial=Lote.EstadoComercial.VENDIDO)
+        .aggregate(sum_disp=Sum("cantidad"))["sum_disp"]
+        or Decimal("0.00")
+    )
+    volumen_disponible_catalogo_kg = float(volumen_disp_agg)
+
+    volumen_lotes_actual_kg = float(qs_lotes.aggregate(s=Sum("cantidad"))["s"] or Decimal("0.00"))
+    volumen_total_producido_kg = round(volumen_lotes_actual_kg + volumen_vendido_kg, 2)
+
+    neg_total = qs_negociaciones.count()
+    neg_estados = {
+        "total": neg_total,
+        "solicitadas": qs_negociaciones.filter(estado=NegociacionLote.EstadoNegociacion.SOLICITADA).count(),
+        "en_negociacion": qs_negociaciones.filter(estado=NegociacionLote.EstadoNegociacion.EN_NEGOCIACION).count(),
+        "aceptadas": qs_negociaciones.filter(estado=NegociacionLote.EstadoNegociacion.ACEPTADA).count(),
+        "rechazadas": qs_negociaciones.filter(estado=NegociacionLote.EstadoNegociacion.RECHAZADA).count(),
+        "canceladas": qs_negociaciones.filter(estado=NegociacionLote.EstadoNegociacion.CANCELADA).count(),
+    }
+
+    tasa_conversion_ventas_pct = (
+        round((total_ventas_concretadas / neg_total) * 100, 2)
+        if neg_total > 0
+        else 0.0
+    )
+
+    # 4. Distribución Regional por Municipio
+    distribucion_regional = []
+    municipios_ids = list(qs_fincas.values_list("municipio_id", flat=True).distinct())
+    for mun in Municipio.objects.filter(id__in=municipios_ids).order_by("nombre"):
+        lotes_mun = qs_lotes.filter(cosecha__finca__municipio=mun)
+        ventas_mun = qs_ventas.filter(lote__cosecha__finca__municipio=mun)
+
+        kg_prod = float(lotes_mun.aggregate(s=Sum("cantidad"))["s"] or Decimal("0.00"))
+        v_agg = ventas_mun.aggregate(s_kg=Sum("cantidad_kg"), s_cop=Sum("precio_total"))
+        kg_vend = float(v_agg["s_kg"] or Decimal("0.00"))
+        ingr_cop = float(v_agg["s_cop"] or Decimal("0.00"))
+
+        distribucion_regional.append({
+            "municipio_id": mun.id,
+            "municipio": mun.nombre,
+            "departamento": mun.departamento,
+            "total_lotes": lotes_mun.count(),
+            "volumen_producido_kg": round(kg_prod + kg_vend, 2),
+            "volumen_vendido_kg": round(kg_vend, 2),
+            "ingresos_totales_cop": round(ingr_cop, 2),
+        })
+
+    return {
+        "rol_usuario": rol,
+        "es_asociacion_o_admin": es_asociacion_o_admin,
+        "resumen_general": {
+            "total_lotes": total_lotes,
+            "total_fincas": total_fincas,
+            "total_municipios": total_municipios,
+            "total_productores": total_productores,
+        },
+        "indicadores_trazabilidad": {
+            "total_lotes_trazables": total_lotes,
+            "distribucion_etapas": distribucion_etapas,
+            "lotes_por_estado_comercial": estados_agg,
+            "porcentaje_completitud_promedio": porcentaje_completitud_promedio,
+            "puntaje_catacion_promedio": puntaje_catacion_promedio,
+            "lotes_con_evaluacion_calidad": lotes_con_evaluacion_calidad,
+            "lotes_con_qr_generado": lotes_con_qr,
+        },
+        "indicadores_comercializacion": {
+            "volumen_total_producido_kg": volumen_total_producido_kg,
+            "volumen_disponible_catalogo_kg": volumen_disponible_catalogo_kg,
+            "volumen_vendido_kg": volumen_vendido_kg,
+            "ingresos_totales_cop": ingresos_totales_cop,
+            "precio_promedio_kg_cop": precio_promedio_kg_cop,
+            "total_ventas_concretadas": total_ventas_concretadas,
+            "resumen_negociaciones": neg_estados,
+            "tasa_conversion_ventas_pct": tasa_conversion_ventas_pct,
+        },
+        "distribucion_regional": distribucion_regional,
+        "filtros_aplicados": {
+            "municipio_id": municipio_id,
+            "finca_id": finca_id,
+            "estado_comercial": estado_comercial,
+            "fecha_inicio": str(fecha_inicio) if fecha_inicio else None,
+            "fecha_fin": str(fecha_fin) if fecha_fin else None,
+        },
+    }
+
+
+def obtener_indicadores_dashboard(usuario=None, **kwargs) -> Dict[str, Any]:
+    """
+    Alias canónico de conveniencia para `obtener_metricas_dashboard`.
+    """
+    return obtener_metricas_dashboard(usuario, **kwargs)
+
