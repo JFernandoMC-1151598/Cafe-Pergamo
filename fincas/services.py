@@ -49,6 +49,8 @@ from .models import (
     Lote,
     ManifestacionInteres,
     Municipio,
+    NegociacionLote,
+    VentaLote,
 )
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
 
@@ -2618,7 +2620,9 @@ def marcar_manifestacion_interes_vista(*, manifestacion_id, productor_id):
 
 # ==============================================================================
 # HU-23 (SCRUM-232): REGISTRAR EL AVANCE DE UNA NEGOCIACIÓN
-# ==============================================================================
+# =======================================================================
+
+
 
 ESTADOS_AVANCE_NEGOCIACION = tuple(AvanceNegociacion.EstadoAvance.values)
 
@@ -2641,19 +2645,35 @@ def _decimal_avance(valor, etiqueta, *, requerido):
     return numero, None
 
 
-def validar_datos_avance_negociacion(manifestacion, productor_id, datos) -> Dict[str, Any]:
+ESTADOS_NEGOCIACION_CERRADOS = (
+    NegociacionLote.EstadoNegociacion.ACEPTADA,
+    NegociacionLote.EstadoNegociacion.RECHAZADA,
+    NegociacionLote.EstadoNegociacion.CANCELADA,
+)
+
+# Estado de la NegociacionLote que corresponde al estado del último avance.
+MAPA_ESTADO_AVANCE_A_NEGOCIACION = {
+    AvanceNegociacion.EstadoAvance.ABIERTA: NegociacionLote.EstadoNegociacion.EN_NEGOCIACION,
+    AvanceNegociacion.EstadoAvance.ACEPTADA: NegociacionLote.EstadoNegociacion.ACEPTADA,
+    AvanceNegociacion.EstadoAvance.RECHAZADA: NegociacionLote.EstadoNegociacion.RECHAZADA,
+}
+
+
+def validar_datos_avance_negociacion(lote, negociacion, productor_id, datos) -> Dict[str, Any]:
     """
     HU23-ST4 (SCRUM-271): reglas de negocio del avance de una negociación.
 
     Se aplican siempre en backend (RNF-09), sin depender de la vista que
-    llame al servicio. Devuelve los datos ya normalizados; si alguna regla
-    falla lanza `ValidationError` con el error por campo.
+    llame al servicio. `negociacion` es la NegociacionLote ya existente de la
+    manifestación, o None si este sería el primer avance. Devuelve los datos
+    ya normalizados; si alguna regla falla lanza `ValidationError` con el
+    error por campo.
 
     Condiciones previas (se informan de inmediato, una a la vez):
       - Solo el productor dueño del lote puede registrar avances (`permiso`).
       - El lote debe seguir activo (`lote`).
-      - Una negociación ya Aceptada o Rechazada está cerrada: no admite más
-        avances, porque el estado solo avanza (`estado`).
+      - Una negociación ya Aceptada, Rechazada o Cancelada está cerrada: no
+        admite más avances, porque el estado solo avanza (`estado`).
 
     Reglas sobre los datos (se informan todas juntas, por campo):
       - Estado limitado a Abierta, Aceptada o Rechazada; si no se envía queda
@@ -2666,18 +2686,15 @@ def validar_datos_avance_negociacion(manifestacion, productor_id, datos) -> Dict
         (`fecha_estimada_cierre`).
       - Observaciones de máximo 1000 caracteres (`observaciones`).
     """
-    lote = manifestacion.lote
-
     if str(lote.cosecha.finca.productor_id) != str(productor_id):
         raise ValidationError({"permiso": "Solo el productor dueño del lote puede registrar avances de su negociación."})
 
     if not lote.activo:
         raise ValidationError({"lote": "El lote de esta negociación no se encuentra activo."})
 
-    ultimo = manifestacion.avances_negociacion.order_by("-creado_en", "-id").first()
-    if ultimo is not None and ultimo.estado != AvanceNegociacion.EstadoAvance.ABIERTA:
+    if negociacion is not None and negociacion.estado in ESTADOS_NEGOCIACION_CERRADOS:
         raise ValidationError(
-            {"estado": f"La negociación ya fue {ultimo.get_estado_display().lower()}; no admite más avances."}
+            {"estado": f"La negociación ya fue {negociacion.get_estado_display().lower()}; no admite más avances."}
         )
 
     errores: Dict[str, str] = {}
@@ -2747,15 +2764,21 @@ def registrar_avance_negociacion(
     observaciones: str = "",
 ) -> Dict[str, Any]:
     """
-    HU23-ST5 (SCRUM-272): registra un avance en la negociación que nació de
+    HU23-ST5 (SCRUM-272): registra un avance en la negociación que nace de
     una manifestación de interés, guardando la fecha de registro y el estado
     (Abierta por defecto, o el indicado). Las reglas están en
     `validar_datos_avance_negociacion` (HU23-ST4).
 
-    Operación atómica: bloquea la manifestación mientras valida y guarda, así
-    dos peticiones simultáneas no pueden registrar avances sobre una
-    negociación que la otra acaba de cerrar. Si algo falla no queda nada
-    guardado. Retorna un diccionario con el avance ya persistido.
+    Persistencia (HU23-ST1 / SCRUM-268): el primer avance abre la
+    `NegociacionLote` de la manifestación; los siguientes se agregan a la
+    misma. El estado de la negociación sigue al del último avance (Abierta =
+    En negociación; Aceptada o Rechazada la cierran) y, al aceptarse, queda
+    con el precio acordado para que HU-24 pueda registrar la venta.
+
+    Operación atómica: bloquea la manifestación y su negociación mientras
+    valida y guarda, así dos peticiones simultáneas no pueden registrar
+    avances sobre una negociación que la otra acaba de cerrar. Si algo falla
+    no queda nada guardado. Retorna un diccionario con el avance persistido.
     """
     if not productor_id:
         raise ValidationError({"permiso": "Se requiere la identificación del productor."})
@@ -2770,8 +2793,17 @@ def registrar_avance_negociacion(
         except (ManifestacionInteres.DoesNotExist, ValueError, TypeError):
             raise ValidationError({"manifestacion": "La manifestación de interés indicada no existe."})
 
+        lote = manifestacion.lote
+        negociacion = (
+            NegociacionLote.objects.select_for_update(of=("self",))
+            .filter(manifestacion_interes=manifestacion)
+            .order_by("-creado_en", "-id")
+            .first()
+        )
+
         datos = validar_datos_avance_negociacion(
-            manifestacion,
+            lote,
+            negociacion,
             productor_id,
             {
                 "estado": estado,
@@ -2783,18 +2815,35 @@ def registrar_avance_negociacion(
             },
         )
 
+        estado_negociacion = MAPA_ESTADO_AVANCE_A_NEGOCIACION[datos["estado"]]
+        if negociacion is None:
+            negociacion = NegociacionLote(
+                lote=lote,
+                comprador_id=manifestacion.comprador_id,
+                comprador_correo=manifestacion.comprador_correo,
+                manifestacion_interes=manifestacion,
+            )
+        negociacion.estado = estado_negociacion
+        negociacion.cantidad_kg = datos["cantidad_kg"]
+        negociacion.precio_propuesto_por_kg = datos["precio_por_kg"]
+        if estado_negociacion == NegociacionLote.EstadoNegociacion.ACEPTADA:
+            negociacion.precio_acordado_por_kg = datos["precio_por_kg"]
+        # Usuario es managed=False: no existe en la BD de pruebas.
+        negociacion.full_clean(exclude=["comprador"])
+        negociacion.save()
+
         avance = AvanceNegociacion(
-            manifestacion=manifestacion,
+            negociacion=negociacion,
             registrado_por_id=productor_id,
             **datos,
         )
-        # Usuario es managed=False: no existe en la BD de pruebas.
         avance.full_clean(exclude=["registrado_por"])
         avance.save()
 
-        lote = manifestacion.lote
         return {
             "id": avance.pk,
+            "negociacion_id": negociacion.pk,
+            "negociacion_estado": negociacion.estado,
             "manifestacion_id": manifestacion.pk,
             "lote_id": lote.id,
             "lote_codigo": lote.codigo,
@@ -2807,5 +2856,216 @@ def registrar_avance_negociacion(
             "fecha_estimada_cierre": avance.fecha_estimada_cierre.isoformat() if avance.fecha_estimada_cierre else None,
             "observaciones": avance.observaciones,
             "fecha_registro": avance.creado_en.isoformat(),
-            "negociacion_cerrada": avance.estado != AvanceNegociacion.EstadoAvance.ABIERTA,
+            "negociacion_cerrada": negociacion.estado in ESTADOS_NEGOCIACION_CERRADOS,
         }
+
+
+# ==============================================================================
+# SERVICIOS DE COMERCIALIZACIÓN Y CIERRE DE VENTA (HU-24 / SCRUM-233)
+# Subtarea: SCRUM-278 / HU24-ST5: Modelo VentaLote y servicio base de persistencia.
+# Subtarea: SCRUM-274 / HU24-ST2: Transacción atómica, actualización de saldo del
+# lote, cambio de estado a 'Vendido' y desindexación del catálogo comercial.
+# ==============================================================================
+
+def generar_codigo_comprobante_venta(lote=None) -> str:
+    """
+    Genera un identificador único y formal para el comprobante de venta
+    (formato: VTA-YYYYMMDD-XXXXX o VTA-<CODIGO_LOTE>-XXXX).
+    """
+    prefijo_fecha = timezone.now().strftime("%Y%m%d")
+    base_lote = lote.codigo if (lote and getattr(lote, "codigo", None)) else "OP"
+    # Buscar secuencia incremental o sufijo aleatorio no colisionante
+    contador = VentaLote.objects.filter(codigo_comprobante__startswith=f"VTA-{prefijo_fecha}").count() + 1
+    candidato = f"VTA-{prefijo_fecha}-{contador:04d}"
+    while VentaLote.objects.filter(codigo_comprobante=candidato).exists():
+        contador += 1
+        candidato = f"VTA-{prefijo_fecha}-{contador:04d}"
+    return candidato
+
+
+@transaction.atomic
+def registrar_venta_lote(
+    *,
+    negociacion_id: int,
+    usuario_actual_id=None,
+    usuario_actual_correo: str = "",
+    cantidad_kg=None,
+    precio_unitario_kg=None,
+    observaciones: str = "",
+    fecha_venta=None,
+) -> VentaLote:
+    """
+    Registra el cierre formal de una venta de café resultante de una negociación
+    (HU-24 / SCRUM-233).
+
+    Garantías de Arquitectura e Integridad:
+    1. Regla de Negociación Previa: Solo procede si la negociación existe y su
+       estado es estrictamente 'ACEPTADA' (SCRUM-277 / HU24-ST4).
+    2. Autorización / Pertenencia: El usuario que ejecuta debe ser el productor
+       propietario de la finca del lote (o un administrador staff).
+    3. Transacción Atómica (@transaction.atomic) y Bloqueo de Concurrencia
+       (select_for_update): Previene condiciones de carrera o sobreventas
+       concurrentes (SCRUM-274 / HU24-ST2).
+    4. Mutación de Inventario y Desindexación de Catálogo:
+       - Si la cantidad vendida consume la totalidad del stock disponible del lote,
+         su estado comercial cambia a 'VENDIDO', se desindexa del catálogo comercial
+         (`publicado_en_catalogo = False`) y se registra en `HistorialEstadoLote`.
+       - Si es una venta parcial, descuenta la cantidad vendida manteniendo el remanente.
+    5. Persistencia Inmutable: Se genera y persiste el registro de `VentaLote` con
+       código de comprobante único, valores unitarios y totales liquidados (SCRUM-278).
+    """
+    try:
+        negociacion = NegociacionLote.objects.select_related(
+            "lote", "lote__cosecha__finca"
+        ).get(pk=negociacion_id)
+    except NegociacionLote.DoesNotExist:
+        raise ValidationError({"negociacion": "La negociación indicada no existe."})
+
+    # 1. Validar que la negociación esté formalmente aceptada
+    if negociacion.estado != NegociacionLote.EstadoNegociacion.ACEPTADA:
+        raise ValidationError({
+            "negociacion": (
+                f"No se puede registrar una venta sobre una negociación en estado '{negociacion.get_estado_display()}'. "
+                "La negociación debe estar en estado 'Aceptada'."
+            )
+        })
+
+    # 2. Validar que la negociación no tenga ya una venta previa asociada (OneToOne)
+    if hasattr(negociacion, "venta") and negociacion.venta is not None:
+        raise ValidationError({
+            "negociacion": f"Esta negociación ya cuenta con una venta registrada (Comprobante {negociacion.venta.codigo_comprobante})."
+        })
+
+    # 3. Validar permisos / pertenencia del productor
+    lote = negociacion.lote
+    productor_id = lote.cosecha.finca.productor_id
+    if usuario_actual_id is not None:
+        if str(usuario_actual_id) != str(productor_id):
+            raise ValidationError({"permiso": "No tiene autorización para registrar ventas de lotes pertenecientes a otro productor."})
+
+    # 4. Bloqueo transaccional de concurrencia sobre el lote
+    lote_bloqueado = Lote.objects.select_for_update().get(pk=lote.pk)
+    if not lote_bloqueado.activo:
+        raise ValidationError({"lote": "El lote de café no se encuentra activo."})
+
+    # 5. Resolver y validar cantidades y precios
+    if cantidad_kg is not None:
+        try:
+            cant_dec = Decimal(str(cantidad_kg))
+        except Exception:
+            raise ValidationError({"cantidad_kg": "La cantidad ingresada no es un número válido."})
+    else:
+        cant_dec = negociacion.cantidad_kg
+
+    if cant_dec <= Decimal("0.00"):
+        raise ValidationError({"cantidad_kg": "La cantidad vendida debe ser estrictamente mayor a 0 kg."})
+
+    if cant_dec > lote_bloqueado.cantidad:
+        raise ValidationError({
+            "cantidad_kg": (
+                f"La cantidad a vender ({cant_dec} kg) supera el stock disponible en el lote "
+                f"({lote_bloqueado.cantidad} kg)."
+            )
+        })
+
+    if precio_unitario_kg is not None:
+        try:
+            precio_unit_dec = Decimal(str(precio_unitario_kg))
+        except Exception:
+            raise ValidationError({"precio_unitario_kg": "El precio unitario no es un valor numérico válido."})
+    else:
+        precio_unit_dec = negociacion.precio_acordado_por_kg or negociacion.precio_propuesto_por_kg
+
+    if not precio_unit_dec or precio_unit_dec <= Decimal("0.00"):
+        raise ValidationError({"precio_unitario_kg": "El precio unitario por kg debe ser mayor a 0 COP."})
+
+    precio_total_dec = (cant_dec * precio_unit_dec).quantize(Decimal("0.01"))
+    fecha_operacion = fecha_venta or timezone.now()
+
+    # 6. Crear y persistir la venta (SCRUM-278 / HU24-ST5)
+    codigo_vta = generar_codigo_comprobante_venta(lote=lote_bloqueado)
+    venta = VentaLote(
+        negociacion=negociacion,
+        lote=lote_bloqueado,
+        comprador_id=negociacion.comprador_id,
+        comprador_correo=negociacion.comprador_correo or "",
+        cantidad_kg=cant_dec,
+        precio_unitario_kg=precio_unit_dec,
+        precio_total=precio_total_dec,
+        codigo_comprobante=codigo_vta,
+        observaciones=str(observaciones or "").strip(),
+        fecha_venta=fecha_operacion,
+    )
+    # Usuario es managed=False en el backend/pruebas de Supabase
+    venta.full_clean(exclude=["comprador"])
+    venta.save()
+
+    # 7. Actualización atómica de inventario y estado del lote (SCRUM-274 / HU24-ST2)
+    nuevo_saldo = lote_bloqueado.cantidad - cant_dec
+    estado_anterior = lote_bloqueado.estado_comercial
+    campos_a_actualizar = ["cantidad"]
+
+    if nuevo_saldo <= Decimal("0.00"):
+        lote_bloqueado.cantidad = Decimal("0.00")
+        lote_bloqueado.estado_comercial = Lote.EstadoComercial.VENDIDO
+        lote_bloqueado.estado_comercial_actualizado_en = timezone.now()
+        lote_bloqueado.publicado_en_catalogo = False
+        campos_a_actualizar.extend(["estado_comercial", "estado_comercial_actualizado_en", "publicado_en_catalogo"])
+
+        # Registrar en HistorialEstadoLote para trazabilidad inmutable
+        HistorialEstadoLote.objects.create(
+            lote=lote_bloqueado,
+            estado_anterior=estado_anterior,
+            estado_nuevo=Lote.EstadoComercial.VENDIDO,
+            usuario_responsable_id=str(usuario_actual_id) if usuario_actual_id is not None else None,
+            usuario_responsable_correo=usuario_actual_correo,
+            motivo=f"Cierre de venta formal registrado (Comprobante {codigo_vta}).",
+        )
+    else:
+        lote_bloqueado.cantidad = nuevo_saldo
+
+    lote_bloqueado.save(update_fields=campos_a_actualizar)
+
+    return venta
+
+
+def obtener_venta_lote(*, venta_id=None, codigo_comprobante=None) -> VentaLote:
+    """
+    Recupera una venta específica con relaciones precargadas para consulta o comprobante.
+    """
+    qs = VentaLote.objects.select_related(
+        "negociacion",
+        "lote",
+        "lote__cosecha__finca",
+        "lote__cosecha__variedad",
+    )
+    if venta_id:
+        try:
+            return qs.get(pk=venta_id)
+        except VentaLote.DoesNotExist:
+            raise ValidationError({"venta": "El registro de venta solicitado no existe."})
+    elif codigo_comprobante:
+        try:
+            return qs.get(codigo_comprobante=codigo_comprobante)
+        except VentaLote.DoesNotExist:
+            raise ValidationError({"venta": "No se encontró ninguna venta con el comprobante indicado."})
+    else:
+        raise ValidationError({"venta": "Debe especificar un ID de venta o un código de comprobante."})
+
+
+def listar_ventas_productor(*, productor_id):
+    """
+    Retorna el conjunto de ventas históricas asociadas a los lotes de un productor cafetero.
+    """
+    return VentaLote.objects.select_related(
+        "lote", "lote__cosecha__finca", "negociacion"
+    ).filter(lote__cosecha__finca__productor_id=productor_id).order_by("-fecha_venta", "-id")
+
+
+def listar_compras_comprador(*, comprador_id):
+    """
+    Retorna el conjunto de compras históricas formalizadas por un comprador registrado.
+    """
+    return VentaLote.objects.select_related(
+        "lote", "lote__cosecha__finca", "negociacion"
+    ).filter(comprador_id=comprador_id).order_by("-fecha_venta", "-id")

@@ -79,6 +79,8 @@ from .serializers import (
     LoteSerializer,
     ManifestacionInteresInputSerializer,
     MunicipioSerializer,
+    VentaLoteInputSerializer,
+    VentaLoteSerializer,
 )
 from .services import (
     actualizar_visibilidad_codigo_qr,
@@ -100,6 +102,8 @@ from .services import (
     marcar_manifestacion_interes_vista,
     registrar_auditoria_ficha_digital,
     registrar_etapa_beneficio,
+    registrar_venta_lote,
+    obtener_venta_lote,
     resumen_trazabilidad_productor,
     cambiar_estado_lote,
     lote_esta_en_beneficio,
@@ -2525,6 +2529,117 @@ def api_manifestar_interes_lote_view(request, pk):
         return Response(
             {"error": "No fue posible registrar la manifestación de interés.", "detalles": detalles},
             status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+# ==============================================================================
+# ENDPOINT REST: REGISTRO Y CONSULTA DE VENTA DE LOTE (HU-24 / SCRUM-276)
+# ==============================================================================
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_registrar_venta_view(request):
+    """
+    Endpoint REST para registrar el cierre de venta formal a partir de una negociación
+    (HU24-ST3 / SCRUM-276 / SCRUM-233).
+    POST /api/v1/ventas/ o /fincas/api/v1/ventas/
+    Body JSON:
+    {
+        "negociacion_id": <int>,
+        "cantidad_kg": <decimal opcional>,
+        "precio_unitario_kg": <decimal opcional>,
+        "observaciones": <str opcional>
+    }
+    """
+    # 1. Resolver actor autenticado
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        return Response(
+            {"error": "Debe autenticarse con una cuenta autorizada para registrar ventas."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    # 2. Control de Acceso RBAC: verificar permiso 'ventas.registrar'
+    rol_actual = request.session.get("rol", "")
+    if not rol_actual and getattr(request, "auth", None):
+        try:
+            rol_actual = request.auth.get("rol") or request.auth.get("role") or ""
+        except AttributeError:
+            rol_actual = ""
+
+    if rol_actual and not usuarios_permissions.usuario_tiene_permiso(rol_actual, "ventas.registrar"):
+        return Response(
+            {"error": "Su cuenta no cuenta con permisos suficientes (ventas.registrar) para realizar esta operación."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    # 3. Validar payload de entrada con serializador DTO
+    serializer = VentaLoteInputSerializer(data=request.data or {})
+    if not serializer.is_valid():
+        return Response(
+            {"error": "Datos de entrada inválidos.", "detalles": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    negociacion_id = serializer.validated_data["negociacion_id"]
+    cantidad_kg = serializer.validated_data.get("cantidad_kg")
+    precio_unitario_kg = serializer.validated_data.get("precio_unitario_kg")
+    observaciones = serializer.validated_data.get("observaciones", "")
+    usuario_correo = _resolver_usuario_correo(request) or ""
+
+    # 4. Invocar servicio transaccional de dominio
+    try:
+        venta = registrar_venta_lote(
+            negociacion_id=negociacion_id,
+            usuario_actual_id=productor_id,
+            usuario_actual_correo=usuario_correo,
+            cantidad_kg=cantidad_kg,
+            precio_unitario_kg=precio_unitario_kg,
+            observaciones=observaciones,
+        )
+        return Response(
+            {
+                "mensaje": f"Venta registrada exitosamente con comprobante '{venta.codigo_comprobante}'.",
+                "venta": VentaLoteSerializer(venta).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+    except ValidationError as exc:
+        detalles = exc.message_dict if hasattr(exc, "message_dict") else {"error": str(exc)}
+        # Si la negociación no existe, retornar 404
+        if "negociacion" in detalles and any("no existe" in str(msg).lower() for msg in (detalles["negociacion"] if isinstance(detalles["negociacion"], list) else [detalles["negociacion"]])):
+            return Response(
+                {"error": "Negociación no encontrada.", "detalles": detalles},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        # Si no tiene permiso de pertenencia sobre el lote
+        if "permiso" in detalles:
+            return Response(
+                {"error": "Acceso denegado.", "detalles": detalles},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return Response(
+            {"error": "No se pudo registrar la venta debido a reglas de negocio no satisfechas.", "detalles": detalles},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@api_view(["GET"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_detalle_venta_view(request, codigo_comprobante):
+    """
+    Endpoint REST para consultar el detalle de una venta formal por su código de comprobante.
+    GET /api/v1/ventas/<codigo_comprobante>/ o /fincas/api/v1/ventas/<codigo_comprobante>/
+    """
+    try:
+        venta = obtener_venta_lote(codigo_comprobante=codigo_comprobante)
+        return Response(VentaLoteSerializer(venta).data, status=status.HTTP_200_OK)
+    except ValidationError:
+        return Response(
+            {"error": "Comprobante de venta no encontrado."},
+            status=status.HTTP_404_NOT_FOUND,
         )
 
 
