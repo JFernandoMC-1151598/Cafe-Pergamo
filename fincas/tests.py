@@ -91,6 +91,7 @@ from fincas.services import (
     obtener_venta_lote,
     listar_ventas_productor,
     listar_compras_comprador,
+    obtener_historial_comercial_lote,
     resumen_trazabilidad_productor,
     transicionar_estado_comercial,
     registrar_manifestacion_interes,
@@ -12397,5 +12398,123 @@ class TestScrum276EndpointApiVentas(TestCase):
         url_detalle = reverse("api_v1_venta_detalle", kwargs={"codigo_comprobante": "VTA-INEXISTENTE-999"})
         resp = self.client.get(url_detalle)
         self.assertEqual(resp.status_code, 404)
+
+
+# ==============================================================================
+# HU-25 (SCRUM-234): HISTORIAL CONSOLIDADO DE OPERACIONES COMERCIALES
+# Subtarea ST4 / SCRUM-282: consulta ORM y modelo de datos consolidado.
+# ==============================================================================
+
+
+class HU25ST4HistorialComercialConsultaTests(TestCase):
+    """Pruebas de la consulta consolidada de operaciones comerciales por lote."""
+
+    def setUp(self):
+        self.productor_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.municipio = Municipio.objects.create(
+            codigo="HU25-ST4-MUN",
+            nombre="Municipio HU25 ST4",
+            departamento="Norte de Santander",
+        )
+        self.finca = Finca.objects.create(
+            nombre="Finca Historial HU25",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha=date(2026, 11, 10),
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-HU25-ST4",
+            cosecha=self.cosecha,
+            cantidad=Decimal("50.00"),
+        )
+
+    def test_historial_sin_operaciones_devuelve_lista_vacia(self):
+        resultado = obtener_historial_comercial_lote(
+            lote_id=self.lote.pk,
+            productor_id=self.productor_id,
+        )
+
+        self.assertEqual(resultado["lote"].pk, self.lote.pk)
+        self.assertEqual(resultado["eventos"], [])
+
+    def test_historial_consolida_manifiestaciones_negociaciones_avances_y_venta(self):
+        manifestacion = ManifestacionInteres.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25@example.com",
+            cantidad_kg=Decimal("50.00"),
+            mensaje="Interés comercial HU25",
+            notificado_en=timezone.now(),
+        )
+        negociacion = NegociacionLote.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25@example.com",
+            manifestacion_interes=manifestacion,
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+            cantidad_kg=Decimal("50.00"),
+            precio_propuesto_por_kg=Decimal("18000.00"),
+            precio_acordado_por_kg=Decimal("19000.00"),
+        )
+        AvanceNegociacion.objects.create(
+            negociacion=negociacion,
+            registrado_por_id=self.productor_id,
+            estado=AvanceNegociacion.EstadoAvance.ACEPTADA,
+            cantidad_kg=Decimal("50.00"),
+            precio_por_kg=Decimal("19000.00"),
+            presupuesto=Decimal("950000.00"),
+            observaciones="Aceptación comercial",
+        )
+        VentaLote.objects.create(
+            negociacion=negociacion,
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25@example.com",
+            cantidad_kg=Decimal("50.00"),
+            precio_unitario_kg=Decimal("19000.00"),
+            precio_total=Decimal("950000.00"),
+            codigo_comprobante="VTA-HU25-ST4-0001",
+            observaciones="Venta formalizada",
+        )
+
+        resultado = obtener_historial_comercial_lote(
+            lote_id=self.lote.pk,
+            productor_id=self.productor_id,
+        )
+
+        tipos = [evento["tipo_operacion"] for evento in resultado["eventos"]]
+        self.assertIn("MANIFESTACION", tipos)
+        self.assertIn("NEGOCIACION", tipos)
+        self.assertIn("AVANCE_NEGOCIACION", tipos)
+        self.assertIn("VENTA", tipos)
+
+        fechas = [evento["fecha"] for evento in resultado["eventos"]]
+        self.assertEqual(fechas, sorted(fechas))
+
+    def test_historial_rechaza_acceso_a_lote_de_otro_productor(self):
+        with self.assertRaises(ValidationError) as contexto:
+            obtener_historial_comercial_lote(
+                lote_id=self.lote.pk,
+                productor_id=self.otro_productor_id,
+            )
+
+        self.assertIn("permiso", contexto.exception.message_dict)
+
+    def test_historial_rechaza_lote_inexistente(self):
+        with self.assertRaises(ValidationError) as contexto:
+            obtener_historial_comercial_lote(
+                lote_id=999999,
+                productor_id=self.productor_id,
+            )
+
+        self.assertIn("lote", contexto.exception.message_dict)
 
 

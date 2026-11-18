@@ -24,7 +24,7 @@ import uuid
 
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Prefetch, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 import qrcode
@@ -2858,6 +2858,163 @@ def registrar_avance_negociacion(
             "fecha_registro": avance.creado_en.isoformat(),
             "negociacion_cerrada": negociacion.estado in ESTADOS_NEGOCIACION_CERRADOS,
         }
+
+
+def obtener_historial_comercial_lote(
+    *,
+    lote_id: Optional[Union[int, str]] = None,
+    lote_codigo: Optional[str] = None,
+    lote: Optional[Lote] = None,
+    productor_id: Any = None,
+) -> Dict[str, Any]:
+    """
+    HU25-ST4 (SCRUM-282): consulta consolidada y solo lectura del historial
+    comercial asociado a un lote.
+
+    Reúne manifestaciones de interés, negociaciones formales, avances registrados
+    y ventas cerradas. Valida que el lote exista y que pertenezca al productor
+    autenticado antes de construir la línea de tiempo.
+
+    Los resultados se ordenan por fecha ascendente y no realizan escrituras ni
+    eliminaciones sobre ninguna entidad comercial.
+    """
+    if not productor_id:
+        raise ValidationError({"productor": "Se requiere la identificación del productor."})
+
+    lote_obj = lote
+    if lote_obj is None:
+        try:
+            if lote_id is not None:
+                lote_obj = Lote.objects.select_related(
+                    "cosecha__finca",
+                    "cosecha__variedad",
+                ).get(pk=lote_id)
+            elif lote_codigo:
+                lote_obj = Lote.objects.select_related(
+                    "cosecha__finca",
+                    "cosecha__variedad",
+                ).get(codigo=str(lote_codigo).strip())
+            else:
+                raise ValidationError({"lote": "Debe indicar el identificador o código del lote."})
+        except (Lote.DoesNotExist, ValueError, TypeError):
+            raise ValidationError({"lote": "El lote indicado no existe."})
+
+    if str(lote_obj.cosecha.finca.productor_id) != str(productor_id):
+        raise ValidationError({
+            "permiso": "No tiene permiso para consultar el historial comercial de este lote."
+        })
+
+    manifestaciones = ManifestacionInteres.objects.filter(lote=lote_obj).select_related(
+        "lote",
+    )
+
+    negociaciones = NegociacionLote.objects.filter(lote=lote_obj).select_related(
+        "manifestacion_interes",
+        "lote",
+    ).prefetch_related(
+        Prefetch(
+            "avances",
+            queryset=AvanceNegociacion.objects.select_related(
+                "negociacion",
+            ).order_by("creado_en", "id"),
+        )
+    )
+
+    ventas = VentaLote.objects.filter(lote=lote_obj).select_related(
+        "negociacion",
+        "lote",
+    )
+
+    eventos: List[Dict[str, Any]] = []
+
+    for manifestacion in manifestaciones:
+        eventos.append({
+            "tipo_operacion": "MANIFESTACION",
+            "tipo": "MANIFESTACION",
+            "fecha": manifestacion.creado_en,
+            "comprador_id": manifestacion.comprador_id,
+            "comprador_correo": manifestacion.comprador_correo,
+            "cantidad_kg": manifestacion.cantidad_kg,
+            "precio_por_kg": None,
+            "presupuesto": None,
+            "estado": manifestacion.estado,
+            "estado_display": manifestacion.get_estado_display(),
+            "observaciones": manifestacion.mensaje,
+            "registro": manifestacion,
+        })
+
+    for negociacion in negociaciones:
+        eventos.append({
+            "tipo_operacion": "NEGOCIACION",
+            "tipo": "NEGOCIACION",
+            "fecha": negociacion.creado_en,
+            "comprador_id": negociacion.comprador_id,
+            "comprador_correo": negociacion.comprador_correo,
+            "cantidad_kg": negociacion.cantidad_kg,
+            "precio_por_kg": negociacion.precio_acordado_por_kg or negociacion.precio_propuesto_por_kg,
+            "presupuesto": None,
+            "estado": negociacion.estado,
+            "estado_display": negociacion.get_estado_display(),
+            "observaciones": negociacion.observaciones,
+            "registro": negociacion,
+        })
+
+        for avance in negociacion.avances.all():
+            eventos.append({
+                "tipo_operacion": "AVANCE_NEGOCIACION",
+                "tipo": "AVANCE_NEGOCIACION",
+                "fecha": avance.creado_en,
+                "comprador_id": negociacion.comprador_id,
+                "comprador_correo": negociacion.comprador_correo,
+                "registrado_por_id": avance.registrado_por_id,
+                "cantidad_kg": avance.cantidad_kg,
+                "precio_por_kg": avance.precio_por_kg,
+                "presupuesto": avance.presupuesto,
+                "estado": avance.estado,
+                "estado_display": avance.get_estado_display(),
+                "observaciones": avance.observaciones,
+                "fecha_estimada_cierre": avance.fecha_estimada_cierre,
+                "registro": avance,
+            })
+
+    for venta in ventas:
+        eventos.append({
+            "tipo_operacion": "VENTA",
+            "tipo": "VENTA",
+            "fecha": venta.fecha_venta or venta.creado_en,
+            "comprador_id": venta.comprador_id,
+            "comprador_correo": venta.comprador_correo,
+            "cantidad_kg": venta.cantidad_kg,
+            "precio_por_kg": venta.precio_unitario_kg,
+            "precio_total": venta.precio_total,
+            "codigo_comprobante": venta.codigo_comprobante,
+            "estado": "VENTA",
+            "estado_display": "Venta cerrada",
+            "observaciones": venta.observaciones,
+            "registro": venta,
+        })
+
+    eventos.sort(key=lambda evento: (evento["fecha"], evento["tipo_operacion"]))
+
+    return {
+        "lote": lote_obj,
+        "lote_id": lote_obj.pk,
+        "lote_codigo": lote_obj.codigo,
+        "productor_id": str(lote_obj.cosecha.finca.productor_id),
+        "eventos": eventos,
+        "operaciones": eventos,
+        "total_eventos": len(eventos),
+    }
+
+
+def listar_historial_comercial_lote(**kwargs) -> Dict[str, Any]:
+    """Alias descriptivo para listar el historial comercial consolidado."""
+    return obtener_historial_comercial_lote(**kwargs)
+
+
+def consultar_historial_comercial_lote(**kwargs) -> Dict[str, Any]:
+    """Alias compatible con los nombres de consulta usados por vistas y API."""
+    return obtener_historial_comercial_lote(**kwargs)
 
 
 def obtener_negociacion_manifestacion(*, manifestacion_id: Any, productor_id: Any) -> Dict[str, Any]:
