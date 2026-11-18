@@ -106,4 +106,10 @@ urlpatterns = [
 
     # API REST de Manifestación de Interés en un Lote (HU-22 / SCRUM-264)
     path('api/lotes/<int:pk>/interes/', views.api_manifestar_interes_lote_view, name='api_lote_manifestar_interes'),
+
+    # API REST de Registro y Consulta de Ventas (HU-24 / SCRUM-276)
+    path('api/ventas/', views.api_registrar_venta_view, name='api_venta_crear'),
+    path('api/v1/ventas/', views.api_registrar_venta_view, name='api_v1_venta_crear'),
+    path('api/ventas/<str:codigo_comprobante>/', views.api_detalle_venta_view, name='api_venta_detalle'),
+    path('api/v1/ventas/<str:codigo_comprobante>/', views.api_detalle_venta_view, name='api_v1_venta_detalle'),
 ]

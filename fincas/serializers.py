@@ -16,6 +16,7 @@ from .models import (
     Finca,
     Lote,
     Municipio,
+    VentaLote,
 )
 from .validators import validar_latitud, validar_longitud, validar_par_coordenadas
 
@@ -666,4 +667,82 @@ class ManifestacionInteresInputSerializer(serializers.Serializer):
         default="",
         help_text="Teléfono o canal de contacto directo para agilizar la negociación.",
     )
+
+
+class VentaLoteInputSerializer(serializers.Serializer):
+    """
+    Serializador de entrada para registrar la venta resultante de una negociación
+    (HU24-ST3 / SCRUM-276).
+    """
+
+    negociacion_id = serializers.IntegerField(
+        required=True,
+        help_text="ID de la negociación en estado 'Aceptada' sobre la cual se formaliza la venta.",
+    )
+    cantidad_kg = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=Decimal("0.01"),
+        help_text="Cantidad vendida en kg (opcional; si se omite, se usa la acordada en la negociación).",
+    )
+    precio_unitario_kg = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=Decimal("0.01"),
+        help_text="Precio final pactado por kg en COP (opcional; si se omite, se usa el de la negociación).",
+    )
+    observaciones = serializers.CharField(
+        max_length=1000,
+        required=False,
+        allow_blank=True,
+        default="",
+        help_text="Notas u observaciones de cierre de la transacción comercial.",
+    )
+
+
+class VentaLoteSerializer(serializers.ModelSerializer):
+    """
+    Serializador de salida y detalle formal de la venta registrada
+    (HU24-ST3 / SCRUM-276).
+    """
+
+    lote_codigo = serializers.CharField(source="lote.codigo", read_only=True)
+    lote_nombre_finca = serializers.CharField(source="lote.cosecha.finca.nombre", read_only=True)
+    estado_comercial_lote = serializers.CharField(source="lote.estado_comercial", read_only=True)
+    saldo_remanente_lote = serializers.DecimalField(
+        source="lote.cantidad", max_digits=10, decimal_places=2, read_only=True
+    )
+
+    class Meta:
+        model = VentaLote
+        fields = [
+            "id",
+            "codigo_comprobante",
+            "negociacion_id",
+            "lote_id",
+            "lote_codigo",
+            "lote_nombre_finca",
+            "comprador_id",
+            "comprador_correo",
+            "cantidad_kg",
+            "precio_unitario_kg",
+            "precio_total",
+            "observaciones",
+            "fecha_venta",
+            "creado_en",
+            "estado_comercial_lote",
+            "saldo_remanente_lote",
+        ]
+        read_only_fields = [
+            "id",
+            "codigo_comprobante",
+            "precio_total",
+            "fecha_venta",
+            "creado_en",
+        ]
+
 
