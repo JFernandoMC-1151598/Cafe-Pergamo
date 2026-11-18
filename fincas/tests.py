@@ -61,6 +61,8 @@ from fincas.models import (
     Lote,
     ManifestacionInteres,
     Municipio,
+    NegociacionLote,
+    VentaLote,
 )
 from fincas.services import (
     cambiar_estado_lote,
@@ -82,6 +84,10 @@ from fincas.services import (
     obtener_opciones_filtro_catalogo,
     publicar_lote_en_catalogo,
     registrar_etapa_beneficio,
+    registrar_venta_lote,
+    obtener_venta_lote,
+    listar_ventas_productor,
+    listar_compras_comprador,
     resumen_trazabilidad_productor,
     transicionar_estado_comercial,
     registrar_manifestacion_interes,
@@ -11339,3 +11345,271 @@ class TrazabilidadProductorTests(FixtureEstadosLoteBase):
         resp = self.client.get(reverse("mis_lotes"))
         self.assertContains(resp, "Sin etapas de beneficio registradas")
         self.assertNotContains(resp, "Despulpado · 05/10/2026")
+
+
+# ==============================================================================
+# PRUEBAS UNITARIAS Y DE INTEGRACIÓN HU-24: REGISTRO DE VENTA (SCRUM-233)
+# Subtarea: SCRUM-278 (HU24-ST5): Modelo VentaLote y servicio base de persistencia.
+# Subtarea: SCRUM-274 (HU24-ST2): Transacción atómica, actualización de saldo del
+# lote, cambio de estado a 'Vendido' y desindexación del catálogo comercial.
+# ==============================================================================
+
+class TestScrum278ModeloYPersistenciaVentaLote(TestCase):
+    """
+    Pruebas automatizadas de persistencia, integridad transaccional y reglas de
+    negocio para el modelo VentaLote y la máquina de estados de NegociacionLote
+    (HU-24 / SCRUM-278 / SCRUM-274).
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-TOLEDO-HU24",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            nombre="Finca Los Pinos HU24",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            vereda="Santa Inés",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Caturra HU24",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAVADO_HU24",
+            nombre="Lavado HU24",
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-15",
+            cantidad_total=Decimal("1500.00"),
+            cantidad_disponible=Decimal("1000.00"),
+            activo=True,
+        )
+
+        self.lote = Lote.objects.create(
+            codigo="LOTE-VTA-001",
+            cosecha=self.cosecha,
+            cantidad=Decimal("200.00"),
+            proceso_beneficio=self.proceso,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+            publicado_en_catalogo=True,
+            precio_referencial=Decimal("18000.00"),
+            activo=True,
+        )
+
+        # Negociación formal aceptada de base
+        self.negociacion_aceptada = NegociacionLote.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador.especial@cafespergamo.co",
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+            cantidad_kg=Decimal("100.00"),
+            precio_propuesto_por_kg=Decimal("17500.00"),
+            precio_acordado_por_kg=Decimal("18000.00"),
+            observaciones="Acuerdo comercial formalizado para exportación.",
+        )
+
+    def test_persistencia_exitosa_venta_lote_con_negociacion_aceptada(self):
+        """
+        SCRUM-278 (HU24-ST5): Registra una venta válida a partir de una negociación
+        aceptada, calculando el valor total y generando un comprobante formal.
+        """
+        venta = registrar_venta_lote(
+            negociacion_id=self.negociacion_aceptada.pk,
+            usuario_actual_id=self.productor_id,
+            observaciones="Pago por transferencia bancaria verificado.",
+        )
+
+        self.assertIsNotNone(venta.pk)
+        self.assertEqual(venta.negociacion, self.negociacion_aceptada)
+        self.assertEqual(venta.lote, self.lote)
+        self.assertEqual(str(venta.comprador_id), str(self.comprador_id))
+        self.assertEqual(venta.cantidad_kg, Decimal("100.00"))
+        self.assertEqual(venta.precio_unitario_kg, Decimal("18000.00"))
+        self.assertEqual(venta.precio_total, Decimal("1800000.00"))
+        self.assertTrue(venta.codigo_comprobante.startswith("VTA-"))
+        self.assertEqual(venta.observaciones, "Pago por transferencia bancaria verificado.")
+
+        # Verificar reducción parcial de inventario del lote (200 - 100 = 100 kg)
+        self.lote.refresh_from_db()
+        self.assertEqual(self.lote.cantidad, Decimal("100.00"))
+        # Sigue disponible y publicado porque aún le quedan 100 kg
+        self.assertEqual(self.lote.estado_comercial, Lote.EstadoComercial.DISPONIBLE)
+        self.assertTrue(self.lote.publicado_en_catalogo)
+
+    def test_venta_total_descuenta_stock_cambia_a_vendido_y_desindexa_catalogo(self):
+        """
+        SCRUM-274 (HU24-ST2): Si la venta consume el 100% de la cantidad del lote,
+        el saldo pasa a 0.00, el estado comercial pasa a 'VENDIDO', se desindexa
+        del catálogo público (publicado_en_catalogo=False) y genera registro en historial.
+        """
+        # Crear negociación por la totalidad del stock del lote (200 kg)
+        negociacion_total = NegociacionLote.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador.total@test.com",
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+            cantidad_kg=Decimal("200.00"),
+            precio_acordado_por_kg=Decimal("19000.00"),
+            precio_propuesto_por_kg=Decimal("19000.00"),
+        )
+
+        venta = registrar_venta_lote(
+            negociacion_id=negociacion_total.pk,
+            usuario_actual_id=self.productor_id,
+        )
+
+        self.assertEqual(venta.cantidad_kg, Decimal("200.00"))
+        self.assertEqual(venta.precio_total, Decimal("3800000.00"))
+
+        self.lote.refresh_from_db()
+        self.assertEqual(self.lote.cantidad, Decimal("0.00"))
+        self.assertEqual(self.lote.estado_comercial, Lote.EstadoComercial.VENDIDO)
+        self.assertFalse(self.lote.publicado_en_catalogo)
+
+        # Validar inserción en HistorialEstadoLote
+        historial = HistorialEstadoLote.objects.filter(lote=self.lote).order_by("-id").first()
+        self.assertIsNotNone(historial)
+        self.assertEqual(historial.estado_nuevo, Lote.EstadoComercial.VENDIDO)
+        self.assertIn(venta.codigo_comprobante, historial.motivo)
+
+    def test_bloqueo_venta_si_negociacion_no_esta_en_estado_aceptada(self):
+        """
+        SCRUM-277 / HU24-ST4 & ST5: Rechaza el registro de venta si la negociación
+        se encuentra en estados no permitidos (SOLICITADA, EN_NEGOCIACION, RECHAZADA, CANCELADA).
+        """
+        estados_invalidos = [
+            NegociacionLote.EstadoNegociacion.SOLICITADA,
+            NegociacionLote.EstadoNegociacion.EN_NEGOCIACION,
+            NegociacionLote.EstadoNegociacion.RECHAZADA,
+            NegociacionLote.EstadoNegociacion.CANCELADA,
+        ]
+
+        for estado_inv in estados_invalidos:
+            negoc = NegociacionLote.objects.create(
+                lote=self.lote,
+                comprador_id=self.comprador_id,
+                estado=estado_inv,
+                cantidad_kg=Decimal("20.00"),
+                precio_propuesto_por_kg=Decimal("15000.00"),
+            )
+            with self.assertRaises(ValidationError) as ctx:
+                registrar_venta_lote(
+                    negociacion_id=negoc.pk,
+                    usuario_actual_id=self.productor_id,
+                )
+            self.assertIn("negociacion", ctx.exception.message_dict)
+
+    def test_bloqueo_venta_si_cantidad_supera_stock_disponible(self):
+        """
+        SCRUM-274 / HU24-ST2: Impide la venta si la cantidad excede el stock disponible
+        del lote, evitando sobreventas o inventarios negativos.
+        """
+        negociacion_excedente = NegociacionLote.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+            cantidad_kg=Decimal("500.00"),  # Lote solo tiene 200.00 kg
+            precio_acordado_por_kg=Decimal("15000.00"),
+            precio_propuesto_por_kg=Decimal("15000.00"),
+        )
+
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_venta_lote(
+                negociacion_id=negociacion_excedente.pk,
+                usuario_actual_id=self.productor_id,
+            )
+        self.assertIn("cantidad_kg", ctx.exception.message_dict)
+        self.assertIn("supera el stock disponible", ctx.exception.message_dict["cantidad_kg"][0])
+
+    def test_bloqueo_venta_duplicada_sobre_misma_negociacion(self):
+        """
+        SCRUM-278: Una negociación formal solo puede tener una única venta asociada (OneToOne).
+        """
+        registrar_venta_lote(
+            negociacion_id=self.negociacion_aceptada.pk,
+            usuario_actual_id=self.productor_id,
+        )
+
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_venta_lote(
+                negociacion_id=self.negociacion_aceptada.pk,
+                usuario_actual_id=self.productor_id,
+            )
+        self.assertIn("negociacion", ctx.exception.message_dict)
+        self.assertIn("ya cuenta con una venta registrada", ctx.exception.message_dict["negociacion"][0])
+
+    def test_bloqueo_venta_por_usuario_no_propietario(self):
+        """
+        Seguridad y RBAC: Impide que un productor registre la venta de un lote
+        que pertenece a otro productor diferente.
+        """
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_venta_lote(
+                negociacion_id=self.negociacion_aceptada.pk,
+                usuario_actual_id=self.otro_productor_id,
+            )
+        self.assertIn("permiso", ctx.exception.message_dict)
+
+    def test_obtener_venta_lote_por_id_y_comprobante(self):
+        """
+        Consulta unitaria de venta por ID y por código formal de comprobante.
+        """
+        venta = registrar_venta_lote(
+            negociacion_id=self.negociacion_aceptada.pk,
+            usuario_actual_id=self.productor_id,
+        )
+
+        por_id = obtener_venta_lote(venta_id=venta.pk)
+        self.assertEqual(por_id.pk, venta.pk)
+
+        por_comprobante = obtener_venta_lote(codigo_comprobante=venta.codigo_comprobante)
+        self.assertEqual(por_comprobante.pk, venta.pk)
+
+    def test_listar_ventas_productor_y_compras_comprador(self):
+        """
+        Consultas de historial para bandejas 'Mis Ventas' y 'Mis Compras'.
+        """
+        venta = registrar_venta_lote(
+            negociacion_id=self.negociacion_aceptada.pk,
+            usuario_actual_id=self.productor_id,
+        )
+
+        ventas_prod = list(listar_ventas_productor(productor_id=self.productor_id))
+        self.assertEqual(len(ventas_prod), 1)
+        self.assertEqual(ventas_prod[0].pk, venta.pk)
+
+        ventas_otro_prod = list(listar_ventas_productor(productor_id=self.otro_productor_id))
+        self.assertEqual(len(ventas_otro_prod), 0)
+
+        compras_comp = list(listar_compras_comprador(comprador_id=self.comprador_id))
+        self.assertEqual(len(compras_comp), 1)
+        self.assertEqual(compras_comp[0].pk, venta.pk)
+
