@@ -50,6 +50,7 @@ from fincas.forms import (
     MunicipioForm,
 )
 from fincas.models import (
+    AvanceNegociacion,
     BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
@@ -63,6 +64,7 @@ from fincas.models import (
     Municipio,
 )
 from fincas.services import (
+    registrar_avance_negociacion,
     cambiar_estado_lote,
     crear_caracteristicas_calidad,
     crear_cosecha,
@@ -11339,3 +11341,288 @@ class TrazabilidadProductorTests(FixtureEstadosLoteBase):
         resp = self.client.get(reverse("mis_lotes"))
         self.assertContains(resp, "Sin etapas de beneficio registradas")
         self.assertNotContains(resp, "Despulpado · 05/10/2026")
+
+
+# =============================================================================
+# HU-23 (SCRUM-232): REGISTRAR EL AVANCE DE UNA NEGOCIACIÓN
+# ST4 (SCRUM-271) reglas de negocio y estados; ST5 (SCRUM-272) API de registro.
+# =============================================================================
+
+
+class _EntornoAvanceNegociacion:
+    """Datos base: productor dueño, comprador interesado y su manifestación sobre un lote publicado."""
+
+    def preparar_entorno(self):
+        self.client = Client()
+        for destino in (
+            "usuarios.permissions.usuario_tiene_permiso",
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso",
+        ):
+            parche = patch(destino, return_value=True)
+            parche.start()
+            self.addCleanup(parche.stop)
+
+        municipio, _ = Municipio.objects.get_or_create(
+            codigo="MUN-HU23",
+            defaults={"nombre": "Toledo HU23", "departamento": "Norte de Santander", "activo": True},
+        )
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+        finca = Finca.objects.create(
+            nombre="Finca HU23", productor_id=self.productor_id, municipio=municipio, vereda="El Diamante", activo=True
+        )
+        variedad = VariedadCafe.objects.create(nombre="Castillo HU23", especie=VariedadCafe.Especie.ARABICA, activo=True)
+        proceso = ProcesoBeneficio.objects.create(codigo="LAVADO_HU23", nombre="Lavado HU23", activo=True)
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            variedad=variedad,
+            fecha_cosecha="2026-08-10",
+            cantidad_total=Decimal("1200.00"),
+            cantidad_disponible=Decimal("600.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-HU23-001",
+            cosecha=cosecha,
+            proceso_beneficio=proceso,
+            cantidad=Decimal("350.00"),
+            precio_referencial=Decimal("18500.00"),
+            publicado_en_catalogo=True,
+            activo=True,
+        )
+        self.manifestacion = ManifestacionInteres.objects.create(
+            lote=self.lote, comprador_id=self.comprador_id, cantidad_kg=Decimal("100.00")
+        )
+
+    def registrar(self, **extra):
+        datos = {
+            "manifestacion_id": self.manifestacion.pk,
+            "productor_id": self.productor_id,
+            "cantidad_kg": "100.00",
+            "precio_por_kg": "18000.00",
+        }
+        datos.update(extra)
+        return registrar_avance_negociacion(**datos)
+
+
+class AvanceNegociacionHU23ST4Tests(_EntornoAvanceNegociacion, TestCase):
+    """HU23-ST4 (SCRUM-271): reglas de negocio y estados del avance."""
+
+    def setUp(self):
+        self.preparar_entorno()
+
+    def _assert_error(self, campo, **extra):
+        with self.assertRaises(ValidationError) as ctx:
+            self.registrar(**extra)
+        self.assertIn(campo, ctx.exception.message_dict)
+        self.assertEqual(AvanceNegociacion.objects.count(), 0)
+        return ctx.exception.message_dict[campo][0]
+
+    def test_estado_por_defecto_es_abierta_y_guarda_fecha_de_registro(self):
+        resultado = self.registrar()
+        avance = AvanceNegociacion.objects.get(pk=resultado["id"])
+        self.assertEqual(avance.estado, "ABIERTA")
+        self.assertIsNotNone(avance.creado_en)
+        self.assertFalse(resultado["negociacion_cerrada"])
+        self.assertEqual(str(avance.registrado_por_id), str(self.productor_id))
+
+    def test_acepta_los_tres_estados_sin_importar_mayusculas(self):
+        for texto, esperado in (("abierta", "ABIERTA"), (" Aceptada ", "ACEPTADA")):
+            AvanceNegociacion.objects.all().delete()
+            self.assertEqual(self.registrar(estado=texto)["estado"], esperado)
+        AvanceNegociacion.objects.all().delete()
+        self.assertEqual(self.registrar(estado="RECHAZADA")["estado"], "RECHAZADA")
+
+    def test_rechaza_estado_fuera_de_abierta_aceptada_rechazada(self):
+        for invalido in ("PENDIENTE", "REGISTRADO", "cerrada"):
+            self._assert_error("estado", estado=invalido)
+
+    def test_cantidad_es_obligatoria_positiva_y_numerica(self):
+        self._assert_error("cantidad_kg", cantidad_kg=None)
+        self._assert_error("cantidad_kg", cantidad_kg="")
+        self._assert_error("cantidad_kg", cantidad_kg="0")
+        self._assert_error("cantidad_kg", cantidad_kg="-5")
+        self._assert_error("cantidad_kg", cantidad_kg="abc")
+
+    def test_cantidad_no_puede_superar_el_stock_del_lote(self):
+        self.assertIn("stock", self._assert_error("cantidad_kg", cantidad_kg="350.01"))
+        self.assertEqual(self.registrar(cantidad_kg="350.00")["cantidad_kg"], "350.00")
+
+    def test_precio_es_obligatorio_y_positivo(self):
+        self._assert_error("precio_por_kg", precio_por_kg=None)
+        self._assert_error("precio_por_kg", precio_por_kg="0")
+        self._assert_error("precio_por_kg", precio_por_kg="-1")
+
+    def test_presupuesto_es_opcional_pero_si_se_envia_debe_ser_positivo(self):
+        self.assertIsNone(self.registrar()["presupuesto"])
+        AvanceNegociacion.objects.all().delete()
+        self._assert_error("presupuesto", presupuesto="0")
+        self._assert_error("presupuesto", presupuesto="-100")
+
+    def test_fecha_estimada_de_cierre_no_puede_ser_pasada(self):
+        ayer = (timezone.localdate() - timezone.timedelta(days=1)).isoformat()
+        self._assert_error("fecha_estimada_cierre", fecha_estimada_cierre=ayer)
+
+    def test_fecha_estimada_de_cierre_acepta_hoy_y_futuro(self):
+        hoy = timezone.localdate()
+        self.assertEqual(self.registrar(fecha_estimada_cierre=hoy)["fecha_estimada_cierre"], hoy.isoformat())
+
+    def test_fecha_con_formato_invalido_o_inexistente_se_rechaza(self):
+        self._assert_error("fecha_estimada_cierre", fecha_estimada_cierre="12/12/2026")
+        self._assert_error("fecha_estimada_cierre", fecha_estimada_cierre="2026-13-45")
+
+    def test_observaciones_maximo_1000_caracteres(self):
+        self._assert_error("observaciones", observaciones="x" * 1001)
+        self.assertEqual(len(self.registrar(observaciones="y" * 1000)["observaciones"]), 1000)
+
+    def test_solo_el_productor_dueno_del_lote_puede_registrar(self):
+        self._assert_error("permiso", productor_id=uuid.uuid4())
+        self._assert_error("permiso", productor_id=self.comprador_id)
+        self._assert_error("permiso", productor_id=None)
+
+    def test_lote_inactivo_no_admite_avances(self):
+        Lote.objects.filter(pk=self.lote.pk).update(activo=False)
+        self._assert_error("lote")
+
+    def test_manifestacion_inexistente(self):
+        self._assert_error("manifestacion", manifestacion_id=999999)
+
+    def test_informa_todos_los_campos_invalidos_a_la_vez(self):
+        with self.assertRaises(ValidationError) as ctx:
+            self.registrar(estado="X", cantidad_kg="0", precio_por_kg=None, presupuesto="-1")
+        self.assertEqual(
+            set(ctx.exception.message_dict), {"estado", "cantidad_kg", "precio_por_kg", "presupuesto"}
+        )
+
+    def test_negociacion_abierta_admite_varios_avances(self):
+        self.registrar(estado="ABIERTA")
+        self.registrar(estado="ABIERTA", cantidad_kg="120")
+        self.assertEqual(self.registrar(estado="ACEPTADA")["negociacion_cerrada"], True)
+        self.assertEqual(AvanceNegociacion.objects.count(), 3)
+
+    def test_negociacion_aceptada_queda_cerrada(self):
+        self.registrar(estado="ACEPTADA")
+        with self.assertRaises(ValidationError) as ctx:
+            self.registrar(estado="ABIERTA")
+        self.assertIn("aceptada", ctx.exception.message_dict["estado"][0])
+        self.assertEqual(AvanceNegociacion.objects.count(), 1)
+
+    def test_negociacion_rechazada_queda_cerrada(self):
+        self.registrar(estado="RECHAZADA")
+        with self.assertRaises(ValidationError) as ctx:
+            self.registrar(estado="ACEPTADA")
+        self.assertIn("rechazada", ctx.exception.message_dict["estado"][0])
+
+    def test_el_cierre_es_por_manifestacion_no_por_lote(self):
+        otra = ManifestacionInteres.objects.create(lote=self.lote, comprador_id=uuid.uuid4())
+        self.registrar(estado="RECHAZADA")
+        resultado = self.registrar(manifestacion_id=otra.pk, estado="ACEPTADA")
+        self.assertEqual(resultado["manifestacion_id"], otra.pk)
+
+    def test_un_error_no_deja_informacion_parcial(self):
+        with self.assertRaises(ValidationError):
+            self.registrar(precio_por_kg="0")
+        self.assertEqual(AvanceNegociacion.objects.count(), 0)
+
+
+class AvanceNegociacionHU23ST5ApiTests(_EntornoAvanceNegociacion, TestCase):
+    """HU23-ST5 (SCRUM-272): endpoint REST para registrar avances."""
+
+    def setUp(self):
+        self.preparar_entorno()
+        self.url = reverse("api_registrar_avance_negociacion", args=[self.manifestacion.pk])
+        self.cuerpo = {"cantidad_kg": "100.00", "precio_por_kg": "18000.00", "observaciones": "Primer acercamiento"}
+
+    def _post(self, cuerpo=None, url=None):
+        return self.client.post(url or self.url, data=json.dumps(cuerpo or self.cuerpo), content_type="application/json")
+
+    def test_la_url_tiene_la_forma_esperada(self):
+        self.assertEqual(self.url, f"/fincas/api/manifestaciones-interes/{self.manifestacion.pk}/avances/")
+
+    def test_registra_el_avance_y_responde_201(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        resp = self._post()
+        self.assertEqual(resp.status_code, 201)
+        avance = resp.json()["avance"]
+        self.assertEqual(avance["estado"], "ABIERTA")
+        self.assertEqual(avance["lote_codigo"], "LOTE-HU23-001")
+        self.assertEqual(avance["observaciones"], "Primer acercamiento")
+        self.assertTrue(avance["fecha_registro"])
+        guardado = AvanceNegociacion.objects.get(pk=avance["id"])
+        self.assertEqual(guardado.manifestacion_id, self.manifestacion.pk)
+        self.assertEqual(guardado.precio_por_kg, Decimal("18000.00"))
+
+    def test_registra_con_estado_y_todos_los_campos(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        cuerpo = dict(
+            self.cuerpo,
+            estado="ACEPTADA",
+            presupuesto="1800000.00",
+            fecha_estimada_cierre=(timezone.localdate() + timezone.timedelta(days=7)).isoformat(),
+        )
+        resp = self._post(cuerpo)
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.json()["avance"]["negociacion_cerrada"])
+        self.assertEqual(resp.json()["avance"]["presupuesto"], "1800000.00")
+
+    def test_sin_autenticar_responde_401(self):
+        resp = self._post()
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(AvanceNegociacion.objects.count(), 0)
+
+    def test_sin_permiso_rbac_responde_403(self):
+        _iniciar_sesion_comprador(self.client, usuario_id=self.comprador_id)
+        with patch("usuarios.permissions.usuario_tiene_permiso", return_value=False) as rbac:
+            resp = self._post()
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(rbac.call_args[0], ("COMPRADOR", "negociaciones.registrar_avance"))
+        self.assertEqual(AvanceNegociacion.objects.count(), 0)
+
+    def test_productor_ajeno_al_lote_responde_403(self):
+        _iniciar_sesion_productor(self.client, usuario_id=uuid.uuid4())
+        resp = self._post()
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(AvanceNegociacion.objects.count(), 0)
+
+    def test_manifestacion_inexistente_responde_404(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        resp = self._post(url=reverse("api_registrar_avance_negociacion", args=[999999]))
+        self.assertEqual(resp.status_code, 404)
+
+    def test_estado_invalido_responde_400_con_detalle(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        resp = self._post(dict(self.cuerpo, estado="PENDIENTE"))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("estado", resp.json()["detalles"])
+
+    def test_datos_faltantes_responden_400_por_campo(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        resp = self._post({"observaciones": "sin cantidad ni precio"})
+        self.assertEqual(resp.status_code, 400)
+        detalles = resp.json()["detalles"]
+        self.assertIn("cantidad_kg", detalles)
+        self.assertIn("precio_por_kg", detalles)
+
+    def test_tipos_invalidos_responden_400(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        resp = self._post(dict(self.cuerpo, cantidad_kg="mucho"))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("cantidad_kg", resp.json()["detalles"])
+
+    def test_cantidad_sobre_el_stock_responde_400(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        resp = self._post(dict(self.cuerpo, cantidad_kg="999"))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("cantidad_kg", resp.json()["detalles"])
+
+    def test_negociacion_cerrada_responde_400(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        self.assertEqual(self._post(dict(self.cuerpo, estado="RECHAZADA")).status_code, 201)
+        resp = self._post()
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("estado", resp.json()["detalles"])
+        self.assertEqual(AvanceNegociacion.objects.count(), 1)
+
+    def test_solo_acepta_post(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        self.assertEqual(self.client.get(self.url).status_code, 405)

@@ -667,3 +667,20 @@ class ManifestacionInteresInputSerializer(serializers.Serializer):
         help_text="Teléfono o canal de contacto directo para agilizar la negociación.",
     )
 
+
+class AvanceNegociacionInputSerializer(serializers.Serializer):
+    """
+    Entrada para registrar un avance de negociación (HU23-ST5 / SCRUM-272).
+
+    Solo comprueba tipos y formatos. Las reglas de negocio (obligatoriedad,
+    rangos, estados permitidos, negociación cerrada) viven en
+    `fincas.services.validar_datos_avance_negociacion` (HU23-ST4), para que
+    se apliquen igual desde cualquier punto de entrada.
+    """
+
+    estado = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=20)
+    cantidad_kg = serializers.DecimalField(max_digits=10, decimal_places=2, required=False, allow_null=True)
+    precio_por_kg = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    presupuesto = serializers.DecimalField(max_digits=14, decimal_places=2, required=False, allow_null=True)
+    fecha_estimada_cierre = serializers.DateField(required=False, allow_null=True)
+    observaciones = serializers.CharField(required=False, allow_blank=True, allow_null=True, default="")

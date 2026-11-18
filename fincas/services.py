@@ -37,6 +37,7 @@ from qrcode.constants import (
 
 
 from .models import (
+    AvanceNegociacion,
     BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
@@ -2601,3 +2602,198 @@ def marcar_manifestacion_interes_vista(*, manifestacion_id, productor_id):
 
     manifestacion.marcar_vista_por_productor()
     return manifestacion
+
+
+# ==============================================================================
+# HU-23 (SCRUM-232): REGISTRAR EL AVANCE DE UNA NEGOCIACIÓN
+# ==============================================================================
+
+ESTADOS_AVANCE_NEGOCIACION = tuple(AvanceNegociacion.EstadoAvance.values)
+
+
+def _decimal_avance(valor, etiqueta, *, requerido):
+    """
+    Convierte a Decimal un campo numérico del avance. Retorna `(numero, error)`;
+    `error` es None cuando el valor es válido (o está vacío y no es requerido).
+    """
+    if valor is None or str(valor).strip() == "":
+        return None, (f"{etiqueta} es obligatorio." if requerido else None)
+    try:
+        numero = Decimal(str(valor).strip())
+    except Exception:
+        return None, f"{etiqueta} debe ser un valor numérico válido."
+    if not numero.is_finite():
+        return None, f"{etiqueta} debe ser un valor numérico válido."
+    if numero <= Decimal("0"):
+        return None, f"{etiqueta} debe ser mayor a cero."
+    return numero, None
+
+
+def validar_datos_avance_negociacion(manifestacion, productor_id, datos) -> Dict[str, Any]:
+    """
+    HU23-ST4 (SCRUM-271): reglas de negocio del avance de una negociación.
+
+    Se aplican siempre en backend (RNF-09), sin depender de la vista que
+    llame al servicio. Devuelve los datos ya normalizados; si alguna regla
+    falla lanza `ValidationError` con el error por campo.
+
+    Condiciones previas (se informan de inmediato, una a la vez):
+      - Solo el productor dueño del lote puede registrar avances (`permiso`).
+      - El lote debe seguir activo (`lote`).
+      - Una negociación ya Aceptada o Rechazada está cerrada: no admite más
+        avances, porque el estado solo avanza (`estado`).
+
+    Reglas sobre los datos (se informan todas juntas, por campo):
+      - Estado limitado a Abierta, Aceptada o Rechazada; si no se envía queda
+        en Abierta (`estado`).
+      - Cantidad obligatoria, positiva y sin superar el stock del lote
+        (`cantidad_kg`).
+      - Precio por kg obligatorio y positivo (`precio_por_kg`).
+      - Presupuesto, si se indica, positivo (`presupuesto`).
+      - Fecha estimada de cierre, si se indica, no anterior a hoy
+        (`fecha_estimada_cierre`).
+      - Observaciones de máximo 1000 caracteres (`observaciones`).
+    """
+    lote = manifestacion.lote
+
+    if str(lote.cosecha.finca.productor_id) != str(productor_id):
+        raise ValidationError({"permiso": "Solo el productor dueño del lote puede registrar avances de su negociación."})
+
+    if not lote.activo:
+        raise ValidationError({"lote": "El lote de esta negociación no se encuentra activo."})
+
+    ultimo = manifestacion.avances_negociacion.order_by("-creado_en", "-id").first()
+    if ultimo is not None and ultimo.estado != AvanceNegociacion.EstadoAvance.ABIERTA:
+        raise ValidationError(
+            {"estado": f"La negociación ya fue {ultimo.get_estado_display().lower()}; no admite más avances."}
+        )
+
+    errores: Dict[str, str] = {}
+
+    estado_bruto = datos.get("estado")
+    estado = str(estado_bruto).strip().upper() if estado_bruto is not None else ""
+    if not estado:
+        estado = AvanceNegociacion.EstadoAvance.ABIERTA
+    if estado not in ESTADOS_AVANCE_NEGOCIACION:
+        errores["estado"] = "El estado del avance debe ser Abierta, Aceptada o Rechazada."
+
+    cantidad, error = _decimal_avance(datos.get("cantidad_kg"), "La cantidad", requerido=True)
+    if error:
+        errores["cantidad_kg"] = error
+    elif cantidad > lote.cantidad:
+        errores["cantidad_kg"] = f"La cantidad ({cantidad} kg) no puede superar el stock del lote ({lote.cantidad} kg)."
+
+    precio, error = _decimal_avance(datos.get("precio_por_kg"), "El precio por kg", requerido=True)
+    if error:
+        errores["precio_por_kg"] = error
+
+    presupuesto, error = _decimal_avance(datos.get("presupuesto"), "El presupuesto", requerido=False)
+    if error:
+        errores["presupuesto"] = error
+
+    fecha_cierre = datos.get("fecha_estimada_cierre")
+    if fecha_cierre in (None, ""):
+        fecha_cierre = None
+    else:
+        if isinstance(fecha_cierre, str):
+            texto = fecha_cierre.strip()
+            try:
+                fecha_cierre = parse_date(texto) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", texto) else None
+            except ValueError:
+                fecha_cierre = None
+            if fecha_cierre is None:
+                errores["fecha_estimada_cierre"] = "La fecha estimada de cierre debe tener formato AAAA-MM-DD."
+        if fecha_cierre is not None and fecha_cierre < timezone.localdate():
+            errores["fecha_estimada_cierre"] = "La fecha estimada de cierre no puede ser anterior a hoy."
+
+    observaciones = (datos.get("observaciones") or "").strip()
+    if len(observaciones) > 1000:
+        errores["observaciones"] = "Las observaciones no pueden superar los 1000 caracteres."
+
+    if errores:
+        raise ValidationError(errores)
+
+    return {
+        "estado": estado,
+        "cantidad_kg": cantidad,
+        "precio_por_kg": precio,
+        "presupuesto": presupuesto,
+        "fecha_estimada_cierre": fecha_cierre,
+        "observaciones": observaciones,
+    }
+
+
+def registrar_avance_negociacion(
+    *,
+    manifestacion_id: Any,
+    productor_id: Any,
+    estado: Optional[str] = None,
+    cantidad_kg: Any = None,
+    precio_por_kg: Any = None,
+    presupuesto: Any = None,
+    fecha_estimada_cierre: Any = None,
+    observaciones: str = "",
+) -> Dict[str, Any]:
+    """
+    HU23-ST5 (SCRUM-272): registra un avance en la negociación que nació de
+    una manifestación de interés, guardando la fecha de registro y el estado
+    (Abierta por defecto, o el indicado). Las reglas están en
+    `validar_datos_avance_negociacion` (HU23-ST4).
+
+    Operación atómica: bloquea la manifestación mientras valida y guarda, así
+    dos peticiones simultáneas no pueden registrar avances sobre una
+    negociación que la otra acaba de cerrar. Si algo falla no queda nada
+    guardado. Retorna un diccionario con el avance ya persistido.
+    """
+    if not productor_id:
+        raise ValidationError({"permiso": "Se requiere la identificación del productor."})
+
+    with transaction.atomic():
+        try:
+            manifestacion = (
+                ManifestacionInteres.objects.select_for_update(of=("self",))
+                .select_related("lote__cosecha__finca")
+                .get(pk=manifestacion_id)
+            )
+        except (ManifestacionInteres.DoesNotExist, ValueError, TypeError):
+            raise ValidationError({"manifestacion": "La manifestación de interés indicada no existe."})
+
+        datos = validar_datos_avance_negociacion(
+            manifestacion,
+            productor_id,
+            {
+                "estado": estado,
+                "cantidad_kg": cantidad_kg,
+                "precio_por_kg": precio_por_kg,
+                "presupuesto": presupuesto,
+                "fecha_estimada_cierre": fecha_estimada_cierre,
+                "observaciones": observaciones,
+            },
+        )
+
+        avance = AvanceNegociacion(
+            manifestacion=manifestacion,
+            registrado_por_id=productor_id,
+            **datos,
+        )
+        # Usuario es managed=False: no existe en la BD de pruebas.
+        avance.full_clean(exclude=["registrado_por"])
+        avance.save()
+
+        lote = manifestacion.lote
+        return {
+            "id": avance.pk,
+            "manifestacion_id": manifestacion.pk,
+            "lote_id": lote.id,
+            "lote_codigo": lote.codigo,
+            "comprador_id": str(manifestacion.comprador_id),
+            "estado": avance.estado,
+            "estado_display": avance.get_estado_display(),
+            "cantidad_kg": str(avance.cantidad_kg),
+            "precio_por_kg": str(avance.precio_por_kg),
+            "presupuesto": str(avance.presupuesto) if avance.presupuesto is not None else None,
+            "fecha_estimada_cierre": avance.fecha_estimada_cierre.isoformat() if avance.fecha_estimada_cierre else None,
+            "observaciones": avance.observaciones,
+            "fecha_registro": avance.creado_en.isoformat(),
+            "negociacion_cerrada": avance.estado != AvanceNegociacion.EstadoAvance.ABIERTA,
+        }

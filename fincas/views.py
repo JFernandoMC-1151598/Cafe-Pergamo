@@ -71,6 +71,7 @@ from .serializers import (
     CatalogoLoteSerializer,
     CosechaCreateSerializer,
     CosechaSerializer,
+    AvanceNegociacionInputSerializer,
     FichaDigitalSerializer,
     FincaGeorreferenciacionSerializer,
     LoteDespublicarInputSerializer,
@@ -103,6 +104,7 @@ from .services import (
     cambiar_estado_lote,
     lote_esta_en_beneficio,
     registrar_manifestacion_interes,
+    registrar_avance_negociacion,
     resolver_lote_desde_qr,
     sanitizar_ficha_por_visibilidad,
     sincronizar_o_generar_qr_lote,
@@ -2532,3 +2534,81 @@ def api_manifestar_interes_lote_view(request, pk):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+
+def _resolver_rol_codigo(request) -> str:
+    """Código del rol de quien hace la petición: claim 'role_code' del JWT o rol de la sesión web."""
+    token = getattr(request, "auth", None)
+    if token is not None:
+        try:
+            role_code = token.get("role_code", "") or ""
+            if role_code:
+                return str(role_code)
+        except AttributeError:
+            pass
+    return str(request.session.get("rol", "") or "")
+
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_registrar_avance_negociacion_view(request, pk):
+    """
+    Endpoint REST para registrar un avance en la negociación de un lote
+    (HU23-ST5 / SCRUM-272). El `pk` es el de la manifestación de interés
+    de la que nace la negociación.
+
+    POST /fincas/api/manifestaciones-interes/<pk>/avances/
+    Body JSON: {"estado": "ABIERTA|ACEPTADA|RECHAZADA" (opcional, por defecto ABIERTA),
+                "cantidad_kg": <decimal>, "precio_por_kg": <decimal>,
+                "presupuesto": <decimal opcional>, "fecha_estimada_cierre": "AAAA-MM-DD" (opcional),
+                "observaciones": <str opcional>}
+
+    Respuestas: 201 creado; 400 datos o reglas de negocio inválidos; 401 sin
+    autenticar; 403 sin permiso o ajeno al lote; 404 manifestación inexistente.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        return Response(
+            {"error": "Debe autenticarse como productor para registrar avances de negociación."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    if not usuarios_permissions.usuario_tiene_permiso(_resolver_rol_codigo(request), "negociaciones.registrar_avance"):
+        return Response(
+            {"error": "No tiene permiso para registrar avances de negociación."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    serializer = AvanceNegociacionInputSerializer(data=request.data or {})
+    if not serializer.is_valid():
+        return Response(
+            {"error": "Datos de entrada inválidos.", "detalles": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        resultado = registrar_avance_negociacion(
+            manifestacion_id=pk,
+            productor_id=productor_id,
+            **serializer.validated_data,
+        )
+    except ValidationError as exc:
+        detalles = exc.message_dict if hasattr(exc, "message_dict") else {"error": str(exc)}
+        if "permiso" in detalles:
+            codigo = status.HTTP_403_FORBIDDEN
+        elif "manifestacion" in detalles:
+            codigo = status.HTTP_404_NOT_FOUND
+        else:
+            codigo = status.HTTP_400_BAD_REQUEST
+        return Response(
+            {"error": "No fue posible registrar el avance de la negociación.", "detalles": detalles},
+            status=codigo,
+        )
+
+    return Response(
+        {
+            "mensaje": f"Avance de negociación registrado para el lote '{resultado['lote_codigo']}'.",
+            "avance": resultado,
+        },
+        status=status.HTTP_201_CREATED,
+    )
