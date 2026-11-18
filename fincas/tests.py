@@ -11613,3 +11613,247 @@ class TestScrum278ModeloYPersistenciaVentaLote(TestCase):
         self.assertEqual(len(compras_comp), 1)
         self.assertEqual(compras_comp[0].pk, venta.pk)
 
+
+# ==============================================================================
+# PRUEBAS UNITARIAS Y DE INTEGRACIÓN ENDPOINT REST HU-24 (SCRUM-276 / HU24-ST3)
+# ==============================================================================
+
+class TestScrum276EndpointApiVentas(TestCase):
+    """
+    Pruebas automatizadas de integración para el endpoint REST POST /api/v1/ventas/
+    y GET /api/v1/ventas/<codigo_comprobante>/ (HU-24 / SCRUM-276 / HU24-ST3).
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self._parche_rbac = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac.start()
+        self.addCleanup(self._parche_rbac.stop)
+
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-TOLEDO-HU24-API",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+
+        self.finca = Finca.objects.create(
+            nombre="Finca API Ventas",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            vereda="Vereda Central",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo API Venta",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAV_API_VTA",
+            nombre="Lavado API Venta",
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha="2026-09-01",
+            cantidad_total=Decimal("2000.00"),
+            cantidad_disponible=Decimal("1500.00"),
+            activo=True,
+        )
+
+        self.lote = Lote.objects.create(
+            codigo="LOTE-API-VTA-01",
+            cosecha=self.cosecha,
+            cantidad=Decimal("300.00"),
+            proceso_beneficio=self.proceso,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+            publicado_en_catalogo=True,
+            precio_referencial=Decimal("19500.00"),
+            activo=True,
+        )
+
+        self.negociacion_aceptada = NegociacionLote.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador.api@cafe.com",
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+            cantidad_kg=Decimal("150.00"),
+            precio_acordado_por_kg=Decimal("20000.00"),
+            precio_propuesto_por_kg=Decimal("20000.00"),
+            observaciones="Acuerdo por 150 kg a 20.000 COP/kg.",
+        )
+
+        self.url_crear_venta = reverse("api_v1_venta_crear")
+
+    def _autenticar_productor(self, productor_id=None):
+        session = self.client.session
+        session["usuario_id"] = str(productor_id or self.productor_id)
+        session["rol"] = "PRODUCTOR"
+        session["correo"] = "productor.api@test.com"
+        session.save()
+
+    def _autenticar_comprador(self):
+        session = self.client.session
+        session["usuario_id"] = str(self.comprador_id)
+        session["rol"] = "COMPRADOR"
+        session["correo"] = "comprador.api@cafe.com"
+        session.save()
+
+    def test_api_registrar_venta_exitoso_201_created(self):
+        """
+        SCRUM-276 / HU24-ST3: Petición válida POST /api/v1/ventas/ responde 201 Created
+        con la representación completa del comprobante y datos de venta.
+        """
+        self._autenticar_productor()
+
+        payload = {
+            "negociacion_id": self.negociacion_aceptada.pk,
+            "observaciones": "Venta formalizada vía API REST.",
+        }
+
+        resp = self.client.post(self.url_crear_venta, data=payload, content_type="application/json")
+        self.assertEqual(resp.status_code, 201)
+        self.assertIn("venta", resp.data)
+        venta_data = resp.data["venta"]
+        self.assertTrue(venta_data["codigo_comprobante"].startswith("VTA-"))
+        self.assertEqual(venta_data["cantidad_kg"], "150.00")
+        self.assertEqual(venta_data["precio_unitario_kg"], "20000.00")
+        self.assertEqual(venta_data["precio_total"], "3000000.00")
+        self.assertEqual(venta_data["lote_codigo"], "LOTE-API-VTA-01")
+
+        # Verificar actualización de inventario del lote
+        self.lote.refresh_from_db()
+        self.assertEqual(self.lote.cantidad, Decimal("150.00"))
+
+    def test_api_registrar_venta_personalizada_cantidad_y_precio(self):
+        """
+        Permite ajustar cantidad y precio final dentro de los límites válidos.
+        """
+        self._autenticar_productor()
+
+        payload = {
+            "negociacion_id": self.negociacion_aceptada.pk,
+            "cantidad_kg": "80.00",
+            "precio_unitario_kg": "21000.00",
+            "observaciones": "Cierre parcial acordado con precio especial.",
+        }
+
+        resp = self.client.post(self.url_crear_venta, data=payload, content_type="application/json")
+        self.assertEqual(resp.status_code, 201)
+        venta_data = resp.data["venta"]
+        self.assertEqual(venta_data["cantidad_kg"], "80.00")
+        self.assertEqual(venta_data["precio_unitario_kg"], "21000.00")
+        self.assertEqual(venta_data["precio_total"], "1680000.00")
+
+    def test_api_registrar_venta_sin_autenticacion_401_unauthorized(self):
+        """
+        Rechaza peticiones no autenticadas con código HTTP 401 Unauthorized.
+        """
+        payload = {"negociacion_id": self.negociacion_aceptada.pk}
+        resp = self.client.post(self.url_crear_venta, data=payload, content_type="application/json")
+        self.assertEqual(resp.status_code, 401)
+        self.assertIn("error", resp.data)
+
+    def test_api_registrar_venta_rol_sin_permiso_403_forbidden(self):
+        """
+        Rechaza con 403 Forbidden a usuarios cuyo rol (ej. COMPRADOR) no posee el permiso ventas.registrar.
+        """
+        self._autenticar_comprador()
+
+        with patch("usuarios.permissions.usuario_tiene_permiso", return_value=False):
+            payload = {"negociacion_id": self.negociacion_aceptada.pk}
+            resp = self.client.post(self.url_crear_venta, data=payload, content_type="application/json")
+            self.assertEqual(resp.status_code, 403)
+            self.assertIn("error", resp.data)
+
+    def test_api_registrar_venta_datos_invalidos_400_bad_request(self):
+        """
+        Rechaza payloads incompletos o con tipos erróneos con HTTP 400 Bad Request.
+        """
+        self._autenticar_productor()
+
+        resp = self.client.post(self.url_crear_venta, data={}, content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("negociacion_id", resp.data["detalles"])
+
+    def test_api_registrar_venta_negociacion_no_encontrada_404_not_found(self):
+        """
+        Responde 404 Not Found si el ID de la negociación no existe en la base de datos.
+        """
+        self._autenticar_productor()
+
+        payload = {"negociacion_id": 999999}
+        resp = self.client.post(self.url_crear_venta, data=payload, content_type="application/json")
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn("error", resp.data)
+
+    def test_api_registrar_venta_negociacion_no_aceptada_400_bad_request(self):
+        """
+        Responde 400 Bad Request con mensaje descriptivo si la negociación no está en estado Aceptada.
+        """
+        self._autenticar_productor()
+
+        negociacion_solicitada = NegociacionLote.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            estado=NegociacionLote.EstadoNegociacion.SOLICITADA,
+            cantidad_kg=Decimal("50.00"),
+            precio_propuesto_por_kg=Decimal("18000.00"),
+        )
+
+        payload = {"negociacion_id": negociacion_solicitada.pk}
+        resp = self.client.post(self.url_crear_venta, data=payload, content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("negociacion", resp.data["detalles"])
+
+    def test_api_registrar_venta_productor_ajeno_403_forbidden(self):
+        """
+        Responde 403 Forbidden si un productor intenta registrar la venta de un lote ajeno.
+        """
+        self._autenticar_productor(productor_id=self.otro_productor_id)
+
+        payload = {"negociacion_id": self.negociacion_aceptada.pk}
+        resp = self.client.post(self.url_crear_venta, data=payload, content_type="application/json")
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("permiso", resp.data["detalles"])
+
+    def test_api_consultar_detalle_venta_por_comprobante_200_ok(self):
+        """
+        GET /api/v1/ventas/<codigo_comprobante>/ responde 200 OK con los datos de la venta.
+        """
+        self._autenticar_productor()
+        payload = {"negociacion_id": self.negociacion_aceptada.pk}
+        post_resp = self.client.post(self.url_crear_venta, data=payload, content_type="application/json")
+        self.assertEqual(post_resp.status_code, 201)
+        comprobante = post_resp.data["venta"]["codigo_comprobante"]
+
+        url_detalle = reverse("api_v1_venta_detalle", kwargs={"codigo_comprobante": comprobante})
+        get_resp = self.client.get(url_detalle)
+        self.assertEqual(get_resp.status_code, 200)
+        self.assertEqual(get_resp.data["codigo_comprobante"], comprobante)
+        self.assertEqual(get_resp.data["lote_codigo"], "LOTE-API-VTA-01")
+
+    def test_api_consultar_detalle_venta_inexistente_404_not_found(self):
+        """
+        GET /api/v1/ventas/<comprobante>/ responde 404 si el comprobante no existe.
+        """
+        url_detalle = reverse("api_v1_venta_detalle", kwargs={"codigo_comprobante": "VTA-INEXISTENTE-999"})
+        resp = self.client.get(url_detalle)
+        self.assertEqual(resp.status_code, 404)
+
+
