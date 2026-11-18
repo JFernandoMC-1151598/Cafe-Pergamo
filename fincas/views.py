@@ -46,6 +46,7 @@ from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from .forms import (
     CaracteristicasCalidadForm,
     CosechaRegistroForm,
+    AvanceNegociacionForm,
     CambiarEstadoLoteForm,
     EtapaBeneficioForm,
     FincaRegistroForm,
@@ -108,6 +109,7 @@ from .services import (
     cambiar_estado_lote,
     lote_esta_en_beneficio,
     registrar_manifestacion_interes,
+    obtener_negociacion_manifestacion,
     registrar_avance_negociacion,
     resolver_lote_desde_qr,
     sanitizar_ficha_por_visibilidad,
@@ -2720,3 +2722,61 @@ def api_registrar_avance_negociacion_view(request, pk):
         },
         status=status.HTTP_201_CREATED,
     )
+
+
+@permiso_requerido_sesion("negociaciones.registrar_avance")
+def negociacion_manifestacion_view(request, pk):
+    """
+    Pantalla web de la negociación de una manifestación de interés
+    (HU-23 / SCRUM-232): historial de avances del productor (HU23-ST3 /
+    SCRUM-270) y formulario para registrar uno nuevo (HU23-ST2 / SCRUM-269).
+
+    Solo el productor dueño del lote puede verla; el registro lo hace
+    `services.registrar_avance_negociacion` (HU23-ST4/ST5), el mismo que
+    usa la API, así que las reglas de negocio son idénticas.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(request, "Debe iniciar sesión con su cuenta de productor para gestionar negociaciones.")
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    try:
+        contexto = obtener_negociacion_manifestacion(manifestacion_id=pk, productor_id=productor_id)
+    except ValidationError as exc:
+        errores = exc.message_dict if hasattr(exc, "message_dict") else {}
+        mensaje = next(iter(errores.values()))[0] if errores else "No se pudo cargar la negociación."
+        messages.error(request, mensaje)
+        return redirect("mis_manifestaciones_interes")
+
+    if request.method == "POST":
+        form = AvanceNegociacionForm(request.POST)
+        if form.is_valid():
+            try:
+                resultado = registrar_avance_negociacion(
+                    manifestacion_id=pk, productor_id=productor_id, **form.cleaned_data
+                )
+            except ValidationError as exc:
+                errores = exc.message_dict if hasattr(exc, "message_dict") else {"__all__": exc.messages}
+                for campo, lista_errores in errores.items():
+                    destino = campo if campo in form.fields else None
+                    for error in lista_errores:
+                        form.add_error(destino, error)
+            else:
+                messages.success(
+                    request,
+                    f"Avance registrado: la negociación del lote '{resultado['lote_codigo']}' quedó "
+                    f"{resultado['estado_display'].lower()}.",
+                )
+                return redirect("manifestacion_interes_negociacion", pk=pk)
+        contexto = obtener_negociacion_manifestacion(manifestacion_id=pk, productor_id=productor_id)
+    else:
+        ultimo = contexto["ultimo_avance"]
+        manifestacion = contexto["manifestacion"]
+        lote = contexto["lote"]
+        form = AvanceNegociacionForm(initial={
+            "cantidad_kg": (ultimo.cantidad_kg if ultimo else manifestacion.cantidad_kg),
+            "precio_por_kg": (ultimo.precio_por_kg if ultimo else lote.precio_referencial),
+            "presupuesto": ultimo.presupuesto if ultimo else None,
+        })
+
+    return render(request, "fincas/negociacion_manifestacion.html", {**contexto, "form": form})

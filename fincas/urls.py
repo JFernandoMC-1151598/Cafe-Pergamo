@@ -32,6 +32,7 @@ urlpatterns = [
     path('lotes/<int:pk>/publicar/', views.publicar_lote_web_view, name='lote_publicar'),
     path('lotes/<int:pk>/despublicar/', views.despublicar_lote_web_view, name='lote_despublicar'),
     path('mis-lotes/interes/', views.manifestaciones_interes_productor_view, name='mis_manifestaciones_interes'),
+    path('mis-lotes/interes/<int:pk>/negociacion/', views.negociacion_manifestacion_view, name='manifestacion_interes_negociacion'),
     path(
         'mis-lotes/interes/<int:pk>/marcar-vista/',
         views.marcar_manifestacion_interes_vista_web_view,

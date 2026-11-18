@@ -66,6 +66,7 @@ from fincas.models import (
     VentaLote,
 )
 from fincas.services import (
+    obtener_negociacion_manifestacion,
     registrar_avance_negociacion,
     cambiar_estado_lote,
     crear_caracteristicas_calidad,
@@ -11649,6 +11650,140 @@ class AvanceNegociacionHU23ST1PersistenciaTests(_EntornoAvanceNegociacion, TestC
         venta = VentaLote.objects.get(negociacion=negociacion)
         self.assertEqual(venta.cantidad_kg, Decimal("100.00"))
         self.assertEqual(venta.precio_unitario_kg, Decimal("18000.00"))
+
+
+class AvanceNegociacionHU23ST2ST3WebTests(_EntornoAvanceNegociacion, TestCase):
+    """HU23-ST2 (SCRUM-269) formulario y HU23-ST3 (SCRUM-270) historial del avance."""
+
+    def setUp(self):
+        self.preparar_entorno()
+        self.url = reverse("manifestacion_interes_negociacion", kwargs={"pk": self.manifestacion.pk})
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        self.datos = {"estado": "ABIERTA", "cantidad_kg": "100.00", "precio_por_kg": "18000.00"}
+
+    # ------------------------- historial (ST3) -------------------------
+    def test_sin_avances_muestra_el_formulario_y_el_aviso_de_historial_vacio(self):
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "LOTE-HU23-001")
+        self.assertContains(resp, "Aún no hay avances registrados")
+        self.assertContains(resp, "Registrar avance")
+        # El formulario arranca con la cantidad de interés y el precio referencial del lote.
+        self.assertContains(resp, 'value="100.00"')
+        self.assertContains(resp, 'value="18500.00"')
+
+    def test_el_historial_lista_los_avances_con_fecha_estado_y_campos(self):
+        self.registrar(cantidad_kg="100", precio_por_kg="18000", observaciones="Primer acercamiento")
+        self.registrar(
+            cantidad_kg="120", precio_por_kg="18300", presupuesto="2300000",
+            fecha_estimada_cierre=timezone.localdate() + timezone.timedelta(days=5),
+            observaciones="Segunda oferta",
+        )
+        resp = self.client.get(self.url)
+        self.assertContains(resp, "Primer acercamiento")
+        self.assertContains(resp, "Segunda oferta")
+        self.assertContains(resp, "$18300.00")
+        self.assertContains(resp, "$2300000.00")
+        self.assertContains(resp, timezone.localtime().strftime("%d/%m/%Y"))
+        self.assertContains(resp, "En Negociación")
+        contenido = resp.content.decode()
+        self.assertLess(contenido.index("Segunda oferta"), contenido.index("Primer acercamiento"))
+
+    def test_una_negociacion_cerrada_no_muestra_el_formulario(self):
+        self.registrar(estado="ACEPTADA")
+        resp = self.client.get(self.url)
+        self.assertContains(resp, "no admite más avances")
+        self.assertNotContains(resp, "Registrar avance</button>")
+        self.assertContains(resp, "$18000.00 / kg")
+
+    def test_servicio_de_consulta_devuelve_el_historial_mas_reciente_primero(self):
+        self.registrar(cantidad_kg="100")
+        segundo = self.registrar(cantidad_kg="130")
+        datos = obtener_negociacion_manifestacion(
+            manifestacion_id=self.manifestacion.pk, productor_id=self.productor_id
+        )
+        self.assertEqual(datos["avances"][0].pk, segundo["id"])
+        self.assertEqual(len(datos["avances"]), 2)
+        self.assertTrue(datos["puede_registrar"])
+        self.assertFalse(datos["cerrada"])
+
+    def test_servicio_de_consulta_sin_avances_y_errores(self):
+        datos = obtener_negociacion_manifestacion(
+            manifestacion_id=self.manifestacion.pk, productor_id=self.productor_id
+        )
+        self.assertIsNone(datos["negociacion"])
+        self.assertEqual(datos["avances"], [])
+        with self.assertRaises(ValidationError) as ctx:
+            obtener_negociacion_manifestacion(manifestacion_id=self.manifestacion.pk, productor_id=uuid.uuid4())
+        self.assertIn("permiso", ctx.exception.message_dict)
+        with self.assertRaises(ValidationError) as ctx:
+            obtener_negociacion_manifestacion(manifestacion_id=999999, productor_id=self.productor_id)
+        self.assertIn("manifestacion", ctx.exception.message_dict)
+
+    # ------------------------- formulario (ST2) -------------------------
+    def test_registrar_un_avance_lo_guarda_y_redirige_al_historial(self):
+        resp = self.client.post(self.url, dict(self.datos, observaciones="Acuerdo verbal"), follow=True)
+        self.assertRedirects(resp, self.url)
+        avance = AvanceNegociacion.objects.get()
+        self.assertEqual(avance.observaciones, "Acuerdo verbal")
+        self.assertEqual(avance.estado, "ABIERTA")
+        self.assertContains(resp, "Acuerdo verbal")
+        self.assertContains(resp, "Avance registrado")
+
+    def test_aceptar_desde_el_formulario_cierra_la_negociacion(self):
+        resp = self.client.post(self.url, dict(self.datos, estado="ACEPTADA"))
+        self.assertRedirects(resp, self.url)
+        self.assertEqual(NegociacionLote.objects.get().estado, NegociacionLote.EstadoNegociacion.ACEPTADA)
+        resp = self.client.post(self.url, self.datos)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(AvanceNegociacion.objects.count(), 1)
+
+    def test_un_error_de_formato_se_muestra_en_el_campo_y_no_guarda(self):
+        resp = self.client.post(self.url, dict(self.datos, cantidad_kg="abc", precio_por_kg=""))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Ingrese un valor numérico válido.")
+        self.assertContains(resp, "El precio por kg es obligatorio.")
+        self.assertFalse(AvanceNegociacion.objects.exists())
+
+    def test_un_error_de_negocio_del_servicio_se_muestra_en_el_formulario(self):
+        resp = self.client.post(self.url, dict(self.datos, cantidad_kg="999"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "no puede superar el stock del lote")
+        self.assertFalse(AvanceNegociacion.objects.exists())
+
+    def test_fecha_de_cierre_pasada_se_rechaza(self):
+        ayer = (timezone.localdate() - timezone.timedelta(days=1)).isoformat()
+        resp = self.client.post(self.url, dict(self.datos, fecha_estimada_cierre=ayer))
+        self.assertContains(resp, "no puede ser anterior a hoy")
+        self.assertFalse(AvanceNegociacion.objects.exists())
+
+    # ------------------------- acceso -------------------------
+    def test_otro_productor_no_puede_ver_ni_registrar(self):
+        _iniciar_sesion_productor(self.client, usuario_id=uuid.uuid4())
+        resp = self.client.get(self.url)
+        self.assertRedirects(resp, reverse("mis_manifestaciones_interes"), fetch_redirect_response=False)
+        resp = self.client.post(self.url, self.datos)
+        self.assertEqual(resp.status_code, 302)
+        self.assertFalse(AvanceNegociacion.objects.exists())
+
+    def test_sin_el_permiso_rbac_no_se_accede(self):
+        with patch("usuarios.permissions.usuario_tiene_permiso", return_value=False):
+            resp = self.client.get(self.url)
+        self.assertNotEqual(resp.status_code, 200)
+
+    def test_anonimo_es_enviado_a_iniciar_sesion(self):
+        resp = Client().get(self.url)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn("login", resp["Location"])
+
+    def test_manifestacion_inexistente_vuelve_a_interesados(self):
+        resp = self.client.get(reverse("manifestacion_interes_negociacion", kwargs={"pk": 999999}))
+        self.assertRedirects(resp, reverse("mis_manifestaciones_interes"), fetch_redirect_response=False)
+
+    def test_la_lista_de_interesados_enlaza_a_la_negociacion(self):
+        resp = self.client.get(reverse("mis_manifestaciones_interes"))
+        self.assertContains(resp, self.url)
+        self.assertContains(resp, "Negociación")
 
 
 class AvanceNegociacionHU23ST5ApiTests(_EntornoAvanceNegociacion, TestCase):

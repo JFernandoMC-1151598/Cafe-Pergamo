@@ -2860,6 +2860,45 @@ def registrar_avance_negociacion(
         }
 
 
+def obtener_negociacion_manifestacion(*, manifestacion_id: Any, productor_id: Any) -> Dict[str, Any]:
+    """
+    HU23-ST3 (SCRUM-270): reúne lo necesario para consultar el avance de la
+    negociación de una manifestación de interés: la manifestación, la
+    negociación (None si todavía no hay avances) y su historial de avances,
+    del más reciente al más antiguo.
+
+    Solo el productor dueño del lote puede consultarla (`permiso`); si la
+    manifestación no existe se informa en `manifestacion`.
+    """
+    try:
+        manifestacion = ManifestacionInteres.objects.select_related(
+            "lote__cosecha__finca"
+        ).get(pk=manifestacion_id)
+    except (ManifestacionInteres.DoesNotExist, ValueError, TypeError):
+        raise ValidationError({"manifestacion": "La manifestación de interés indicada no existe."})
+
+    lote = manifestacion.lote
+    if not productor_id or str(lote.cosecha.finca.productor_id) != str(productor_id):
+        raise ValidationError({"permiso": "No tiene permiso para ver la negociación de este lote."})
+
+    negociacion = (
+        NegociacionLote.objects.filter(manifestacion_interes=manifestacion)
+        .order_by("-creado_en", "-id")
+        .first()
+    )
+    avances = list(negociacion.avances.order_by("-creado_en", "-id")) if negociacion else []
+    cerrada = negociacion is not None and negociacion.estado in ESTADOS_NEGOCIACION_CERRADOS
+    return {
+        "manifestacion": manifestacion,
+        "lote": lote,
+        "negociacion": negociacion,
+        "avances": avances,
+        "ultimo_avance": avances[0] if avances else None,
+        "cerrada": cerrada,
+        "puede_registrar": (not cerrada) and lote.activo,
+    }
+
+
 # ==============================================================================
 # SERVICIOS DE COMERCIALIZACIÓN Y CIERRE DE VENTA (HU-24 / SCRUM-233)
 # Subtarea: SCRUM-278 / HU24-ST5: Modelo VentaLote y servicio base de persistencia.

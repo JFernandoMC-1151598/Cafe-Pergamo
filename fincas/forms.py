@@ -788,3 +788,79 @@ class CaracteristicasCalidadForm(forms.ModelForm):
             if cleaned_data.get(campo) is not None:
                 cleaned_data[campo] = cleaned_data[campo].strip()
         return cleaned_data
+
+
+class AvanceNegociacionForm(forms.Form):
+    """
+    Formulario para registrar un avance en la negociación de un lote
+    (HU23-ST2 / SCRUM-269).
+
+    Solo captura y valida el FORMATO de los datos. Las reglas de negocio
+    (estado permitido, negociación cerrada, cantidad contra el stock, precio,
+    fecha de cierre) las aplica `fincas.services.registrar_avance_negociacion`
+    (HU23-ST4), la misma función que usa la API.
+    """
+
+    ESTADOS = [
+        ("ABIERTA", "Abierta: la negociación sigue en curso"),
+        ("ACEPTADA", "Aceptada: se llegó a un acuerdo"),
+        ("RECHAZADA", "Rechazada: no hubo acuerdo"),
+    ]
+
+    estado = forms.ChoiceField(
+        choices=ESTADOS,
+        initial="ABIERTA",
+        label="Estado del avance",
+        widget=forms.Select(attrs={"class": "form-select", "id": "id_estado"}),
+        error_messages={
+            "required": "Seleccione el estado del avance.",
+            "invalid_choice": "El estado debe ser Abierta, Aceptada o Rechazada.",
+        },
+    )
+    cantidad_kg = forms.DecimalField(
+        max_digits=10, decimal_places=2, min_value=Decimal("0.01"),
+        label="Cantidad (kg)",
+        widget=forms.NumberInput(attrs={"class": "form-control", "id": "id_cantidad_kg", "step": "0.01", "min": "0.01"}),
+        error_messages={
+            "required": "La cantidad es obligatoria.",
+            "invalid": "Ingrese un valor numérico válido.",
+            "min_value": "La cantidad debe ser mayor a cero.",
+        },
+    )
+    precio_por_kg = forms.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal("0.01"),
+        label="Precio por kg (COP)",
+        widget=forms.NumberInput(attrs={"class": "form-control", "id": "id_precio_por_kg", "step": "0.01", "min": "0.01"}),
+        error_messages={
+            "required": "El precio por kg es obligatorio.",
+            "invalid": "Ingrese un valor numérico válido.",
+            "min_value": "El precio debe ser mayor a cero.",
+        },
+    )
+    presupuesto = forms.DecimalField(
+        required=False, max_digits=14, decimal_places=2, min_value=Decimal("0.01"),
+        label="Presupuesto del comprador (COP)",
+        widget=forms.NumberInput(attrs={"class": "form-control", "id": "id_presupuesto", "step": "0.01", "min": "0.01"}),
+        error_messages={
+            "invalid": "Ingrese un valor numérico válido.",
+            "min_value": "El presupuesto debe ser mayor a cero.",
+        },
+    )
+    fecha_estimada_cierre = forms.DateField(
+        required=False,
+        label="Fecha estimada de cierre",
+        widget=forms.DateInput(format="%Y-%m-%d", attrs={"class": "form-control", "id": "id_fecha_estimada_cierre", "type": "date"}),
+        error_messages={"invalid": "Ingrese una fecha válida."},
+    )
+    observaciones = forms.CharField(
+        required=False, max_length=1000,
+        label="Observaciones",
+        widget=forms.Textarea(attrs={
+            "class": "form-control", "id": "id_observaciones", "rows": 3, "maxlength": "1000",
+            "placeholder": "Acuerdos, condiciones de entrega, próximos pasos...",
+        }),
+        error_messages={"max_length": "Las observaciones no pueden superar los 1000 caracteres."},
+    )
+
+    def clean_observaciones(self):
+        return (self.cleaned_data.get("observaciones") or "").strip()
