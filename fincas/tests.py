@@ -12639,3 +12639,105 @@ class HU25ST2HistorialComercialApiTests(TestCase):
         self.assertEqual(payload["total_eventos"], 4)
 
 
+class HU25ST1HistorialSoloLecturaTests(TestCase):
+    """HU25-ST1 / SCRUM-279: protección destructiva del historial comercial."""
+
+    def setUp(self):
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+        self.municipio = Municipio.objects.create(
+            codigo="HU25-ST1-MUN",
+            nombre="Municipio HU25 ST1",
+            departamento="Norte de Santander",
+        )
+        self.finca = Finca.objects.create(
+            nombre="Finca Historial Inmutable",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha=date(2026, 11, 10),
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-HU25-ST1",
+            cosecha=self.cosecha,
+            cantidad=Decimal("50.00"),
+        )
+        self.manifestacion = ManifestacionInteres.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25-st1@example.com",
+            cantidad_kg=Decimal("50.00"),
+        )
+        self.negociacion = NegociacionLote.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25-st1@example.com",
+            manifestacion_interes=self.manifestacion,
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+            cantidad_kg=Decimal("50.00"),
+            precio_propuesto_por_kg=Decimal("18000.00"),
+            precio_acordado_por_kg=Decimal("19000.00"),
+        )
+        self.avance = AvanceNegociacion.objects.create(
+            negociacion=self.negociacion,
+            registrado_por_id=self.productor_id,
+            estado=AvanceNegociacion.EstadoAvance.ACEPTADA,
+            cantidad_kg=Decimal("50.00"),
+            precio_por_kg=Decimal("19000.00"),
+        )
+        self.venta = VentaLote.objects.create(
+            negociacion=self.negociacion,
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25-st1@example.com",
+            cantidad_kg=Decimal("50.00"),
+            precio_unitario_kg=Decimal("19000.00"),
+            precio_total=Decimal("950000.00"),
+            codigo_comprobante="VTA-HU25-ST1-0001",
+        )
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        self.url = reverse(
+            "api_lote_historial_comercial",
+            kwargs={"pk": self.lote.pk},
+        )
+
+    def test_endpoint_rechaza_delete_put_y_patch(self):
+        respuesta_delete = self.client.delete(self.url)
+        respuesta_put = self.client.put(self.url, data={}, content_type="application/json")
+        respuesta_patch = self.client.patch(self.url, data={}, content_type="application/json")
+
+        self.assertEqual(respuesta_delete.status_code, 405)
+        self.assertEqual(respuesta_put.status_code, 405)
+        self.assertEqual(respuesta_patch.status_code, 405)
+
+    def test_modelos_comerciales_bloquean_borrado_fisico(self):
+        registros = (
+            self.manifestacion,
+            self.negociacion,
+            self.avance,
+            self.venta,
+        )
+
+        for registro in registros:
+            with self.subTest(modelo=registro.__class__.__name__):
+                with self.assertRaises(ProtectedError):
+                    registro.delete()
+
+    def test_querysets_comerciales_bloquean_borrado_en_lote(self):
+        querysets = (
+            ManifestacionInteres.objects.filter(pk=self.manifestacion.pk),
+            NegociacionLote.objects.filter(pk=self.negociacion.pk),
+            AvanceNegociacion.objects.filter(pk=self.avance.pk),
+            VentaLote.objects.filter(pk=self.venta.pk),
+        )
+
+        for queryset in querysets:
+            with self.subTest(modelo=queryset.model.__name__):
+                with self.assertRaises(ProtectedError):
+                    queryset.delete()
+
+
