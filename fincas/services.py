@@ -2879,6 +2879,8 @@ def obtener_metricas_dashboard(
 
     filtros = filtros or {}
     municipio_id = filtros.get("municipio_id")
+    variedad_id = filtros.get("variedad_id")
+    productor_filtro_id = filtros.get("productor_id")
     fecha_inicio = filtros.get("fecha_inicio")
     fecha_fin = filtros.get("fecha_fin")
     estado_comercial = filtros.get("estado_comercial")
@@ -2908,6 +2910,12 @@ def obtener_metricas_dashboard(
             qs_lotes = qs_lotes.filter(cosecha__finca__productor_id=productor_id)
             qs_ventas = qs_ventas.filter(lote__cosecha__finca__productor_id=productor_id)
             qs_negociaciones = qs_negociaciones.filter(lote__cosecha__finca__productor_id=productor_id)
+    elif es_asociacion_o_admin and productor_filtro_id:
+        # Filtro opcional de productor específico para roles Asociación/Admin
+        qs_fincas = qs_fincas.filter(productor_id=productor_filtro_id)
+        qs_lotes = qs_lotes.filter(cosecha__finca__productor_id=productor_filtro_id)
+        qs_ventas = qs_ventas.filter(lote__cosecha__finca__productor_id=productor_filtro_id)
+        qs_negociaciones = qs_negociaciones.filter(lote__cosecha__finca__productor_id=productor_filtro_id)
 
     # Filtros condicionales
     if finca_id:
@@ -2921,6 +2929,11 @@ def obtener_metricas_dashboard(
         qs_lotes = qs_lotes.filter(cosecha__finca__municipio_id=municipio_id)
         qs_ventas = qs_ventas.filter(lote__cosecha__finca__municipio_id=municipio_id)
         qs_negociaciones = qs_negociaciones.filter(lote__cosecha__finca__municipio_id=municipio_id)
+
+    if variedad_id:
+        qs_lotes = qs_lotes.filter(cosecha__variedad_id=variedad_id)
+        qs_ventas = qs_ventas.filter(lote__cosecha__variedad_id=variedad_id)
+        qs_negociaciones = qs_negociaciones.filter(lote__cosecha__variedad_id=variedad_id)
 
     if estado_comercial:
         qs_lotes = qs_lotes.filter(estado_comercial=str(estado_comercial).upper())
@@ -3055,6 +3068,45 @@ def obtener_metricas_dashboard(
             "ingresos_totales_cop": round(ingr_cop, 2),
         })
 
+    # 5. Desglose de Producción y Comercialización por Variedad de Café (HU26-ST3)
+    volumen_por_variedad = []
+    variedades_ids = list(qs_lotes.values_list("cosecha__variedad_id", flat=True).distinct())
+    for var in VariedadCafe.objects.filter(id__in=variedades_ids).order_by("nombre"):
+        lotes_var = qs_lotes.filter(cosecha__variedad=var)
+        ventas_var = qs_ventas.filter(lote__cosecha__variedad=var)
+        kg_prod_var = float(lotes_var.aggregate(s=Sum("cantidad"))["s"] or Decimal("0.00"))
+        v_agg_var = ventas_var.aggregate(s_kg=Sum("cantidad_kg"), s_cop=Sum("precio_total"))
+        kg_vend_var = float(v_agg_var["s_kg"] or Decimal("0.00"))
+        volumen_por_variedad.append({
+            "variedad_id": var.id,
+            "variedad": var.nombre,
+            "total_lotes": lotes_var.count(),
+            "volumen_producido_kg": round(kg_prod_var + kg_vend_var, 2),
+            "volumen_vendido_kg": round(kg_vend_var, 2),
+            "ingresos_totales_cop": round(float(v_agg_var["s_cop"] or Decimal("0.00")), 2),
+        })
+
+    # 6. Ranking Top Fincas Productivas (HU26-ST3)
+    top_fincas = []
+    for f in qs_fincas.select_related("municipio")[:15]:
+        lotes_f = qs_lotes.filter(cosecha__finca=f)
+        ventas_f = qs_ventas.filter(lote__cosecha__finca=f)
+        kg_prod_f = float(lotes_f.aggregate(s=Sum("cantidad"))["s"] or Decimal("0.00"))
+        v_agg_f = ventas_f.aggregate(s_kg=Sum("cantidad_kg"), s_cop=Sum("precio_total"))
+        kg_vend_f = float(v_agg_f["s_kg"] or Decimal("0.00"))
+        if lotes_f.exists() or ventas_f.exists():
+            top_fincas.append({
+                "finca_id": f.id,
+                "nombre": f.nombre,
+                "municipio": f.municipio.nombre if f.municipio else "N/A",
+                "total_lotes": lotes_f.count(),
+                "volumen_producido_kg": round(kg_prod_f + kg_vend_f, 2),
+                "volumen_vendido_kg": round(kg_vend_f, 2),
+                "ingresos_totales_cop": round(float(v_agg_f["s_cop"] or Decimal("0.00")), 2),
+            })
+    top_fincas.sort(key=lambda x: x["volumen_producido_kg"], reverse=True)
+    top_fincas = top_fincas[:5]
+
     return {
         "rol_usuario": rol,
         "es_asociacion_o_admin": es_asociacion_o_admin,
@@ -3082,11 +3134,16 @@ def obtener_metricas_dashboard(
             "total_ventas_concretadas": total_ventas_concretadas,
             "resumen_negociaciones": neg_estados,
             "tasa_conversion_ventas_pct": tasa_conversion_ventas_pct,
+            "volumen_por_variedad": volumen_por_variedad,
         },
+        "volumen_por_variedad": volumen_por_variedad,
+        "top_fincas": top_fincas,
         "distribucion_regional": distribucion_regional,
         "filtros_aplicados": {
             "municipio_id": municipio_id,
             "finca_id": finca_id,
+            "variedad_id": variedad_id,
+            "productor_id": productor_filtro_id,
             "estado_comercial": estado_comercial,
             "fecha_inicio": str(fecha_inicio) if fecha_inicio else None,
             "fecha_fin": str(fecha_fin) if fecha_fin else None,
@@ -3099,4 +3156,62 @@ def obtener_indicadores_dashboard(usuario=None, **kwargs) -> Dict[str, Any]:
     Alias canónico de conveniencia para `obtener_metricas_dashboard`.
     """
     return obtener_metricas_dashboard(usuario, **kwargs)
+
+
+def obtener_opciones_filtro_dashboard(usuario=None, *, rol_override: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Retorna los catálogos y conjuntos de opciones válidos para poblar los filtros
+    interactivos del Dashboard analítico (HU26-ST3 / SCRUM-288).
+    Aplica aislamiento RBAC para que cada rol solo visualice opciones pertenecientes
+    a su ámbito de visibilidad.
+    """
+    rol = (rol_override or resolver_rol_usuario(usuario)).upper()
+    es_asociacion_o_admin = rol in ("ADMINISTRADOR", "ASOCIACION")
+
+    qs_fincas = Finca.objects.filter(activo=True)
+    qs_lotes = Lote.objects.filter(cosecha__finca__activo=True)
+
+    if not es_asociacion_o_admin and usuario is not None:
+        if isinstance(usuario, (uuid.UUID, int, str)):
+            productor_id = usuario
+        elif getattr(usuario, "is_authenticated", True):
+            productor_id = getattr(usuario, "id", None) or getattr(usuario, "pk", None)
+        else:
+            productor_id = None
+        if productor_id:
+            qs_fincas = qs_fincas.filter(productor_id=productor_id)
+            qs_lotes = qs_lotes.filter(cosecha__finca__productor_id=productor_id)
+
+    # Municipios presentes en las fincas filtradas
+    mun_ids = list(qs_fincas.values_list("municipio_id", flat=True).distinct())
+    municipios = [
+        {"id": m.id, "nombre": m.nombre, "departamento": m.departamento}
+        for m in Municipio.objects.filter(id__in=mun_ids).order_by("nombre")
+    ]
+
+    # Fincas
+    fincas = [
+        {"id": f.id, "nombre": f.nombre, "municipio": f.municipio.nombre if f.municipio else ""}
+        for f in qs_fincas.order_by("nombre")
+    ]
+
+    # Variedades de café presentes en los lotes
+    var_ids = list(qs_lotes.values_list("cosecha__variedad_id", flat=True).distinct())
+    variedades = [
+        {"id": v.id, "nombre": v.nombre}
+        for v in VariedadCafe.objects.filter(id__in=var_ids).order_by("nombre")
+    ]
+
+    # Estados comerciales
+    estados = [
+        {"codigo": c[0], "nombre": c[1]}
+        for c in Lote.EstadoComercial.choices
+    ]
+
+    return {
+        "municipios": municipios,
+        "fincas": fincas,
+        "variedades": variedades,
+        "estados_comerciales": estados,
+    }
 

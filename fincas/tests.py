@@ -12209,4 +12209,318 @@ class TestScrum286DefinicionIndicadoresTrazabilidadComercializacion(TestCase):
         self.assertEqual(res1, res2)
 
 
+class TestScrum288ConsultasAgregacionYFiltrosAnaliticos(TestCase):
+    """
+    Suite de Pruebas Automatizadas para HU-26 / SCRUM-288 / HU26-ST3.
+    Certifica las consultas de agregación ORM optimizadas (desglose por variedad,
+    ranking de fincas, filtros multicriterio por asociación/productor/municipio/fechas)
+    y el servicio de opciones de filtro.
+    """
+
+    def setUp(self):
+        from fincas.services import (
+            obtener_metricas_dashboard,
+            obtener_opciones_filtro_dashboard,
+            registrar_venta_lote,
+        )
+        self.obtener_metricas_dashboard = staticmethod(obtener_metricas_dashboard)
+        self.obtener_opciones_filtro_dashboard = staticmethod(obtener_opciones_filtro_dashboard)
+        self.registrar_venta_lote = staticmethod(registrar_venta_lote)
+
+        self.productor_1_id = uuid.uuid4()
+        self.productor_2_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.muni_toledo = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-TOL-ST3",
+            nombre="Toledo",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        self.muni_arboledas = Municipio.objects.filter(
+            nombre="Arboledas", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-ARB-ST3",
+            nombre="Arboledas",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.var_castillo = VariedadCafe.objects.create(
+            nombre="Castillo ST3",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+        self.var_caturra = VariedadCafe.objects.create(
+            nombre="Caturra ST3",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+    def test_agregacion_volumen_por_variedad_cafe(self):
+        """
+        Valida que el servicio calcule con precisión el volumen producido y vendido
+        desglosado por cada variedad botánica de café.
+        """
+        finca = Finca.objects.create(
+            nombre="Finca Variedades",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        # Cosecha Castillo: 500 kg
+        c_castillo = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 5),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        lote_castillo = Lote.objects.create(
+            cosecha=c_castillo,
+            codigo="LOTE-VAR-CASTILLO",
+            cantidad=Decimal("500.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # Cosecha Caturra: 300 kg
+        c_caturra = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.var_caturra,
+            fecha_cosecha=date(2026, 11, 6),
+            cantidad_total=Decimal("300.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=c_caturra,
+            codigo="LOTE-VAR-CATURRA",
+            cantidad=Decimal("300.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # Venta sobre Castillo: 200 kg a $22,000 COP/kg
+        neg = NegociacionLote.objects.create(
+            lote=lote_castillo,
+            comprador_id=self.comprador_id,
+            cantidad_kg=Decimal("200.00"),
+            precio_propuesto_por_kg=Decimal("22000.00"),
+            precio_acordado_por_kg=Decimal("22000.00"),
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+        )
+        self.registrar_venta_lote(
+            negociacion_id=neg.pk,
+            usuario_actual_id=self.productor_1_id,
+        )
+
+        data = self.obtener_metricas_dashboard(usuario=self.productor_1_id)
+        desglose = data["volumen_por_variedad"]
+
+        self.assertEqual(len(desglose), 2)
+        nombres = {item["variedad"]: item for item in desglose}
+        self.assertIn("Castillo ST3", nombres)
+        self.assertIn("Caturra ST3", nombres)
+
+        castillo_data = nombres["Castillo ST3"]
+        self.assertEqual(castillo_data["total_lotes"], 1)
+        self.assertEqual(castillo_data["volumen_vendido_kg"], 200.0)
+        self.assertEqual(castillo_data["volumen_producido_kg"], 500.0)
+        self.assertEqual(castillo_data["ingresos_totales_cop"], 4400000.0)
+
+        caturra_data = nombres["Caturra ST3"]
+        self.assertEqual(caturra_data["total_lotes"], 1)
+        self.assertEqual(caturra_data["volumen_vendido_kg"], 0.0)
+        self.assertEqual(caturra_data["volumen_producido_kg"], 300.0)
+
+    def test_filtro_por_variedad_en_dashboard(self):
+        """
+        Valida que el filtro `variedad_id` aplique exclusión precisa sobre todas
+        las métricas y agrupaciones del dashboard.
+        """
+        finca = Finca.objects.create(
+            nombre="Finca Filtro Variedad",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        c1 = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 7),
+            cantidad_total=Decimal("400.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=c1,
+            codigo="LOTE-FVAR-1",
+            cantidad=Decimal("400.00"),
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        c2 = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.var_caturra,
+            fecha_cosecha=date(2026, 11, 8),
+            cantidad_total=Decimal("600.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=c2,
+            codigo="LOTE-FVAR-2",
+            cantidad=Decimal("600.00"),
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # Consulta con filtro de variedad Castillo
+        filtros = {"variedad_id": self.var_castillo.pk}
+        data = self.obtener_metricas_dashboard(usuario=self.productor_1_id, filtros=filtros)
+        self.assertEqual(data["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(data["indicadores_comercializacion"]["volumen_total_producido_kg"], 400.0)
+
+    def test_filtro_asociacion_por_productor_especifico(self):
+        """
+        Valida que un rol Asociación/Admin pueda filtrar métricas acotadas
+        a un caficultor específico mediante `productor_id`.
+        """
+        f1 = Finca.objects.create(
+            nombre="Finca Productor 1",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        c1 = Cosecha.objects.create(
+            finca=f1,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 9),
+            cantidad_total=Decimal("350.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=c1,
+            codigo="LOTE-P1",
+            cantidad=Decimal("350.00"),
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        f2 = Finca.objects.create(
+            nombre="Finca Productor 2",
+            productor_id=self.productor_2_id,
+            municipio=self.muni_arboledas,
+            activo=True,
+        )
+        c2 = Cosecha.objects.create(
+            finca=f2,
+            variedad=self.var_caturra,
+            fecha_cosecha=date(2026, 11, 10),
+            cantidad_total=Decimal("700.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=c2,
+            codigo="LOTE-P2",
+            cantidad=Decimal("700.00"),
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # Consulta como Asociación filtrando solo productor 1
+        filtros_p1 = {"productor_id": self.productor_1_id}
+        data_p1 = self.obtener_metricas_dashboard(rol_override="ASOCIACION", filtros=filtros_p1)
+        self.assertEqual(data_p1["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(data_p1["indicadores_comercializacion"]["volumen_total_producido_kg"], 350.0)
+
+    def test_ranking_top_fincas(self):
+        """
+        Valida que el ranking de fincas retorne las fincas más productivas ordenadas por volumen.
+        """
+        finca_pequena = Finca.objects.create(
+            nombre="Finca Pequeña",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        c_peq = Cosecha.objects.create(
+            finca=finca_pequena,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 11),
+            cantidad_total=Decimal("150.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(cosecha=c_peq, codigo="LOTE-PEQ", cantidad=Decimal("150.00"))
+
+        finca_grande = Finca.objects.create(
+            nombre="Finca Grande",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        c_grd = Cosecha.objects.create(
+            finca=finca_grande,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 12),
+            cantidad_total=Decimal("950.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(cosecha=c_grd, codigo="LOTE-GRD", cantidad=Decimal("950.00"))
+
+        data = self.obtener_metricas_dashboard(usuario=self.productor_1_id)
+        ranking = data["top_fincas"]
+
+        self.assertGreaterEqual(len(ranking), 2)
+        self.assertEqual(ranking[0]["nombre"], "Finca Grande")
+        self.assertEqual(ranking[0]["volumen_producido_kg"], 950.0)
+        self.assertEqual(ranking[1]["nombre"], "Finca Pequeña")
+        self.assertEqual(ranking[1]["volumen_producido_kg"], 150.0)
+
+    def test_obtener_opciones_filtro_dashboard(self):
+        """
+        Valida que el servicio de opciones de filtro provea los catálogos válidos
+        respetando el aislamiento RBAC del usuario.
+        """
+        finca = Finca.objects.create(
+            nombre="Finca Opciones",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        c = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 13),
+            cantidad_total=Decimal("300.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(cosecha=c, codigo="LOTE-OPC", cantidad=Decimal("300.00"))
+
+        opciones = self.obtener_opciones_filtro_dashboard(usuario=self.productor_1_id)
+
+        self.assertIn("municipios", opciones)
+        self.assertIn("fincas", opciones)
+        self.assertIn("variedades", opciones)
+        self.assertIn("estados_comerciales", opciones)
+
+        nombres_mun = [m["nombre"] for m in opciones["municipios"]]
+        self.assertIn("Toledo", nombres_mun)
+
+        nombres_fincas = [f["nombre"] for f in opciones["fincas"]]
+        self.assertIn("Finca Opciones", nombres_fincas)
+
+        nombres_var = [v["nombre"] for v in opciones["variedades"]]
+        self.assertIn("Castillo ST3", nombres_var)
+
+        self.assertTrue(len(opciones["estados_comerciales"]) > 0)
+
+
+
 
