@@ -2142,11 +2142,20 @@ def detalle_lote_view(request, pk):
     # El orden cronológico lo define EtapaBeneficio.Meta.ordering; se
     # repite aquí para que el historial no dependa de un cambio en Meta.
     etapas = lote.etapas_beneficio.filter(activo=True).order_by("fecha", "creado_en", "id")
+    historial_comercial = obtener_historial_comercial_lote(
+        lote=lote,
+        productor_id=productor_id,
+    )
 
     return render(
         request,
         "fincas/detalle_lote.html",
-        {"lote": lote, "codigo_qr": qr_obj, "etapas": etapas},
+        {
+            "lote": lote,
+            "codigo_qr": qr_obj,
+            "etapas": etapas,
+            "historial_comercial": historial_comercial["eventos"],
+        },
     )
 
 

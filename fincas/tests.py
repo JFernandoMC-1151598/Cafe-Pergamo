@@ -12639,6 +12639,115 @@ class HU25ST2HistorialComercialApiTests(TestCase):
         self.assertEqual(payload["total_eventos"], 4)
 
 
+class HU25ST3HistorialComercialWebTests(TestCase):
+    """HU25-ST3 / SCRUM-281: vista web del historial comercial por lote."""
+
+    def setUp(self):
+        self._parche_rbac_productor = patch(
+            "usuarios.permissions.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_productor.start()
+        self.addCleanup(self._parche_rbac_productor.stop)
+        self._parche_rbac_nav = patch(
+            "usuarios.templatetags.rbac_tags.usuario_tiene_permiso", return_value=True
+        )
+        self._parche_rbac_nav.start()
+        self.addCleanup(self._parche_rbac_nav.stop)
+        self.productor_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+        self.municipio = Municipio.objects.create(
+            codigo="HU25-ST3-MUN",
+            nombre="Municipio HU25 ST3",
+            departamento="Norte de Santander",
+        )
+        self.finca = Finca.objects.create(
+            nombre="Finca Web HU25",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            fecha_cosecha=date(2026, 11, 10),
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-HU25-ST3",
+            cosecha=self.cosecha,
+            cantidad=Decimal("50.00"),
+        )
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+
+    def test_mis_lotes_incluye_acceso_al_historial_comercial(self):
+        respuesta = self.client.get(reverse("mis_lotes"))
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(
+            respuesta,
+            f"{reverse('lote_detalle', kwargs={'pk': self.lote.pk})}#historial-comercial",
+        )
+        self.assertContains(respuesta, "Comercial")
+
+    def test_detalle_muestra_estado_vacio_informativo(self):
+        respuesta = self.client.get(
+            reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(respuesta, "Historial comercial")
+        self.assertContains(respuesta, "historial-comercial-vacio")
+        self.assertContains(
+            respuesta,
+            "Este lote todavía no tiene operaciones comerciales registradas",
+        )
+
+    def test_detalle_muestra_operaciones_registradas(self):
+        manifestacion = ManifestacionInteres.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25-web@example.com",
+            cantidad_kg=Decimal("50.00"),
+        )
+        negociacion = NegociacionLote.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25-web@example.com",
+            manifestacion_interes=manifestacion,
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+            cantidad_kg=Decimal("50.00"),
+            precio_propuesto_por_kg=Decimal("18000.00"),
+            precio_acordado_por_kg=Decimal("19000.00"),
+        )
+        AvanceNegociacion.objects.create(
+            negociacion=negociacion,
+            registrado_por_id=self.productor_id,
+            estado=AvanceNegociacion.EstadoAvance.ACEPTADA,
+            cantidad_kg=Decimal("50.00"),
+            precio_por_kg=Decimal("19000.00"),
+        )
+
+        respuesta = self.client.get(
+            reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(respuesta, "Manifestación")
+        self.assertContains(respuesta, "Negociación")
+        self.assertContains(respuesta, "Avance")
+        self.assertContains(respuesta, "comprador-hu25-web@example.com")
+
+    def test_detalle_rechaza_lote_de_otro_productor(self):
+        self.client.logout()
+        _iniciar_sesion_productor(self.client, usuario_id=self.otro_productor_id)
+
+        respuesta = self.client.get(
+            reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        )
+
+        self.assertEqual(respuesta.status_code, 404)
+
+
 class HU25ST1HistorialSoloLecturaTests(TestCase):
     """HU25-ST1 / SCRUM-279: protección destructiva del historial comercial."""
 
