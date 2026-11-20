@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import uuid
 
 from django.test import TestCase
+from django.urls import reverse
 from django.utils import timezone
 
 from actores.models import ActorCadena
@@ -337,3 +338,165 @@ class TestBusquedaGlobalMultiEntidadYRBAC(TestCase):
         self.assertIn("relevancia", primer_item)
         self.assertTrue(len(primer_item["acciones"]) >= 1)
         self.assertTrue(primer_item["acciones"][0]["url"].startswith("/"))
+
+
+class TestBusquedaGlobalVistasYAPI(TestCase):
+    """
+    Pruebas para las vistas web y endpoints API de Búsqueda Global (HU-29 / SCRUM-291, SCRUM-293).
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.filter(nombre="Cúcuta", departamento="Norte de Santander").first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-CUC-TEST-01",
+                nombre="Cúcuta",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Geisha Especial",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAV_BUSQUEDA_VIEW",
+            nombre="Lavado Tradicional",
+            activo=True,
+        )
+        self.productor_id = uuid.uuid4()
+        self.finca = Finca.objects.create(
+            productor_id=self.productor_id,
+            nombre="Hacienda La Samaria",
+            municipio=self.municipio,
+            vereda="El Carmen",
+            activo=True,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=timezone.now().date(),
+            cantidad_total=Decimal("5000.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOT-BUSQ-VIEW-01",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("500.00"),
+            publicado_en_catalogo=True,
+            fecha_publicacion=timezone.now(),
+            precio_referencial=Decimal("38000.00"),
+            activo=True,
+        )
+
+    def test_vista_web_busqueda_global_responde_200(self):
+        """La vista web /buscar/ responde HTTP 200 con contexto esperado y barra en navbar."""
+        url = reverse('busqueda_global')
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'busqueda/resultados.html')
+        for clave in (
+            'q',
+            'tipo_activo',
+            'resultados',
+            'conteo_por_entidad',
+            'entidades_permitidas',
+            'tiempo_ms',
+        ):
+            self.assertIn(clave, response.context)
+        self.assertContains(response, 'id="navbarSearchInput"')
+        self.assertContains(
+            response,
+            'Buscar lotes, productores, compradores o transacciones... (Presiona / para buscar)',
+        )
+
+    def test_vista_web_busqueda_global_con_query(self):
+        """La vista web /buscar/?q=Samaria responde HTTP 200, retorna coincidencias y conserva q."""
+        url = reverse('busqueda_global')
+        response = self.client.get(url, {'q': 'Samaria'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'busqueda/resultados.html')
+        self.assertEqual(response.context['q'], 'Samaria')
+        self.assertGreaterEqual(len(response.context['resultados']), 1)
+        self.assertContains(response, 'Hacienda La Samaria')
+        self.assertContains(response, 'value="Samaria"')
+
+    def test_api_busqueda_global_retorna_json_con_conteos(self):
+        """El endpoint API de búsqueda global retorna JSON con conteos por entidad y resultados."""
+        for url in (reverse('api_busqueda_global'), reverse('api_busqueda_global_root')):
+            response = self.client.get(url, {'q': 'Samaria', 'tipo': 'todas'})
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('application/json', response['Content-Type'])
+            data = response.json()
+            self.assertIn('conteo_por_entidad', data)
+            conteos = data['conteo_por_entidad']
+            for entidad in ('todas', 'lotes', 'productores', 'compradores', 'operaciones'):
+                self.assertIn(entidad, conteos)
+            self.assertGreaterEqual(conteos['lotes'], 1)
+            self.assertGreaterEqual(conteos['todas'], 1)
+            self.assertIn('resultados', data)
+            self.assertIn('entidades_permitidas', data)
+            self.assertIn('tiempo_ms', data)
+
+    def test_vista_web_busqueda_renderiza_resultados_y_plantilla(self):
+        """La vista /buscar/ responde HTTP 200 y renderiza templates/busqueda/resultados.html."""
+        url = reverse('busqueda_global')
+        response = self.client.get(url, {'q': 'Samaria'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'busqueda/resultados.html')
+        self.assertIn('resultados', response.context)
+        self.assertIn('conteo_por_entidad', response.context)
+        self.assertEqual(response.context['q'], 'Samaria')
+        self.assertContains(response, 'Hacienda La Samaria')
+
+    def test_vista_web_busqueda_sin_termino_muestra_hero_y_formulario(self):
+        """Al ingresar a /buscar/ sin parámetros, responde HTTP 200 con total_resultados=0."""
+        url = reverse('busqueda_global')
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'busqueda/resultados.html')
+        self.assertEqual(response.context['total_resultados'], 0)
+
+    def test_vista_web_filtro_por_tipo_de_entidad(self):
+        """La vista web respeta el parámetro ?tipo=lotes."""
+        url = reverse('busqueda_global')
+        response = self.client.get(url, {'q': 'LOT-BUSQ-VIEW', 'tipo': 'lotes'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['tipo_activo'], 'lotes')
+        self.assertGreaterEqual(response.context['total_resultados'], 1)
+
+    def test_api_busqueda_global_retorna_esquema_json_esperado(self):
+        """El endpoint REST /api/buscar/ responde HTTP 200 con estructura de datos canónica."""
+        url = reverse('api_busqueda_global')
+        response = self.client.get(url, {'q': 'Samaria', 'tipo': 'todas'})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn('termino', data)
+        self.assertIn('tipo_filtro', data)
+        self.assertIn('total_resultados', data)
+        self.assertIn('conteo_por_entidad', data)
+        self.assertIn('entidades_permitidas', data)
+        self.assertIn('resultados', data)
+        self.assertIn('tiempo_ms', data)
+        self.assertEqual(data['termino'], 'Samaria')
+        self.assertGreaterEqual(data['total_resultados'], 1)
+
+    def test_api_busqueda_global_root_url_resolves(self):
+        """Verifica que /api/v1/buscar/ resuelve y responde correctamente."""
+        url = reverse('api_v1_busqueda_global_root')
+        response = self.client.get(url, {'q': 'LOT-BUSQ-VIEW-01'})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['total_resultados'], 1)
+        self.assertIn('LOT-BUSQ-VIEW-01', data['resultados'][0]['titulo'])
+
+    def test_api_busqueda_global_termino_corto(self):
+        """Un término de 1 caracter devuelve total_resultados=0 y mensaje de aviso."""
+        url = reverse('api_busqueda_global')
+        response = self.client.get(url, {'q': 'x'})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['total_resultados'], 0)
+        self.assertIn('al menos 2 caracteres', data.get('aviso', ''))
+

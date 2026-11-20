@@ -80,6 +80,31 @@
                     {% endwith %}
                 </ul>
 
+                <!-- Barra de Búsqueda Global Integrada (HU-29 / SCRUM-291) -->
+                <form class="d-flex mx-lg-3 my-2 my-lg-0 flex-grow-1" role="search" method="GET" action="{% url 'busqueda_global' %}" style="max-width: 400px;">
+                    <div class="input-group input-group-sm w-100 shadow-sm rounded-pill overflow-hidden" style="border: 1.5px solid #4A2C2A;">
+                        <span class="input-group-text bg-white border-0 ps-3 pe-1" id="navbarSearchIcon" style="color: #4A2C2A;">
+                            <i class="bi bi-search" aria-hidden="true"></i>
+                        </span>
+                        <input class="form-control bg-white border-0 ps-1 pe-2"
+                               style="color: #2B2B2B;"
+                               type="search"
+                               name="q"
+                               id="navbarSearchInput"
+                               value="{{ q|default:'' }}"
+                               placeholder="Buscar lotes, productores, compradores o transacciones... (Presiona / para buscar)"
+                               aria-label="Buscar lotes, productores, compradores o transacciones"
+                               autocomplete="off">
+                        <button type="submit"
+                                class="btn btn-sm px-3 border-0 fw-semibold"
+                                style="background-color: #4A2C2A; color: #FFFFFF;"
+                                aria-label="Buscar en Café Pérgamo"
+                                title="Buscar">
+                            Buscar
+                        </button>
+                    </div>
+                </form>
+
                 <!-- Acciones de Usuario (Lógica Condicional Django) -->
                 <div class="d-flex align-items-center">
                     {% if user.is_authenticated %}
@@ -234,6 +259,25 @@
 
     <!-- Script Global de la Plataforma (Separación de Responsabilidades) -->
     <script src="{% static 'js/main.js' %}"></script>
+
+    <!-- Atajo de Teclado Global: '/' para enfocar la Búsqueda Global (HU-29 / SCRUM-291) -->
+    <script>
+        document.addEventListener('keydown', function(e) {
+            const activeEl = document.activeElement;
+            const activeTag = activeEl ? activeEl.tagName : '';
+            const isEditable = activeEl ? activeEl.isContentEditable : false;
+            if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !['INPUT', 'TEXTAREA', 'SELECT'].includes(activeTag) && !isEditable) {
+                const searchInput = document.getElementById('navbarSearchInput') || document.getElementById('mainSearchInput');
+                if (searchInput) {
+                    e.preventDefault();
+                    searchInput.focus();
+                    if (typeof searchInput.select === 'function') {
+                        searchInput.select();
+                    }
+                }
+            }
+        });
+    </script>
 
     {% block extra_js %}{% endblock %}
 </body>

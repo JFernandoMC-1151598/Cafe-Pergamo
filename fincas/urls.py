@@ -105,4 +105,9 @@ urlpatterns = [
 
     # API REST de Manifestación de Interés en un Lote (HU-22 / SCRUM-264)
     path('api/lotes/<int:pk>/interes/', views.api_manifestar_interes_lote_view, name='api_lote_manifestar_interes'),
+
+    # Búsqueda Global Unificada (HU-29 / SCRUM-291, SCRUM-293)
+    path('buscar/', views.busqueda_global_view, name='busqueda_global_fincas'),
+    path('api/buscar/', views.api_busqueda_global_view, name='api_busqueda_global'),
+    path('api/v1/buscar/', views.api_busqueda_global_view, name='api_v1_busqueda_global'),
 ]
