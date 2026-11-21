@@ -12737,6 +12737,63 @@ class HU25ST3HistorialComercialWebTests(TestCase):
         self.assertContains(respuesta, "Avance")
         self.assertContains(respuesta, "comprador-hu25-web@example.com")
 
+    def test_detalle_muestra_informacion_visual_completa_de_cada_evento(self):
+        manifestacion = ManifestacionInteres.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25-st5@example.com",
+            cantidad_kg=Decimal("50.00"),
+            mensaje="Manifestación con observación ST5",
+        )
+        negociacion = NegociacionLote.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25-st5@example.com",
+            manifestacion_interes=manifestacion,
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+            cantidad_kg=Decimal("50.00"),
+            precio_propuesto_por_kg=Decimal("18000.00"),
+            precio_acordado_por_kg=Decimal("19000.00"),
+            observaciones="Negociación con observación ST5",
+        )
+        AvanceNegociacion.objects.create(
+            negociacion=negociacion,
+            registrado_por_id=self.productor_id,
+            estado=AvanceNegociacion.EstadoAvance.ACEPTADA,
+            cantidad_kg=Decimal("50.00"),
+            precio_por_kg=Decimal("19000.00"),
+            presupuesto=Decimal("950000.00"),
+            fecha_estimada_cierre=date(2026, 12, 1),
+            observaciones="Avance con observación ST5",
+        )
+        VentaLote.objects.create(
+            negociacion=negociacion,
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador-hu25-st5@example.com",
+            cantidad_kg=Decimal("50.00"),
+            precio_unitario_kg=Decimal("19000.00"),
+            precio_total=Decimal("950000.00"),
+            codigo_comprobante="VTA-HU25-ST5-0001",
+            observaciones="Venta con observación ST5",
+        )
+
+        respuesta = self.client.get(
+            reverse("lote_detalle", kwargs={"pk": self.lote.pk})
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertContains(respuesta, "Manifestación")
+        self.assertContains(respuesta, "Negociación")
+        self.assertContains(respuesta, "Avance")
+        self.assertContains(respuesta, "Venta")
+        self.assertContains(respuesta, "Manifestación con observación ST5")
+        self.assertContains(respuesta, "Negociación con observación ST5")
+        self.assertContains(respuesta, "Avance con observación ST5")
+        self.assertContains(respuesta, "Venta con observación ST5")
+        self.assertContains(respuesta, "01/12/2026")
+        self.assertContains(respuesta, "VTA-HU25-ST5-0001")
+
     def test_detalle_rechaza_lote_de_otro_productor(self):
         self.client.logout()
         _iniciar_sesion_productor(self.client, usuario_id=self.otro_productor_id)

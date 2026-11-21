@@ -179,6 +179,8 @@
                                     <th>Cantidad</th>
                                     <th>Precio / presupuesto</th>
                                     <th>Estado</th>
+                                    <th>Observaciones</th>
+                                    <th>Detalle adicional</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -201,12 +203,24 @@
                                     </td>
                                     <td class="small">{% if evento.cantidad_kg %}{{ evento.cantidad_kg }} kg{% else %}-{% endif %}</td>
                                     <td class="small">
-                                        {% if evento.precio_por_kg %}${{ evento.precio_por_kg }} / kg
-                                        {% elif evento.presupuesto %}${{ evento.presupuesto }}
-                                        {% elif evento.precio_total %}${{ evento.precio_total }} total
-                                        {% else %}-{% endif %}
+                                        {% if evento.precio_por_kg %}${{ evento.precio_por_kg }} / kg{% endif %}
+                                        {% if evento.presupuesto %}<span class="d-block">Presupuesto: ${{ evento.presupuesto }}</span>{% endif %}
+                                        {% if evento.precio_total %}<span class="d-block">${{ evento.precio_total }} total</span>{% endif %}
+                                        {% if not evento.precio_por_kg and not evento.presupuesto and not evento.precio_total %}-{% endif %}
                                     </td>
                                     <td class="small">{{ evento.estado_display }}</td>
+                                    <td class="small text-secondary">
+                                        {% if evento.observaciones %}{{ evento.observaciones|linebreaksbr }}{% else %}<span class="fst-italic text-muted">Sin observaciones</span>{% endif %}
+                                    </td>
+                                    <td class="small">
+                                        {% if evento.fecha_estimada_cierre %}
+                                            <span class="d-block">Cierre estimado: {{ evento.fecha_estimada_cierre|date:"d/m/Y" }}</span>
+                                        {% endif %}
+                                        {% if evento.codigo_comprobante %}
+                                            <span class="d-block font-monospace">Comprobante: {{ evento.codigo_comprobante }}</span>
+                                        {% endif %}
+                                        {% if not evento.fecha_estimada_cierre and not evento.codigo_comprobante %}-{% endif %}
+                                    </td>
                                 </tr>
                                 {% endfor %}
                             </tbody>
