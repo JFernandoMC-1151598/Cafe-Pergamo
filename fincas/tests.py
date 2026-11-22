@@ -12399,3 +12399,281 @@ class TestScrum276EndpointApiVentas(TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
+
+
+# ==============================================================================
+# HU-24 / SCRUM-275 (HU24-ST1): pruebas del flujo de registro de venta y
+# actualización del lote. Incluye las reglas de HU24-ST4 (SCRUM-277): la venta
+# solo procede sobre negociaciones aceptadas que cumplan las condiciones.
+# ==============================================================================
+
+class VentaNegociacionHU24ST1Tests(_EntornoAvanceNegociacion, TestCase):
+    """Asociación venta-negociación, actualización del lote y validaciones del flujo."""
+
+    def setUp(self):
+        self.preparar_entorno()
+        # Negociación aceptada de 100 kg a 18.000 COP/kg, tal como la deja HU-23.
+        self.registrar(estado="ACEPTADA")
+        self.negociacion = NegociacionLote.objects.get(manifestacion_interes=self.manifestacion)
+        self.url_venta = reverse("api_v1_venta_crear")
+
+    # ---------- utilidades ----------
+    def vender(self, negociacion=None, **extra):
+        datos = {
+            "negociacion_id": (negociacion or self.negociacion).pk,
+            "usuario_actual_id": self.productor_id,
+        }
+        datos.update(extra)
+        return registrar_venta_lote(**datos)
+
+    def negociacion_en(self, estado, cantidad="100.00"):
+        return NegociacionLote.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            estado=estado,
+            cantidad_kg=Decimal(cantidad),
+            precio_propuesto_por_kg=Decimal("17000.00"),
+        )
+
+    def assertSinEfectos(self, saldo="350.00"):
+        """Un intento rechazado no deja venta, ni descuento de stock, ni cambio de estado."""
+        self.lote.refresh_from_db()
+        self.assertEqual(VentaLote.objects.count(), 0)
+        self.assertEqual(self.lote.cantidad, Decimal(saldo))
+        self.assertNotEqual(self.lote.estado_comercial, Lote.EstadoComercial.VENDIDO)
+        self.assertTrue(self.lote.publicado_en_catalogo)
+
+    # ---------- asociación venta-negociación ----------
+    def test_la_venta_queda_asociada_a_la_negociacion_y_al_lote(self):
+        venta = self.vender()
+        self.negociacion.refresh_from_db()
+        self.assertEqual(venta.negociacion_id, self.negociacion.pk)
+        self.assertEqual(self.negociacion.venta, venta)
+        self.assertEqual(venta.lote_id, self.lote.pk)
+        self.assertIn(venta, self.lote.ventas.all())
+        self.assertEqual(str(venta.comprador_id), str(self.comprador_id))
+
+    def test_la_venta_toma_cantidad_y_precio_acordados_en_la_negociacion(self):
+        venta = self.vender()
+        self.assertEqual(venta.cantidad_kg, Decimal("100.00"))
+        self.assertEqual(venta.precio_unitario_kg, Decimal("18000.00"))
+        self.assertEqual(venta.precio_total, Decimal("1800000.00"))
+        self.assertTrue(venta.codigo_comprobante.startswith("VTA-"))
+
+    def test_sin_precio_acordado_se_usa_el_precio_propuesto(self):
+        nueva = self.negociacion_en(NegociacionLote.EstadoNegociacion.ACEPTADA, cantidad="40.00")
+        venta = self.vender(nueva)
+        self.assertEqual(venta.precio_unitario_kg, Decimal("17000.00"))
+        self.assertEqual(venta.precio_total, Decimal("680000.00"))
+
+    def test_se_puede_vender_una_cantidad_menor_a_la_acordada(self):
+        venta = self.vender(cantidad_kg="60.00")
+        self.assertEqual(venta.cantidad_kg, Decimal("60.00"))
+        self.assertEqual(venta.precio_total, Decimal("1080000.00"))
+
+    def test_cada_venta_recibe_un_comprobante_distinto(self):
+        otra = self.negociacion_en(NegociacionLote.EstadoNegociacion.ACEPTADA, cantidad="50.00")
+        primera = self.vender()
+        segunda = self.vender(otra)
+        self.assertNotEqual(primera.codigo_comprobante, segunda.codigo_comprobante)
+
+    # ---------- actualización del lote ----------
+    def test_venta_parcial_descuenta_el_stock_y_mantiene_el_lote_publicado(self):
+        self.vender()
+        self.lote.refresh_from_db()
+        self.assertEqual(self.lote.cantidad, Decimal("250.00"))
+        self.assertNotEqual(self.lote.estado_comercial, Lote.EstadoComercial.VENDIDO)
+        self.assertTrue(self.lote.publicado_en_catalogo)
+        self.assertFalse(HistorialEstadoLote.objects.filter(lote=self.lote, estado_nuevo=Lote.EstadoComercial.VENDIDO).exists())
+
+    def test_venta_total_marca_el_lote_como_vendido_y_lo_saca_del_catalogo(self):
+        total = self.negociacion_en(NegociacionLote.EstadoNegociacion.ACEPTADA, cantidad="350.00")
+        venta = self.vender(total)
+        self.lote.refresh_from_db()
+        self.assertEqual(self.lote.cantidad, Decimal("0.00"))
+        self.assertEqual(self.lote.estado_comercial, Lote.EstadoComercial.VENDIDO)
+        self.assertFalse(self.lote.publicado_en_catalogo)
+        historial = HistorialEstadoLote.objects.get(lote=self.lote, estado_nuevo=Lote.EstadoComercial.VENDIDO)
+        self.assertIn(venta.codigo_comprobante, historial.motivo)
+        self.assertEqual(historial.usuario_responsable_id, str(self.productor_id))
+
+    def test_ventas_parciales_sucesivas_agotan_el_lote(self):
+        segunda = self.negociacion_en(NegociacionLote.EstadoNegociacion.ACEPTADA, cantidad="250.00")
+        self.vender()
+        self.lote.refresh_from_db()
+        self.assertEqual(self.lote.cantidad, Decimal("250.00"))
+        self.vender(segunda)
+        self.lote.refresh_from_db()
+        self.assertEqual(self.lote.cantidad, Decimal("0.00"))
+        self.assertEqual(self.lote.estado_comercial, Lote.EstadoComercial.VENDIDO)
+        self.assertEqual(VentaLote.objects.filter(lote=self.lote).count(), 2)
+
+    def test_un_lote_vendido_no_admite_nuevas_ventas(self):
+        total = self.negociacion_en(NegociacionLote.EstadoNegociacion.ACEPTADA, cantidad="350.00")
+        self.vender(total)
+        with self.assertRaises(ValidationError) as ctx:
+            self.vender()
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertEqual(VentaLote.objects.count(), 1)
+
+    # ---------- HU24-ST4: solo negociaciones aceptadas ----------
+    def test_rechaza_la_venta_en_cualquier_estado_distinto_de_aceptada(self):
+        Estado = NegociacionLote.EstadoNegociacion
+        for estado in (Estado.SOLICITADA, Estado.EN_NEGOCIACION, Estado.RECHAZADA, Estado.CANCELADA):
+            with self.subTest(estado=estado):
+                negociacion = self.negociacion_en(estado)
+                with self.assertRaises(ValidationError) as ctx:
+                    self.vender(negociacion)
+                self.assertIn("negociacion", ctx.exception.message_dict)
+        # La aceptada de base sigue sin venta y el lote intacto
+        self.assertSinEfectos()
+
+    def test_una_negociacion_inexistente_se_rechaza(self):
+        with self.assertRaises(ValidationError) as ctx:
+            registrar_venta_lote(negociacion_id=999999, usuario_actual_id=self.productor_id)
+        self.assertIn("no existe", ctx.exception.message_dict["negociacion"][0])
+
+    def test_no_se_puede_vender_dos_veces_la_misma_negociacion(self):
+        self.vender()
+        with self.assertRaises(ValidationError) as ctx:
+            self.vender()
+        self.assertIn("ya cuenta con una venta", ctx.exception.message_dict["negociacion"][0])
+        self.lote.refresh_from_db()
+        self.assertEqual(self.lote.cantidad, Decimal("250.00"))  # solo se descontó una vez
+        self.assertEqual(VentaLote.objects.count(), 1)
+
+    def test_otro_productor_recibe_permiso_denegado_sin_ver_el_estado(self):
+        en_curso = self.negociacion_en(NegociacionLote.EstadoNegociacion.EN_NEGOCIACION)
+        with self.assertRaises(ValidationError) as ctx:
+            self.vender(en_curso, usuario_actual_id=uuid.uuid4())
+        self.assertIn("permiso", ctx.exception.message_dict)
+        self.assertNotIn("negociacion", ctx.exception.message_dict)
+        self.assertSinEfectos()
+
+    def test_la_cantidad_no_puede_superar_la_acordada(self):
+        with self.assertRaises(ValidationError) as ctx:
+            self.vender(cantidad_kg="100.01")
+        self.assertIn("acordada", ctx.exception.message_dict["cantidad_kg"][0])
+        self.assertSinEfectos()
+
+    def test_la_cantidad_no_puede_superar_el_stock_actual_del_lote(self):
+        Lote.objects.filter(pk=self.lote.pk).update(cantidad=Decimal("50.00"))
+        with self.assertRaises(ValidationError) as ctx:
+            self.vender()
+        self.assertIn("stock disponible", ctx.exception.message_dict["cantidad_kg"][0])
+        self.assertEqual(VentaLote.objects.count(), 0)
+
+    def test_cantidades_y_precios_invalidos_se_rechazan(self):
+        casos = [
+            ("cantidad_kg", {"cantidad_kg": "0"}),
+            ("cantidad_kg", {"cantidad_kg": "-5"}),
+            ("cantidad_kg", {"cantidad_kg": "abc"}),
+            ("cantidad_kg", {"cantidad_kg": "NaN"}),
+            ("precio_unitario_kg", {"precio_unitario_kg": "0"}),
+            ("precio_unitario_kg", {"precio_unitario_kg": "xyz"}),
+            ("precio_unitario_kg", {"precio_unitario_kg": "Infinity"}),
+        ]
+        for campo, extra in casos:
+            with self.subTest(extra=extra):
+                with self.assertRaises(ValidationError) as ctx:
+                    self.vender(**extra)
+                self.assertIn(campo, ctx.exception.message_dict)
+        self.assertSinEfectos()
+
+    def test_las_observaciones_no_pueden_superar_1000_caracteres(self):
+        with self.assertRaises(ValidationError) as ctx:
+            self.vender(observaciones="x" * 1001)
+        self.assertIn("observaciones", ctx.exception.message_dict)
+        self.assertSinEfectos()
+        self.assertEqual(self.vender(observaciones="x" * 1000).observaciones, "x" * 1000)
+
+    def test_un_lote_inactivo_no_admite_ventas(self):
+        Lote.objects.filter(pk=self.lote.pk).update(activo=False)
+        with self.assertRaises(ValidationError) as ctx:
+            self.vender()
+        self.assertIn("lote", ctx.exception.message_dict)
+        self.assertEqual(VentaLote.objects.count(), 0)
+
+    def test_un_intento_rechazado_no_deja_efectos_parciales(self):
+        historial_antes = HistorialEstadoLote.objects.count()
+        with self.assertRaises(ValidationError):
+            self.vender(cantidad_kg="500.00")
+        self.assertSinEfectos()
+        self.assertEqual(HistorialEstadoLote.objects.count(), historial_antes)
+
+    # ---------- integración HU-23 -> HU-24 ----------
+    def test_un_avance_abierto_no_habilita_la_venta_pero_aceptarlo_si(self):
+        otra_manifestacion = ManifestacionInteres.objects.create(
+            lote=self.lote, comprador_id=uuid.uuid4(), cantidad_kg=Decimal("80.00")
+        )
+        registrar_avance_negociacion(
+            manifestacion_id=otra_manifestacion.pk,
+            productor_id=self.productor_id,
+            cantidad_kg="80.00",
+            precio_por_kg="19000.00",
+        )
+        negociacion = NegociacionLote.objects.get(manifestacion_interes=otra_manifestacion)
+        with self.assertRaises(ValidationError):
+            self.vender(negociacion)
+
+        registrar_avance_negociacion(
+            manifestacion_id=otra_manifestacion.pk,
+            productor_id=self.productor_id,
+            estado="ACEPTADA",
+            cantidad_kg="80.00",
+            precio_por_kg="19500.00",
+        )
+        venta = self.vender(negociacion)
+        self.assertEqual(venta.precio_unitario_kg, Decimal("19500.00"))
+        self.assertEqual(venta.precio_total, Decimal("1560000.00"))
+
+    # ---------- API ----------
+    def _post_venta(self, cuerpo):
+        return self.client.post(self.url_venta, data=json.dumps(cuerpo), content_type="application/json")
+
+    def test_api_flujo_completo_avance_aceptado_y_venta_registrada(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        otra = ManifestacionInteres.objects.create(lote=self.lote, comprador_id=uuid.uuid4(), cantidad_kg=Decimal("90.00"))
+        resp_avance = self.client.post(
+            reverse("api_registrar_avance_negociacion", args=[otra.pk]),
+            data=json.dumps({"estado": "ACEPTADA", "cantidad_kg": "90.00", "precio_por_kg": "18500.00"}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp_avance.status_code, 201)
+        negociacion_id = resp_avance.json()["avance"]["negociacion_id"]
+
+        resp = self._post_venta({"negociacion_id": negociacion_id})
+        self.assertEqual(resp.status_code, 201)
+        venta = resp.json()["venta"]
+        self.assertEqual(venta["precio_total"], "1665000.00")
+        self.lote.refresh_from_db()
+        self.assertEqual(self.lote.cantidad, Decimal("260.00"))
+
+    def test_api_negociacion_no_aceptada_responde_400(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        en_curso = self.negociacion_en(NegociacionLote.EstadoNegociacion.EN_NEGOCIACION)
+        resp = self._post_venta({"negociacion_id": en_curso.pk})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("negociacion", resp.json()["detalles"])
+        self.assertEqual(VentaLote.objects.count(), 0)
+
+    def test_api_cantidad_mayor_a_la_acordada_responde_400(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        resp = self._post_venta({"negociacion_id": self.negociacion.pk, "cantidad_kg": "120.00"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("cantidad_kg", resp.json()["detalles"])
+        self.assertSinEfectos()
+
+    def test_api_productor_ajeno_recibe_403_sin_detalle_del_estado(self):
+        _iniciar_sesion_productor(self.client, usuario_id=uuid.uuid4())
+        en_curso = self.negociacion_en(NegociacionLote.EstadoNegociacion.EN_NEGOCIACION)
+        resp = self._post_venta({"negociacion_id": en_curso.pk})
+        self.assertEqual(resp.status_code, 403)
+        self.assertNotIn("negociacion", resp.json()["detalles"])
+
+    def test_api_segunda_venta_de_la_misma_negociacion_responde_400(self):
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        self.assertEqual(self._post_venta({"negociacion_id": self.negociacion.pk}).status_code, 201)
+        resp = self._post_venta({"negociacion_id": self.negociacion.pk})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(VentaLote.objects.count(), 1)

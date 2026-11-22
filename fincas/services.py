@@ -2953,14 +2953,26 @@ def registrar_venta_lote(
     5. Persistencia Inmutable: Se genera y persiste el registro de `VentaLote` con
        código de comprobante único, valores unitarios y totales liquidados (SCRUM-278).
     """
+    # Se bloquea la fila de la negociación para que dos solicitudes simultáneas
+    # no puedan formalizar la misma venta (la segunda espera y ve la venta ya creada).
     try:
-        negociacion = NegociacionLote.objects.select_related(
-            "lote", "lote__cosecha__finca"
-        ).get(pk=negociacion_id)
+        negociacion = (
+            NegociacionLote.objects.select_for_update(of=("self",))
+            .select_related("lote", "lote__cosecha__finca")
+            .get(pk=negociacion_id)
+        )
     except NegociacionLote.DoesNotExist:
         raise ValidationError({"negociacion": "La negociación indicada no existe."})
 
-    # 1. Validar que la negociación esté formalmente aceptada
+    # 1. Validar permisos / pertenencia del productor (antes de revelar cualquier
+    #    detalle del estado de la negociación a quien no es dueño del lote)
+    lote = negociacion.lote
+    productor_id = lote.cosecha.finca.productor_id
+    if usuario_actual_id is not None:
+        if str(usuario_actual_id) != str(productor_id):
+            raise ValidationError({"permiso": "No tiene autorización para registrar ventas de lotes pertenecientes a otro productor."})
+
+    # 2. Validar que la negociación esté formalmente aceptada
     if negociacion.estado != NegociacionLote.EstadoNegociacion.ACEPTADA:
         raise ValidationError({
             "negociacion": (
@@ -2969,23 +2981,19 @@ def registrar_venta_lote(
             )
         })
 
-    # 2. Validar que la negociación no tenga ya una venta previa asociada (OneToOne)
-    if hasattr(negociacion, "venta") and negociacion.venta is not None:
+    # 3. Validar que la negociación no tenga ya una venta previa asociada (OneToOne)
+    venta_previa = VentaLote.objects.filter(negociacion=negociacion).first()
+    if venta_previa is not None:
         raise ValidationError({
-            "negociacion": f"Esta negociación ya cuenta con una venta registrada (Comprobante {negociacion.venta.codigo_comprobante})."
+            "negociacion": f"Esta negociación ya cuenta con una venta registrada (Comprobante {venta_previa.codigo_comprobante})."
         })
-
-    # 3. Validar permisos / pertenencia del productor
-    lote = negociacion.lote
-    productor_id = lote.cosecha.finca.productor_id
-    if usuario_actual_id is not None:
-        if str(usuario_actual_id) != str(productor_id):
-            raise ValidationError({"permiso": "No tiene autorización para registrar ventas de lotes pertenecientes a otro productor."})
 
     # 4. Bloqueo transaccional de concurrencia sobre el lote
     lote_bloqueado = Lote.objects.select_for_update().get(pk=lote.pk)
     if not lote_bloqueado.activo:
         raise ValidationError({"lote": "El lote de café no se encuentra activo."})
+    if lote_bloqueado.estado_comercial == Lote.EstadoComercial.VENDIDO:
+        raise ValidationError({"lote": "El lote ya fue vendido en su totalidad y no admite nuevas ventas."})
 
     # 5. Resolver y validar cantidades y precios
     if cantidad_kg is not None:
@@ -2993,11 +3001,21 @@ def registrar_venta_lote(
             cant_dec = Decimal(str(cantidad_kg))
         except Exception:
             raise ValidationError({"cantidad_kg": "La cantidad ingresada no es un número válido."})
+        if not cant_dec.is_finite():
+            raise ValidationError({"cantidad_kg": "La cantidad ingresada no es un número válido."})
     else:
         cant_dec = negociacion.cantidad_kg
 
     if cant_dec <= Decimal("0.00"):
         raise ValidationError({"cantidad_kg": "La cantidad vendida debe ser estrictamente mayor a 0 kg."})
+
+    if cant_dec > negociacion.cantidad_kg:
+        raise ValidationError({
+            "cantidad_kg": (
+                f"La cantidad a vender ({cant_dec} kg) supera la cantidad acordada en la "
+                f"negociación ({negociacion.cantidad_kg} kg)."
+            )
+        })
 
     if cant_dec > lote_bloqueado.cantidad:
         raise ValidationError({
@@ -3012,11 +3030,17 @@ def registrar_venta_lote(
             precio_unit_dec = Decimal(str(precio_unitario_kg))
         except Exception:
             raise ValidationError({"precio_unitario_kg": "El precio unitario no es un valor numérico válido."})
+        if not precio_unit_dec.is_finite():
+            raise ValidationError({"precio_unitario_kg": "El precio unitario no es un valor numérico válido."})
     else:
         precio_unit_dec = negociacion.precio_acordado_por_kg or negociacion.precio_propuesto_por_kg
 
     if not precio_unit_dec or precio_unit_dec <= Decimal("0.00"):
         raise ValidationError({"precio_unitario_kg": "El precio unitario por kg debe ser mayor a 0 COP."})
+
+    observaciones_limpias = str(observaciones or "").strip()
+    if len(observaciones_limpias) > 1000:
+        raise ValidationError({"observaciones": "Las observaciones no pueden superar los 1000 caracteres."})
 
     precio_total_dec = (cant_dec * precio_unit_dec).quantize(Decimal("0.01"))
     fecha_operacion = fecha_venta or timezone.now()
@@ -3032,7 +3056,7 @@ def registrar_venta_lote(
         precio_unitario_kg=precio_unit_dec,
         precio_total=precio_total_dec,
         codigo_comprobante=codigo_vta,
-        observaciones=str(observaciones or "").strip(),
+        observaciones=observaciones_limpias,
         fecha_venta=fecha_operacion,
     )
     # Usuario es managed=False en el backend/pruebas de Supabase
