@@ -70,6 +70,16 @@ urlpatterns = [
     path('api/lotes/', views.api_crear_lote_view, name='api_lote_crear'),
     path('api/lotes/<int:pk>/', views.api_consultar_lote_view, name='api_lote_detalle'),
     path(
+        'api/lotes/<int:pk>/historial-comercial/',
+        views.api_historial_comercial_lote_view,
+        name='api_lote_historial_comercial',
+    ),
+    path(
+        'api/v1/lotes/<int:pk>/historial-comercial/',
+        views.api_historial_comercial_lote_view,
+        name='api_v1_lote_historial_comercial',
+    ),
+    path(
         'api/lotes/<int:lote_id>/calidad/',
         views.api_caracteristicas_calidad_view,
         name='api_lote_calidad',

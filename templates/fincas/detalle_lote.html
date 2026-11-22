@@ -159,6 +159,83 @@
                 </div>
             </div>
 
+            <!-- Historial comercial (HU25-ST3 / SCRUM-281) -->
+            <div class="card border-0 shadow-sm rounded-4 overflow-hidden mb-4" id="historial-comercial">
+                <div class="card-header bg-white p-4 border-bottom">
+                    <h2 class="h5 mb-0 fw-bold text-dark">
+                        <i class="bi bi-clock-history me-2 text-primary"></i>Historial comercial
+                    </h2>
+                    <p class="text-muted small mb-0">Consulta cronológica de manifestaciones, negociaciones y ventas asociadas a este lote.</p>
+                </div>
+                <div class="card-body p-4">
+                    {% if historial_comercial %}
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle border rounded-3 overflow-hidden mb-0">
+                            <thead class="table-light">
+                                <tr class="small text-muted">
+                                    <th>Fecha</th>
+                                    <th>Operación</th>
+                                    <th>Comprador</th>
+                                    <th>Cantidad</th>
+                                    <th>Precio / presupuesto</th>
+                                    <th>Estado</th>
+                                    <th>Observaciones</th>
+                                    <th>Detalle adicional</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for evento in historial_comercial %}
+                                <tr>
+                                    <td class="small text-nowrap">{{ evento.fecha|date:"d/m/Y H:i" }}</td>
+                                    <td>
+                                        {% if evento.tipo_operacion == 'MANIFESTACION' %}
+                                            <span class="badge bg-secondary-subtle text-secondary border">Manifestación</span>
+                                        {% elif evento.tipo_operacion == 'NEGOCIACION' %}
+                                            <span class="badge bg-info-subtle text-info border border-info-subtle">Negociación</span>
+                                        {% elif evento.tipo_operacion == 'AVANCE_NEGOCIACION' %}
+                                            <span class="badge bg-warning-subtle text-warning border border-warning-subtle">Avance</span>
+                                        {% else %}
+                                            <span class="badge bg-success-subtle text-success border border-success-subtle">Venta</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="small">
+                                        {% if evento.comprador_correo %}{{ evento.comprador_correo }}{% else %}{{ evento.comprador_id }}{% endif %}
+                                    </td>
+                                    <td class="small">{% if evento.cantidad_kg %}{{ evento.cantidad_kg }} kg{% else %}-{% endif %}</td>
+                                    <td class="small">
+                                        {% if evento.precio_por_kg %}${{ evento.precio_por_kg }} / kg{% endif %}
+                                        {% if evento.presupuesto %}<span class="d-block">Presupuesto: ${{ evento.presupuesto }}</span>{% endif %}
+                                        {% if evento.precio_total %}<span class="d-block">${{ evento.precio_total }} total</span>{% endif %}
+                                        {% if not evento.precio_por_kg and not evento.presupuesto and not evento.precio_total %}-{% endif %}
+                                    </td>
+                                    <td class="small">{{ evento.estado_display }}</td>
+                                    <td class="small text-secondary">
+                                        {% if evento.observaciones %}{{ evento.observaciones|linebreaksbr }}{% else %}<span class="fst-italic text-muted">Sin observaciones</span>{% endif %}
+                                    </td>
+                                    <td class="small">
+                                        {% if evento.fecha_estimada_cierre %}
+                                            <span class="d-block">Cierre estimado: {{ evento.fecha_estimada_cierre|date:"d/m/Y" }}</span>
+                                        {% endif %}
+                                        {% if evento.codigo_comprobante %}
+                                            <span class="d-block font-monospace">Comprobante: {{ evento.codigo_comprobante }}</span>
+                                        {% endif %}
+                                        {% if not evento.fecha_estimada_cierre and not evento.codigo_comprobante %}-{% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <div class="text-center p-4" id="historial-comercial-vacio">
+                        <i class="bi bi-journal-text fs-1 text-muted mb-3 d-block"></i>
+                        <h5 class="fw-bold text-dark">Este lote todavía no tiene operaciones comerciales registradas</h5>
+                        <p class="text-muted mb-0">Las manifestaciones, negociaciones y ventas aparecerán aquí cuando sean registradas.</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
             <!-- Historial de beneficio (HU14-ST2) -->
             <div class="card border-0 shadow-sm rounded-4 overflow-hidden" id="historial-beneficio">
                 <div class="card-header bg-white p-4 border-bottom">
