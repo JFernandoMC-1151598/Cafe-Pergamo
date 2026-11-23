@@ -1009,6 +1009,101 @@ def registrar_auditoria_ficha_digital(
     )
 
 
+REQUISITOS_MINIMOS_TRAZABILIDAD_LOTE = (
+    {
+        "codigo": "lote_activo",
+        "seccion": "Datos del lote",
+        "campo": "activo",
+        "mensaje": "El lote debe estar activo.",
+        "ruta_captura": "lote_detalle",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "cantidad_disponible",
+        "seccion": "Datos del lote",
+        "campo": "cantidad",
+        "mensaje": "El lote debe tener una cantidad disponible mayor a cero.",
+        "ruta_captura": "lote_detalle",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "cosecha_activa",
+        "seccion": "Cosecha",
+        "campo": "activo",
+        "mensaje": "La cosecha asociada debe estar activa.",
+        "ruta_captura": "cosecha_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "origen_finca_activa",
+        "seccion": "Origen",
+        "campo": "finca.activo",
+        "mensaje": "La finca de origen debe estar registrada y activa.",
+        "ruta_captura": "finca_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "municipio_origen",
+        "seccion": "Origen",
+        "campo": "finca.municipio",
+        "mensaje": "La finca debe tener un municipio registrado.",
+        "ruta_captura": "finca_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "variedad_cosecha",
+        "seccion": "Cosecha",
+        "campo": "variedad",
+        "mensaje": "La cosecha debe tener una variedad de café asignada.",
+        "ruta_captura": "cosecha_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "proceso_beneficio",
+        "seccion": "Beneficio",
+        "campo": "proceso_beneficio",
+        "mensaje": "El lote debe tener asignado un proceso de beneficio.",
+        "ruta_captura": "lote_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "etapas_beneficio",
+        "seccion": "Beneficio",
+        "campo": "etapas_beneficio",
+        "mensaje": "El lote debe tener al menos una etapa de beneficio registrada.",
+        "ruta_captura": "lote_etapa_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "registro_calidad",
+        "seccion": "Calidad",
+        "campo": "caracteristicas_calidad",
+        "mensaje": "El lote debe tener un registro de características físicas y sensoriales.",
+        "ruta_captura": "lote_calidad",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "datos_fisicos_sensoriales",
+        "seccion": "Calidad",
+        "campo": "puntaje_taza|humedad",
+        "mensaje": "La calidad debe incluir puntaje en taza o porcentaje de humedad.",
+        "ruta_captura": "lote_calidad",
+        "obligatorio": True,
+    },
+)
+
+
+def obtener_requisitos_minimos_trazabilidad_lote() -> tuple:
+    """
+    HU28-ST2 (SCRUM-300): devuelve la lista central de requisitos mínimos
+    de trazabilidad y calidad que deben cumplirse antes de publicar un lote.
+
+    La tupla conserva el orden de presentación y permite que publicación,
+    ficha digital y futuros indicadores reutilicen la misma lista.
+    """
+    return tuple(dict(requisito) for requisito in REQUISITOS_MINIMOS_TRAZABILIDAD_LOTE)
+
+
 def validar_lote_para_publicacion(lote: Lote) -> tuple[bool, list[str]]:
     """
     Evalúa si un lote cumple con la información mínima requerida para ser

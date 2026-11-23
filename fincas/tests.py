@@ -96,6 +96,7 @@ from fincas.services import (
     transicionar_estado_comercial,
     registrar_manifestacion_interes,
     validar_lote_para_publicacion,
+    obtener_requisitos_minimos_trazabilidad_lote,
     actualizar_visibilidad_codigo_qr,
     actualizar_lote,
     asociar_codigo_qr_a_lote,
@@ -13092,5 +13093,42 @@ class HU25ST6HistorialComercialFuncionalTests(TestCase):
             manifestacion.delete()
         with self.assertRaises(ProtectedError):
             negociacion.delete()
+
+
+class HU28ST2RequisitosTrazabilidadTests(TestCase):
+    """HU28-ST2 / SCRUM-300: requisitos mínimos de trazabilidad para publicación."""
+
+    def test_lista_requisitos_cubre_origen_cosecha_beneficio_y_calidad(self):
+        requisitos = obtener_requisitos_minimos_trazabilidad_lote()
+        codigos = {requisito["codigo"] for requisito in requisitos}
+
+        self.assertIn("lote_activo", codigos)
+        self.assertIn("cantidad_disponible", codigos)
+        self.assertIn("cosecha_activa", codigos)
+        self.assertIn("origen_finca_activa", codigos)
+        self.assertIn("municipio_origen", codigos)
+        self.assertIn("variedad_cosecha", codigos)
+        self.assertIn("proceso_beneficio", codigos)
+        self.assertIn("etapas_beneficio", codigos)
+        self.assertIn("registro_calidad", codigos)
+        self.assertIn("datos_fisicos_sensoriales", codigos)
+
+    def test_requisitos_incluyen_mensajes_y_rutas_de_captura(self):
+        requisitos = obtener_requisitos_minimos_trazabilidad_lote()
+
+        for requisito in requisitos:
+            with self.subTest(codigo=requisito["codigo"]):
+                self.assertIn("seccion", requisito)
+                self.assertIn("campo", requisito)
+                self.assertIn("mensaje", requisito)
+                self.assertIn("ruta_captura", requisito)
+                self.assertTrue(requisito["obligatorio"])
+
+    def test_lista_requisitos_es_inmutable_para_la_integracion(self):
+        requisitos = obtener_requisitos_minimos_trazabilidad_lote()
+
+        self.assertIsInstance(requisitos, tuple)
+        with self.assertRaises(AttributeError):
+            requisitos.append({"codigo": "extra"})
 
 
