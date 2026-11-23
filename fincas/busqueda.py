@@ -19,6 +19,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 import unicodedata
+from urllib.parse import quote_plus
 
 from django.db.models import Q, QuerySet
 from django.urls import NoReverseMatch, reverse
@@ -325,6 +326,7 @@ def buscar_lotes(
                 url=url_detalle,
                 icono="bi-qr-code",
                 clase_btn="btn-outline-success",
+                tooltip=f"Ver Ficha de Trazabilidad Digital del lote {lote.codigo}",
             ).to_dict()
         ]
 
@@ -335,17 +337,19 @@ def buscar_lotes(
                     etiqueta="Gestionar Lote",
                     url=url_gestion,
                     icono="bi-gear",
-                    clase_btn="btn-outline-primary",
+                    clase_btn="btn-pergamo",
+                    tooltip=f"Administrar etapas, calidad y publicación del lote {lote.codigo}",
                 ).to_dict()
             )
         elif lote.publicado_en_catalogo:
-            url_catalogo = f"/catalogo/?q={lote.codigo}"
+            url_catalogo = f"/catalogo/?q={quote_plus(lote.codigo)}"
             acciones.append(
                 AccionAccesoDirecto(
                     etiqueta="Ver en Catálogo",
                     url=url_catalogo,
                     icono="bi-shop",
                     clase_btn="btn-outline-dark",
+                    tooltip="Ver disponibilidad comercial en el catálogo",
                 ).to_dict()
             )
 
@@ -470,22 +474,37 @@ def buscar_productores(
             contenido_secundario=" ".join(fincas_nombres + municipios),
         )
 
+        termino_catalogo = quote_plus(u.nombres or nombre_completo)
+        url_catalogo_prod = f"/catalogo/?q={termino_catalogo}"
         acciones: List[Dict[str, str]] = [
             AccionAccesoDirecto(
                 etiqueta="Ver en Catálogo",
-                url=f"/catalogo/?q={u.nombres}",
+                url=url_catalogo_prod,
                 icono="bi-shop",
-                clase_btn="btn-outline-dark",
+                clase_btn="btn-outline-success",
+                tooltip=f"Explorar lotes publicados de {nombre_completo}",
             ).to_dict()
         ]
 
-        if rol_codigo == "ADMINISTRADOR":
+        es_propio_perfil = bool(usuario and str(u.id) == str(getattr(usuario, "id", "")))
+        if es_propio_perfil:
             acciones.append(
                 AccionAccesoDirecto(
-                    etiqueta="Ver Perfil Admin",
+                    etiqueta="Mis Fincas",
+                    url="/fincas/mis-fincas/",
+                    icono="bi-geo-alt",
+                    clase_btn="btn-pergamo",
+                    tooltip="Ir al panel de fincas asociadas",
+                ).to_dict()
+            )
+        elif rol_codigo == "ADMINISTRADOR":
+            acciones.append(
+                AccionAccesoDirecto(
+                    etiqueta="Gestionar Usuario",
                     url="/admin/usuarios/",
                     icono="bi-person-gear",
-                    clase_btn="btn-outline-primary",
+                    clase_btn="btn-pergamo",
+                    tooltip="Administrar perfil y rol del caficultor",
                 ).to_dict()
             )
 
@@ -499,7 +518,7 @@ def buscar_productores(
                 icono="bi-person-badge",
                 badge_clase="bg-info text-dark",
                 badge_texto="Caficultor",
-                url_detalle=f"/catalogo/?q={u.nombres}",
+                url_detalle=url_catalogo_prod,
                 relevancia=rel,
                 detalles=detalles_map,
                 acciones=acciones,
@@ -530,29 +549,44 @@ def buscar_productores(
             titulo=act.razon_social,
             subtitulo=f"{act.get_tipo_display()} · Contacto: {act.contacto}",
         )
+        url_cat_actor = f"/catalogo/?q={quote_plus(act.razon_social)}"
+        acciones_actor = [
+            AccionAccesoDirecto(
+                etiqueta="Ver en Catálogo",
+                url=url_cat_actor,
+                icono="bi-shop",
+                clase_btn="btn-outline-success",
+                tooltip=f"Explorar oferta comercial relacionada con {act.razon_social}",
+            ).to_dict()
+        ]
+        if rol_codigo in ["ADMINISTRADOR", "ASOCIACION"]:
+            acciones_actor.append(
+                AccionAccesoDirecto(
+                    etiqueta="Registro de Actores",
+                    url="/actores/registro/",
+                    icono="bi-card-list",
+                    clase_btn="btn-outline-pergamo",
+                    tooltip="Gestionar registro institucional de actores de la cadena",
+                ).to_dict()
+            )
         resultados.append(
             ResultadoBusqueda(
                 id=act.id,
                 tipo_entidad="PRODUCTOR",
-                tipo_entidad_display="Organización",
+                tipo_entidad_display="Productor",
                 titulo=act.razon_social,
                 subtitulo=f"{act.get_tipo_display()} · NIT: {act.nit}",
-                icono="bi-building",
-                badge_clase="bg-primary",
+                icono="bi-person-badge",
+                badge_clase="bg-info text-dark",
                 badge_texto=act.get_tipo_display(),
-                url_detalle="/actores/registro/",
+                url_detalle=url_cat_actor,
                 relevancia=rel_act,
                 detalles={
+                    "Tipo": act.get_tipo_display(),
                     "Contacto": act.contacto,
                     "Correo": act.correo,
                 },
-                acciones=[
-                    AccionAccesoDirecto(
-                        etiqueta="Registro de Actores",
-                        url="/actores/registro/",
-                        icono="bi-card-list",
-                    ).to_dict()
-                ],
+                acciones=acciones_actor,
                 fecha=act.creado_en.strftime("%d/%m/%Y") if act.creado_en else None,
             )
         )
@@ -633,9 +667,20 @@ def buscar_compradores(
                 etiqueta="Ver Negociaciones",
                 url="/fincas/mis-lotes/interes/",
                 icono="bi-chat-dots",
-                clase_btn="btn-outline-primary",
+                clase_btn="btn-pergamo",
+                tooltip="Consultar negociaciones y manifestaciones de interés asociadas",
             ).to_dict()
         ]
+        if rol_codigo == "ADMINISTRADOR":
+            acciones.append(
+                AccionAccesoDirecto(
+                    etiqueta="Gestionar Usuario",
+                    url="/admin/usuarios/",
+                    icono="bi-person-gear",
+                    clase_btn="btn-outline-pergamo",
+                    tooltip="Administrar cuenta del comprador en el panel de usuarios",
+                ).to_dict()
+            )
 
         resultados.append(
             ResultadoBusqueda(
@@ -681,10 +726,10 @@ def buscar_compradores(
                     tipo_entidad_display="Comercializador",
                     titulo=act.razon_social,
                     subtitulo=f"Comercializador de Café · Contacto: {act.contacto}",
-                    icono="bi-briefcase",
-                    badge_clase="bg-dark text-white",
+                    icono="bi-bag-check",
+                    badge_clase="bg-warning text-dark",
                     badge_texto="Comercializador",
-                    url_detalle="/actores/registro/",
+                    url_detalle="/fincas/mis-lotes/interes/",
                     relevancia=rel_c,
                     detalles={
                         "NIT": act.nit,
@@ -693,10 +738,19 @@ def buscar_compradores(
                     },
                     acciones=[
                         AccionAccesoDirecto(
+                            etiqueta="Ver Negociaciones",
+                            url="/fincas/mis-lotes/interes/",
+                            icono="bi-chat-dots",
+                            clase_btn="btn-pergamo",
+                            tooltip="Consultar historial de negociaciones y solicitudes",
+                        ).to_dict(),
+                        AccionAccesoDirecto(
                             etiqueta="Ficha Actor",
                             url="/actores/registro/",
                             icono="bi-building",
-                        ).to_dict()
+                            clase_btn="btn-outline-pergamo",
+                            tooltip="Consultar registro de empresas comercializadoras",
+                        ).to_dict(),
                     ],
                     fecha=act.creado_en.strftime("%d/%m/%Y") if act.creado_en else None,
                 )
@@ -789,12 +843,23 @@ def buscar_operaciones(
         url_op = "/fincas/mis-lotes/interes/"
         acciones = [
             AccionAccesoDirecto(
-                etiqueta="Ver Notificación",
+                etiqueta="Gestionar Interés",
                 url=url_op,
                 icono="bi-chat-left-dots",
-                clase_btn="btn-outline-success",
+                clase_btn="btn-pergamo",
+                tooltip="Ir al módulo de gestión de manifestaciones de interés",
             ).to_dict()
         ]
+        if lote and lote.codigo:
+            acciones.append(
+                AccionAccesoDirecto(
+                    etiqueta="Ficha del Lote",
+                    url=f"/trazabilidad/lote/{lote.codigo}/",
+                    icono="bi-qr-code",
+                    clase_btn="btn-outline-success",
+                    tooltip=f"Ver Ficha de Trazabilidad Digital del lote {lote.codigo}",
+                ).to_dict()
+            )
 
         badge_cls = "bg-primary"
         if op.vista_por_productor:

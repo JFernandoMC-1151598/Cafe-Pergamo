@@ -500,3 +500,201 @@ class TestBusquedaGlobalVistasYAPI(TestCase):
         self.assertEqual(data['total_resultados'], 0)
         self.assertIn('al menos 2 caracteres', data.get('aviso', ''))
 
+
+class TestInterfazResultadosYAccesosDirectos(TestCase):
+    """
+    Pruebas de interfaz visual de búsqueda global (SCRUM-295 / HU29-ST5)
+    y accesos directos contextuales por entidad y rol (SCRUM-297 / HU29-ST7).
+    """
+
+    def setUp(self):
+        self.municipio = Municipio.objects.filter(
+            nombre="Pamplona", departamento="Norte de Santander"
+        ).first()
+        if not self.municipio:
+            self.municipio = Municipio.objects.create(
+                codigo="MUN-PAM-TEST-UI",
+                nombre="Pamplona",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Bourbon Rosado UI",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="NAT_UI_HU29",
+            nombre="Natural Fermentado",
+            activo=True,
+        )
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.finca = Finca.objects.create(
+            productor_id=self.productor_id,
+            nombre="Finca El Mirador Andino",
+            municipio=self.municipio,
+            vereda="Monteadentro",
+            activo=True,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=timezone.now().date(),
+            cantidad_total=Decimal("900.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOT-UI-295",
+            cosecha=self.cosecha,
+            proceso_beneficio=self.proceso,
+            cantidad=Decimal("220.00"),
+            publicado_en_catalogo=True,
+            fecha_publicacion=timezone.now(),
+            precio_referencial=Decimal("42500.00"),
+            activo=True,
+        )
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            puntaje_taza=Decimal("88.25"),
+            humedad=Decimal("11.10"),
+            merma=Decimal("13.50"),
+            perfil_sensorial="Frutos rojos, panela y floral intenso",
+        )
+
+        self.operacion = ManifestacionInteres.objects.create(
+            lote=self.lote,
+            comprador_id=self.comprador_id,
+            comprador_correo="comprador.mirador@cafe.test",
+            cantidad_kg=Decimal("100.00"),
+            mensaje="Solicitud de muestra comercial Mirador Andino",
+            telefono_contacto="3150001122",
+            estado=ManifestacionInteres.EstadoManifestacion.REGISTRADO,
+        )
+
+        self.asociacion = ActorCadena.objects.create(
+            tipo=ActorCadena.TipoActor.ASOCIACION,
+            razon_social="Asociación Mirador Cafetero",
+            nit="901555111-2",
+            contacto="Laura Méndez",
+            correo="contacto@miradorcafetero.test",
+            activo=True,
+        )
+        self.comercializador = ActorCadena.objects.create(
+            tipo=ActorCadena.TipoActor.COMERCIALIZADOR,
+            razon_social="Comercializadora Mirador Export",
+            nit="901555222-3",
+            contacto="Andrés Silva",
+            correo="compras@miradorexport.test",
+            activo=True,
+        )
+
+    def test_renderizado_encabezado_institucional_resumen_y_sin_bg_gradient(self):
+        """Renderiza resumen 'Resultados para <q> (X encontrado(s) en Y ms)' y evita .bg-gradient."""
+        response = self.client.get(reverse('busqueda_global'), {'q': 'LOT-UI-295'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'busqueda/resultados.html')
+        self.assertContains(response, 'id="resumenBusqueda"')
+        self.assertContains(response, 'Resultados para <strong>LOT-UI-295</strong>')
+        self.assertContains(response, 'ms)')
+        self.assertNotContains(response, 'bg-gradient')
+
+    @patch('usuarios.templatetags.rbac_tags.usuario_tiene_permiso', return_value=True)
+    def test_pestanas_entidad_respetan_permisos_rbac_y_resaltan_activa(self, _mock_perm):
+        """Anónimo solo ve Todas, Lotes y Productores; Administrador ve todas las pestañas."""
+        url = reverse('busqueda_global')
+
+        # Usuario anónimo
+        resp_anon = self.client.get(url, {'q': 'Mirador', 'tipo': 'lotes'})
+        self.assertEqual(resp_anon.status_code, 200)
+        self.assertContains(resp_anon, 'data-entidad="todas"')
+        self.assertContains(resp_anon, 'data-entidad="lotes"')
+        self.assertContains(resp_anon, 'data-entidad="productores"')
+        self.assertNotContains(resp_anon, 'data-entidad="compradores"')
+        self.assertNotContains(resp_anon, 'data-entidad="operaciones"')
+        self.assertContains(resp_anon, 'data-entidad="lotes"\n                       aria-current="page"')
+
+        # Sesión Administrador
+        session = self.client.session
+        session['rol'] = 'ADMINISTRADOR'
+        session.save()
+
+        resp_admin = self.client.get(url, {'q': 'Mirador', 'tipo': 'todas'})
+        self.assertEqual(resp_admin.status_code, 200)
+        for entidad in ('todas', 'lotes', 'productores', 'compradores', 'operaciones'):
+            self.assertContains(resp_admin, f'data-entidad="{entidad}"')
+
+    @patch('usuarios.templatetags.rbac_tags.usuario_tiene_permiso', return_value=True)
+    def test_tarjetas_muestran_iconos_badges_y_metadatos_formateados(self, _mock_perm):
+        """Las tarjetas muestran icono distintivo, badges de entidad/estado y metadatos clave."""
+        session = self.client.session
+        session['rol'] = 'ADMINISTRADOR'
+        session.save()
+
+        response = self.client.get(reverse('busqueda_global'), {'q': 'Mirador'})
+        self.assertEqual(response.status_code, 200)
+
+        # Iconos por entidad
+        self.assertContains(response, 'bi-box-seam')
+        self.assertContains(response, 'bi-person-badge')
+        self.assertContains(response, 'bi-bag-check')
+        self.assertContains(response, 'bi-receipt')
+
+        # Badges de entidad y estado
+        self.assertContains(response, 'bg-success')
+        self.assertContains(response, 'bg-info')
+        self.assertContains(response, 'bg-warning')
+        self.assertContains(response, 'En Catálogo')
+
+        # Metadatos formateados del lote
+        self.assertContains(response, 'Bourbon Rosado UI')
+        self.assertContains(response, 'Natural Fermentado')
+        self.assertContains(response, '88.25 pts')
+        self.assertContains(response, '$42,500 COP/kg')
+
+    @patch('usuarios.templatetags.rbac_tags.usuario_tiene_permiso', return_value=True)
+    def test_accesos_directos_contextuales_por_entidad_y_rol(self, _mock_perm):
+        """Verifica botones rápidos de SCRUM-297 para Lote, Productor, Comprador y Operación."""
+        url = reverse('busqueda_global')
+
+        # Público: Lote tiene Ficha de Trazabilidad y Ver en Catálogo, pero NO Gestionar Lote
+        resp_pub = self.client.get(url, {'q': 'LOT-UI-295', 'tipo': 'lotes'})
+        self.assertEqual(resp_pub.status_code, 200)
+        self.assertContains(resp_pub, f'/trazabilidad/lote/{self.lote.codigo}/')
+        self.assertContains(resp_pub, 'Ficha Trazabilidad')
+        self.assertContains(resp_pub, f'/catalogo/?q={self.lote.codigo}')
+        self.assertNotContains(resp_pub, f'/fincas/lotes/{self.lote.id}/')
+
+        # Administrador: Lote incluye botón Gestionar Lote; Operación y Comprador enlazan a /fincas/mis-lotes/interes/
+        session = self.client.session
+        session['rol'] = 'ADMINISTRADOR'
+        session.save()
+
+        resp_admin = self.client.get(url, {'q': 'Mirador', 'tipo': 'todas'})
+        self.assertEqual(resp_admin.status_code, 200)
+        self.assertContains(resp_admin, f'/trazabilidad/lote/{self.lote.codigo}/')
+        self.assertContains(resp_admin, f'/fincas/lotes/{self.lote.id}/')
+        self.assertContains(resp_admin, 'Gestionar Lote')
+        self.assertContains(resp_admin, '/fincas/mis-lotes/interes/')
+        self.assertContains(resp_admin, 'Gestionar Interés')
+        self.assertContains(resp_admin, 'Ver Negociaciones')
+        self.assertContains(resp_admin, 'Ver en Catálogo')
+
+    def test_empty_state_cuando_no_hay_resultados(self):
+        """Cuando total_resultados == 0 con término activo, renderiza Empty State con recomendaciones."""
+        response = self.client.get(
+            reverse('busqueda_global'),
+            {'q': 'TerminoInexistentePergamo999', 'tipo': 'lotes'},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context['total_resultados'], 0)
+        self.assertContains(response, 'id="emptyStateBusqueda"')
+        self.assertContains(response, 'No se encontraron resultados')
+        self.assertContains(response, 'TerminoInexistentePergamo999')
+        self.assertContains(response, 'Explorar Catálogo Comercial')
+        self.assertContains(response, 'Buscar en todas las entidades')
+        self.assertContains(response, 'ortografía')
+
+
