@@ -113,6 +113,17 @@ def remover_diacriticos(texto: Optional[str]) -> str:
     return "".join(c for c in nfkd if not unicodedata.combining(c)).lower()
 
 
+def _obtener_variantes_termino(termino: str) -> List[str]:
+    """Genera variantes con y sin diacríticos para búsqueda insensible a tildes."""
+    if not termino:
+        return []
+    variantes = [termino]
+    t_norm = remover_diacriticos(termino)
+    if t_norm and t_norm.lower() != termino.lower() and t_norm not in variantes:
+        variantes.append(t_norm)
+    return variantes
+
+
 def calcular_relevancia(
     termino: str,
     campo_clave: str,
@@ -286,17 +297,19 @@ def buscar_lotes(
         "caracteristicas_calidad",
     ).distinct()
 
-    # 2. Cláusulas de Búsqueda Textual Multicampo
-    q_filter = (
-        Q(codigo__icontains=termino)
-        | Q(cosecha__finca__nombre__icontains=termino)
-        | Q(cosecha__finca__vereda__icontains=termino)
-        | Q(cosecha__finca__municipio__nombre__icontains=termino)
-        | Q(cosecha__variedad__nombre__icontains=termino)
-        | Q(proceso_beneficio__nombre__icontains=termino)
-        | Q(caracteristicas_calidad__perfil_sensorial__icontains=termino)
-        | Q(caracteristicas_calidad__observaciones__icontains=termino)
-    )
+    # 2. Cláusulas de Búsqueda Textual Multicampo con soporte diacrítico
+    q_filter = Q()
+    for t in _obtener_variantes_termino(termino):
+        q_filter |= (
+            Q(codigo__icontains=t)
+            | Q(cosecha__finca__nombre__icontains=t)
+            | Q(cosecha__finca__vereda__icontains=t)
+            | Q(cosecha__finca__municipio__nombre__icontains=t)
+            | Q(cosecha__variedad__nombre__icontains=t)
+            | Q(proceso_beneficio__nombre__icontains=t)
+            | Q(caracteristicas_calidad__perfil_sensorial__icontains=t)
+            | Q(caracteristicas_calidad__observaciones__icontains=t)
+        )
 
     lotes = list(base_qs.filter(q_filter)[:limite])
     resultados: List[ResultadoBusqueda] = []
@@ -426,15 +439,18 @@ def buscar_productores(
             .distinct()
         )
 
-        q_user = (
-            Q(nombres__icontains=termino)
-            | Q(apellidos__icontains=termino)
-            | Q(correo__icontains=termino)
-            | Q(numero_documento__icontains=termino)
-            | Q(telefono__icontains=termino)
-            | Q(fincas__nombre__icontains=termino)
-            | Q(fincas__municipio__nombre__icontains=termino)
-        )
+        variantes = _obtener_variantes_termino(termino)
+        q_user = Q()
+        for t in variantes:
+            q_user |= (
+                Q(nombres__icontains=t)
+                | Q(apellidos__icontains=t)
+                | Q(correo__icontains=t)
+                | Q(numero_documento__icontains=t)
+                | Q(telefono__icontains=t)
+                | Q(fincas__nombre__icontains=t)
+                | Q(fincas__municipio__nombre__icontains=t)
+            )
 
         usuarios_prod = list(prod_qs.filter(q_user)[:limite])
     except Exception:
@@ -534,12 +550,14 @@ def buscar_productores(
         ],
         activo=True,
     )
-    q_actor = (
-        Q(razon_social__icontains=termino)
-        | Q(nit__icontains=termino)
-        | Q(contacto__icontains=termino)
-        | Q(correo__icontains=termino)
-    )
+    q_actor = Q()
+    for t in _obtener_variantes_termino(termino):
+        q_actor |= (
+            Q(razon_social__icontains=t)
+            | Q(nit__icontains=t)
+            | Q(contacto__icontains=t)
+            | Q(correo__icontains=t)
+        )
     actores = list(actores_qs.filter(q_actor)[:limite])
 
     for act in actores:
@@ -632,13 +650,15 @@ def buscar_compradores(
             # El comprador solo puede verse a sí mismo
             comp_qs = comp_qs.filter(id=getattr(usuario, "id", None))
 
-        q_comp = (
-            Q(nombres__icontains=termino)
-            | Q(apellidos__icontains=termino)
-            | Q(correo__icontains=termino)
-            | Q(numero_documento__icontains=termino)
-            | Q(telefono__icontains=termino)
-        )
+        q_comp = Q()
+        for t in _obtener_variantes_termino(termino):
+            q_comp |= (
+                Q(nombres__icontains=t)
+                | Q(apellidos__icontains=t)
+                | Q(correo__icontains=t)
+                | Q(numero_documento__icontains=t)
+                | Q(telefono__icontains=t)
+            )
 
         compradores = list(comp_qs.filter(q_comp)[:limite])
     except Exception:
@@ -794,13 +814,15 @@ def buscar_operaciones(
         return []
 
     # 2. Cláusulas de búsqueda
-    q_op = (
-        Q(lote__codigo__icontains=termino)
-        | Q(comprador_correo__icontains=termino)
-        | Q(telefono_contacto__icontains=termino)
-        | Q(mensaje__icontains=termino)
-        | Q(estado__icontains=termino)
-    )
+    q_op = Q()
+    for t in _obtener_variantes_termino(termino):
+        q_op |= (
+            Q(lote__codigo__icontains=t)
+            | Q(comprador_correo__icontains=t)
+            | Q(telefono_contacto__icontains=t)
+            | Q(mensaje__icontains=t)
+            | Q(estado__icontains=t)
+        )
 
     operaciones = list(op_qs.filter(q_op)[:limite])
     resultados: List[ResultadoBusqueda] = []
@@ -1027,4 +1049,5 @@ def ejecutar_busqueda_global(
         "resultados": lista_final,
         "resultados_por_entidad": resultados_por_entidad,
         "tiempo_ms": tiempo_total,
+        "aviso": "",
     }
