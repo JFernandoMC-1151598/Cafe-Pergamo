@@ -118,4 +118,7 @@ urlpatterns = [
     path('api/v1/indicadores/dashboard/', views.api_dashboard_indicadores_view, name='api_v1_dashboard_indicadores'),
     path('api/indicadores/opciones-filtro/', views.api_opciones_filtro_dashboard_view, name='api_opciones_filtro_dashboard'),
     path('api/v1/indicadores/opciones-filtro/', views.api_opciones_filtro_dashboard_view, name='api_v1_opciones_filtro_dashboard'),
+
+    # Interfaz Web de Dashboard de Indicadores (HU-26 / SCRUM-285)
+    path('dashboard/', views.dashboard_indicadores_web_view, name='dashboard_indicadores'),
 ]

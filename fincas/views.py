@@ -26,6 +26,7 @@ poder consultarse ahora, no solo en el siguiente sprint.
 """
 
 from decimal import Decimal
+import json
 from typing import Optional
 
 from django.contrib import messages
@@ -2787,5 +2788,58 @@ def api_opciones_filtro_dashboard_view(request):
         rol_override=rol_actual,
     )
     return Response(opciones, status=status.HTTP_200_OK)
+
+
+def dashboard_indicadores_web_view(request):
+    """
+    Vista web interactiva del Dashboard de Indicadores de Trazabilidad y Comercialización
+    (HU-26 / SCRUM-285 / SCRUM-235).
+    Renderiza la interfaz con tarjetas KPI, gráficos dinámicos (Chart.js), tablas de desglose
+    y controles de filtrado interactivo multicriterio.
+    """
+    if not request.user.is_authenticated:
+        messages.error(request, "Debe iniciar sesión para acceder al dashboard de indicadores.")
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    rol_actual = _resolver_rol_usuario_request(request)
+    if request.user.is_superuser or getattr(request.user, "is_staff", False):
+        rol_actual = "ADMINISTRADOR"
+
+    if not _verificar_permiso_dashboard(rol_actual):
+        messages.error(request, "No tiene permisos para acceder al dashboard de indicadores.")
+        return HttpResponseForbidden("No tiene permisos para acceder al dashboard de indicadores.")
+
+    productor_id = _resolver_productor_id(request)
+    usuario_analitico = productor_id or request.user
+
+    filtros = {
+        "municipio_id": request.GET.get("municipio_id"),
+        "variedad_id": request.GET.get("variedad_id"),
+        "productor_id": request.GET.get("productor_id"),
+        "finca_id": request.GET.get("finca_id"),
+        "estado_comercial": request.GET.get("estado_comercial"),
+        "fecha_inicio": request.GET.get("fecha_inicio"),
+        "fecha_fin": request.GET.get("fecha_fin"),
+    }
+    filtros = {k: v for k, v in filtros.items() if v not in (None, "", "null", "undefined")}
+
+    metricas = obtener_metricas_dashboard(
+        usuario=usuario_analitico,
+        rol_override=rol_actual,
+        filtros=filtros,
+    )
+    opciones_filtro = obtener_opciones_filtro_dashboard(
+        usuario=usuario_analitico,
+        rol_override=rol_actual,
+    )
+
+    context = {
+        "metricas": metricas,
+        "opciones_filtro": opciones_filtro,
+        "rol_actual": rol_actual,
+        "filtros_actuales": filtros,
+        "metricas_json": json.dumps(metricas, default=str),
+    }
+    return render(request, "fincas/dashboard_indicadores.html", context)
 
 

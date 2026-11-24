@@ -12671,5 +12671,128 @@ class TestScrum287EndpointApiIndicadoresDashboard(TestCase):
         self.assertTrue(len(data["fincas"]) > 0)
 
 
+class TestScrum285InterfazDashboardWeb(TestCase):
+    """
+    Pruebas automatizadas para la interfaz web interactiva del Dashboard de Indicadores
+    (HU-26 / SCRUM-285 / HU26-ST1).
+    Valida renderizado del template, tarjetas KPI, gráficos Chart.js, aislamiento RBAC
+    y controles de filtrado analítico.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_dashboard_web = reverse("dashboard_indicadores")
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-TOL-ST1",
+            nombre="Toledo",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Caturra ST1",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.finca = Finca.objects.create(
+            nombre="Finca La Esperanza ST1",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 11, 10),
+            cantidad_total=Decimal("850.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        self.lote = Lote.objects.create(
+            cosecha=self.cosecha,
+            codigo="LOT-DASH-ST1-01",
+            cantidad=Decimal("850.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+    def test_acceso_anonimo_redirige_a_login(self):
+        """Petición anónima a /fincas/dashboard/ es redirigida al login institucional."""
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(reverse("login"), resp.url)
+
+    def test_acceso_comprador_retorna_403_forbidden(self):
+        """Rol sin permiso 'indicadores.ver_dashboard' (COMPRADOR) recibe HTTP 403 Forbidden."""
+        _iniciar_sesion_comprador(self.client, usuario_id=self.comprador_id)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 403)
+
+    def test_acceso_productor_exitoso_renderiza_template_y_kpis(self):
+        """Productor autenticado recibe HTTP 200, plantilla adecuada y tarjetas KPI del contexto."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, "fincas/dashboard_indicadores.html")
+
+        # Verificar objetos en contexto
+        self.assertIn("metricas", resp.context)
+        self.assertIn("opciones_filtro", resp.context)
+        self.assertIn("metricas_json", resp.context)
+
+        # Contenido HTML renderizado
+        content = resp.content.decode("utf-8")
+        self.assertIn("Dashboard de Trazabilidad y Comercialización", content)
+        self.assertIn("Lotes Activos", content)
+        self.assertIn("Volumen Producido", content)
+        self.assertIn("graficoEtapasBeneficio", content)
+        self.assertIn("graficoVariedades", content)
+        self.assertIn("graficoEstadosComerciales", content)
+        self.assertIn("graficoRegional", content)
+        self.assertIn('id="datos-dashboard-inicial"', content)
+
+    def test_acceso_asociacion_renderiza_desglose_regional_y_filtros(self):
+        """Usuario con rol ASOCIACION visualiza la tabla de desglose regional y ranking de fincas."""
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_id)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context["metricas"]["es_asociacion_o_admin"])
+
+        content = resp.content.decode("utf-8")
+        self.assertIn("Desglose Regional por Municipio", content)
+        self.assertIn("Top Predios", content)
+        self.assertIn("Toledo", content)
+
+    def test_filtro_municipio_en_vista_web(self):
+        """Parámetro GET ?municipio_id= acota las métricas pasadas al contexto del template."""
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_id)
+
+        # Filtro con municipio donde hay finca
+        resp_ok = self.client.get(f"{self.url_dashboard_web}?municipio_id={self.municipio.id}")
+        self.assertEqual(resp_ok.status_code, 200)
+        self.assertEqual(resp_ok.context["metricas"]["resumen_general"]["total_lotes"], 1)
+
+        # Filtro con municipio sin fincas
+        resp_vacio = self.client.get(f"{self.url_dashboard_web}?municipio_id=999999")
+        self.assertEqual(resp_vacio.status_code, 200)
+        self.assertEqual(resp_vacio.context["metricas"]["resumen_general"]["total_lotes"], 0)
+
+    def test_navbar_contiene_enlace_dashboard_para_roles_autorizados(self):
+        """El navbar en base.html incluye el enlace directo al Dashboard para roles autorizados."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        resp = self.client.get(reverse("home"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, reverse("dashboard_indicadores"))
+
+
+
 
 

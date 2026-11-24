@@ -1,0 +1,702 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Dashboard de Indicadores — Café Pérgamo{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* Estilos personalizados del Dashboard de Indicadores - Café Pérgamo */
+    .dashboard-hero {
+        background: linear-gradient(135deg, #2B1810 0%, #4A2C2A 50%, #1B381E 100%) !important;
+        color: #ffffff !important;
+        border-radius: 1rem;
+        padding: 2rem 2.25rem;
+        box-shadow: 0 10px 25px rgba(43, 24, 16, 0.15);
+        margin-bottom: 2rem;
+    }
+
+    .kpi-card {
+        background: #ffffff;
+        border-radius: 1rem;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.03);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+        overflow: hidden;
+        position: relative;
+    }
+
+    .kpi-card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 8px 25px rgba(0, 0, 0, 0.08);
+    }
+
+    .kpi-accent-trazabilidad {
+        border-left: 5px solid #1B381E !important;
+    }
+
+    .kpi-accent-comercial {
+        border-left: 5px solid #990000 !important;
+    }
+
+    .kpi-accent-calidad {
+        border-left: 5px solid #B8860B !important;
+    }
+
+    .kpi-accent-ingresos {
+        border-left: 5px solid #2E7D32 !important;
+    }
+
+    .kpi-icon-wrapper {
+        width: 52px;
+        height: 52px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.5rem;
+    }
+
+    .kpi-icon-trazabilidad {
+        background-color: rgba(27, 56, 30, 0.12);
+        color: #1B381E;
+    }
+
+    .kpi-icon-comercial {
+        background-color: rgba(153, 0, 0, 0.12);
+        color: #990000;
+    }
+
+    .kpi-icon-calidad {
+        background-color: rgba(184, 134, 11, 0.15);
+        color: #B8860B;
+    }
+
+    .kpi-icon-ingresos {
+        background-color: rgba(46, 125, 50, 0.12);
+        color: #2E7D32;
+    }
+
+    .chart-card {
+        background: #ffffff;
+        border-radius: 1rem;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.03);
+        height: 100%;
+    }
+
+    .chart-container-box {
+        position: relative;
+        height: 280px;
+        width: 100%;
+    }
+
+    .filter-card {
+        background: #ffffff;
+        border-radius: 1rem;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.03);
+    }
+
+    .btn-pergamo-action {
+        background-color: #4A2C2A;
+        color: #ffffff;
+        border: none;
+        transition: background-color 0.2s ease;
+    }
+
+    .btn-pergamo-action:hover {
+        background-color: #2B1810;
+        color: #ffffff;
+    }
+
+    .dashboard-loading-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(255, 255, 255, 0.75);
+        backdrop-filter: blur(2px);
+        z-index: 20;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        border-radius: 1rem;
+    }
+
+    @media print {
+        .navbar, .footer-pergamo, .filter-card, .btn-action-no-print {
+            display: none !important;
+        }
+        .dashboard-hero {
+            background: #2B1810 !important;
+            color: #ffffff !important;
+            box-shadow: none !important;
+            padding: 1.5rem !important;
+        }
+        .kpi-card, .chart-card {
+            box-shadow: none !important;
+            border: 1px solid #ddd !important;
+            page-break-inside: avoid;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block messages %}{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+
+    <!-- Notificaciones Flash locales de la vista -->
+    {% if messages %}
+    <div class="mb-4">
+        {% for message in messages %}
+        <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show shadow-sm" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Cerrar"></button>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Encabezado Institucional (Hero Banner) -->
+    <section class="dashboard-hero position-relative">
+        <div class="row align-items-center g-3">
+            <div class="col-12 col-lg-8">
+                <div class="d-flex align-items-center flex-wrap gap-2 mb-2">
+                    <span class="badge bg-white text-dark fw-bold px-3 py-2 rounded-pill shadow-sm">
+                        <i class="bi bi-speedometer2 text-danger me-1"></i> HU-26 · Analítica Oficial
+                    </span>
+                    {% if rol_actual == "ASOCIACION" %}
+                    <span class="badge bg-success text-white px-3 py-2 rounded-pill">
+                        <i class="bi bi-people-fill me-1"></i> Asociación Caficultora
+                    </span>
+                    {% elif rol_actual == "PRODUCTOR" %}
+                    <span class="badge bg-primary text-white px-3 py-2 rounded-pill">
+                        <i class="bi bi-person-badge-fill me-1"></i> Productor Cafetero
+                    </span>
+                    {% elif rol_actual == "ADMINISTRADOR" or user.is_superuser %}
+                    <span class="badge bg-secondary text-white px-3 py-2 rounded-pill">
+                        <i class="bi bi-shield-lock-fill me-1"></i> Administrador General
+                    </span>
+                    {% else %}
+                    <span class="badge bg-dark text-white px-3 py-2 rounded-pill">
+                        {{ rol_actual }}
+                    </span>
+                    {% endif %}
+                </div>
+                <h1 class="h2 fw-bold text-white mb-2">
+                    Dashboard de Trazabilidad y Comercialización
+                </h1>
+                <p class="text-white-50 mb-0 fs-6">
+                    Monitoreo en tiempo real de etapas de beneficio, calidad sensorial SCA, volumen producido e ingresos comerciales de Café Pérgamo en Norte de Santander.
+                </p>
+            </div>
+            <div class="col-12 col-lg-4 text-lg-end btn-action-no-print">
+                <div class="d-flex flex-wrap gap-2 justify-content-lg-end">
+                    <button id="btnRefrescarDashboard" class="btn btn-light fw-semibold shadow-sm" title="Recargar indicadores en tiempo real">
+                        <i class="bi bi-arrow-clockwise me-1" id="iconoRefrescar"></i> Actualizar
+                    </button>
+                    <button onclick="window.print()" class="btn btn-outline-light fw-semibold" title="Imprimir o exportar reporte formal a PDF">
+                        <i class="bi bi-printer me-1"></i> Exportar / Imprimir
+                    </button>
+                </div>
+                <div class="mt-2 text-white-50 small">
+                    <i class="bi bi-clock me-1"></i> Última sincronización: <span id="lblUltimaSincronizacion">En vivo</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Barra de Filtros Interactivos Multicriterio -->
+    <section class="filter-card p-3 p-md-4 mb-4 position-relative">
+        <form id="formFiltrosDashboard" method="GET" action="{% url 'dashboard_indicadores' %}" class="row g-3 align-items-end">
+            <div class="col-12 col-sm-6 col-lg-3">
+                <label for="filtroMunicipio" class="form-label small fw-bold text-muted mb-1">
+                    <i class="bi bi-geo-alt-fill text-danger me-1"></i> Municipio
+                </label>
+                <select name="municipio_id" id="filtroMunicipio" class="form-select form-select-sm">
+                    <option value="">Todos los municipios</option>
+                    {% for m in opciones_filtro.municipios %}
+                    <option value="{{ m.id }}" {% if filtros_actuales.municipio_id == m.id|stringformat:"s" %}selected{% endif %}>
+                        {{ m.nombre }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-12 col-sm-6 col-lg-3">
+                <label for="filtroFinca" class="form-label small fw-bold text-muted mb-1">
+                    <i class="bi bi-house-door-fill text-success me-1"></i> Predio / Finca
+                </label>
+                <select name="finca_id" id="filtroFinca" class="form-select form-select-sm">
+                    <option value="">Todas las fincas</option>
+                    {% for f in opciones_filtro.fincas %}
+                    <option value="{{ f.id }}" {% if filtros_actuales.finca_id == f.id|stringformat:"s" %}selected{% endif %}>
+                        {{ f.nombre }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-12 col-sm-6 col-lg-2">
+                <label for="filtroVariedad" class="form-label small fw-bold text-muted mb-1">
+                    <i class="bi bi-flower3 text-warning me-1"></i> Variedad
+                </label>
+                <select name="variedad_id" id="filtroVariedad" class="form-select form-select-sm">
+                    <option value="">Todas las variedades</option>
+                    {% for v in opciones_filtro.variedades %}
+                    <option value="{{ v.id }}" {% if filtros_actuales.variedad_id == v.id|stringformat:"s" %}selected{% endif %}>
+                        {{ v.nombre }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-12 col-sm-6 col-lg-2">
+                <label for="filtroEstadoComercial" class="form-label small fw-bold text-muted mb-1">
+                    <i class="bi bi-tag-fill text-info me-1"></i> Estado Comercial
+                </label>
+                <select name="estado_comercial" id="filtroEstadoComercial" class="form-select form-select-sm">
+                    <option value="">Todos los estados</option>
+                    {% for est in opciones_filtro.estados_comerciales %}
+                    <option value="{{ est }}" {% if filtros_actuales.estado_comercial == est %}selected{% endif %}>
+                        {{ est }}
+                    </option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-12 col-lg-2">
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-pergamo-action btn-sm flex-grow-1 fw-semibold" id="btnAplicarFiltros">
+                        <i class="bi bi-funnel-fill me-1"></i> Filtrar
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm" id="btnLimpiarFiltros" title="Restablecer filtros">
+                        <i class="bi bi-x-circle"></i>
+                    </button>
+                </div>
+            </div>
+        </form>
+    </section>
+
+    <!-- Contenedor Principal con Overlay de Carga -->
+    <div class="position-relative" id="contenedorDashboardAnalitico">
+        <!-- Spinner Overlay -->
+        <div id="loadingOverlayDashboard" class="dashboard-loading-overlay">
+            <div class="text-center p-4">
+                <div class="spinner-border text-danger mb-2" role="status" style="width: 3rem; height: 3rem;">
+                    <span class="visually-hidden">Cargando...</span>
+                </div>
+                <p class="fw-bold text-dark mb-0">Calculando indicadores en tiempo real...</p>
+                <small class="text-muted">Procesando agregaciones ORM y registros de trazabilidad</small>
+            </div>
+        </div>
+
+        <!-- Tarjetas KPI Clave (8 Métricas Principales) -->
+        <section class="mb-4">
+            <div class="row g-3">
+                <!-- KPI 1: Lotes Activos -->
+                <div class="col-12 col-sm-6 col-xl-3">
+                    <div class="kpi-card kpi-accent-trazabilidad p-3 h-100">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="text-muted small fw-bold text-uppercase">Lotes Activos</span>
+                            <div class="kpi-icon-wrapper kpi-icon-trazabilidad">
+                                <i class="bi bi-boxes"></i>
+                            </div>
+                        </div>
+                        <h2 class="h3 fw-bold text-dark mb-1" id="kpiTotalLotes">
+                            {{ metricas.resumen_general.total_lotes }}
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            <i class="bi bi-qr-code text-success me-1"></i>
+                            <span id="kpiLotesConQR">{{ metricas.indicadores_trazabilidad.lotes_con_qr }}</span> con Código QR
+                        </p>
+                    </div>
+                </div>
+
+                <!-- KPI 2: Volumen Total Producido -->
+                <div class="col-12 col-sm-6 col-xl-3">
+                    <div class="kpi-card kpi-accent-trazabilidad p-3 h-100">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="text-muted small fw-bold text-uppercase">Volumen Producido</span>
+                            <div class="kpi-icon-wrapper kpi-icon-trazabilidad">
+                                <i class="bi bi-speedometer2"></i>
+                            </div>
+                        </div>
+                        <h2 class="h3 fw-bold text-dark mb-1" id="kpiVolumenProducido">
+                            {{ metricas.indicadores_comercializacion.volumen_total_producido_kg|floatformat:1 }} kg
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            <i class="bi bi-check-circle text-primary me-1"></i>
+                            <span id="kpiVolumenDisponible">{{ metricas.indicadores_comercializacion.volumen_disponible_catalogo_kg|floatformat:1 }}</span> kg disponibles
+                        </p>
+                    </div>
+                </div>
+
+                <!-- KPI 3: Volumen Vendido -->
+                <div class="col-12 col-sm-6 col-xl-3">
+                    <div class="kpi-card kpi-accent-comercial p-3 h-100">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="text-muted small fw-bold text-uppercase">Volumen Vendido</span>
+                            <div class="kpi-icon-wrapper kpi-icon-comercial">
+                                <i class="bi bi-bag-check-fill"></i>
+                            </div>
+                        </div>
+                        <h2 class="h3 fw-bold text-dark mb-1" id="kpiVolumenVendido">
+                            {{ metricas.indicadores_comercializacion.volumen_vendido_kg|floatformat:1 }} kg
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            <i class="bi bi-receipt text-danger me-1"></i>
+                            <span id="kpiTotalVentas">{{ metricas.indicadores_comercializacion.total_ventas_concretadas }}</span> ventas liquidadas
+                        </p>
+                    </div>
+                </div>
+
+                <!-- KPI 4: Ingresos Comerciales Totales -->
+                <div class="col-12 col-sm-6 col-xl-3">
+                    <div class="kpi-card kpi-accent-ingresos p-3 h-100">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="text-muted small fw-bold text-uppercase">Ingresos Totales (COP)</span>
+                            <div class="kpi-icon-wrapper kpi-icon-ingresos">
+                                <i class="bi bi-cash-stack"></i>
+                            </div>
+                        </div>
+                        <h2 class="h3 fw-bold text-dark mb-1" id="kpiIngresosTotales">
+                            ${{ metricas.indicadores_comercializacion.ingresos_totales_cop|floatformat:0 }}
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            <i class="bi bi-tag text-success me-1"></i>
+                            Promedio: $<span id="kpiPrecioPromedio">{{ metricas.indicadores_comercializacion.precio_promedio_kg_cop|floatformat:0 }}</span> / kg
+                        </p>
+                    </div>
+                </div>
+
+                <!-- KPI 5: Índice de Completitud Técnica -->
+                <div class="col-12 col-sm-6 col-xl-3">
+                    <div class="kpi-card kpi-accent-trazabilidad p-3 h-100">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="text-muted small fw-bold text-uppercase">Completitud Trazabilidad</span>
+                            <div class="kpi-icon-wrapper kpi-icon-trazabilidad">
+                                <i class="bi bi-patch-check-fill"></i>
+                            </div>
+                        </div>
+                        <h2 class="h3 fw-bold text-dark mb-1" id="kpiCompletitud">
+                            {{ metricas.indicadores_trazabilidad.completitud_promedio_porcentaje }}%
+                        </h2>
+                        <div class="progress mt-2" style="height: 6px;">
+                            <div class="progress-bar bg-success" role="progressbar" id="kpiBarraCompletitud"
+                                 style="width: {{ metricas.indicadores_trazabilidad.completitud_promedio_porcentaje }}%;"
+                                 aria-valuenow="{{ metricas.indicadores_trazabilidad.completitud_promedio_porcentaje }}"
+                                 aria-valuemin="0" aria-valuemax="100"></div>
+                        </div>
+                        <small class="text-muted d-block mt-1">Ponderación oficial Café Pérgamo</small>
+                    </div>
+                </div>
+
+                <!-- KPI 6: Calidad SCA Promedio -->
+                <div class="col-12 col-sm-6 col-xl-3">
+                    <div class="kpi-card kpi-accent-calidad p-3 h-100">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="text-muted small fw-bold text-uppercase">Calidad SCA en Taza</span>
+                            <div class="kpi-icon-wrapper kpi-icon-calidad">
+                                <i class="bi bi-award-fill"></i>
+                            </div>
+                        </div>
+                        <h2 class="h3 fw-bold text-dark mb-1" id="kpiPuntajeSca">
+                            {{ metricas.indicadores_trazabilidad.puntaje_sca_promedio }} <span class="fs-6 fw-normal text-muted">pts</span>
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            <i class="bi bi-cup-hot text-warning me-1"></i>
+                            <span id="kpiLotesEvaluados">{{ metricas.indicadores_trazabilidad.lotes_con_evaluacion_calidad }}</span> lotes evaluados
+                        </p>
+                    </div>
+                </div>
+
+                <!-- KPI 7: Tasa de Conversión Comercial -->
+                <div class="col-12 col-sm-6 col-xl-3">
+                    <div class="kpi-card kpi-accent-comercial p-3 h-100">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="text-muted small fw-bold text-uppercase">Conversión Comercial</span>
+                            <div class="kpi-icon-wrapper kpi-icon-comercial">
+                                <i class="bi bi-graph-up-arrow"></i>
+                            </div>
+                        </div>
+                        <h2 class="h3 fw-bold text-dark mb-1" id="kpiTasaConversion">
+                            {{ metricas.indicadores_comercializacion.tasa_conversion_porcentaje }}%
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            <i class="bi bi-chat-right-quote text-secondary me-1"></i>
+                            <span id="kpiTotalNegociaciones">{{ metricas.indicadores_comercializacion.embudo_negociaciones.total }}</span> acuerdos iniciados
+                        </p>
+                    </div>
+                </div>
+
+                <!-- KPI 8: Fincas Registradas -->
+                <div class="col-12 col-sm-6 col-xl-3">
+                    <div class="kpi-card kpi-accent-trazabilidad p-3 h-100">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <span class="text-muted small fw-bold text-uppercase">Fincas Monitoreadas</span>
+                            <div class="kpi-icon-wrapper kpi-icon-trazabilidad">
+                                <i class="bi bi-house-door-fill"></i>
+                            </div>
+                        </div>
+                        <h2 class="h3 fw-bold text-dark mb-1" id="kpiTotalFincas">
+                            {{ metricas.resumen_general.total_fincas }}
+                        </h2>
+                        <p class="small text-muted mb-0">
+                            <i class="bi bi-calendar3 text-muted me-1"></i>
+                            <span id="kpiTotalCosechas">{{ metricas.resumen_general.total_cosechas }}</span> cosechas registradas
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Sección de Gráficos Interactivos Chart.js -->
+        <section class="mb-4">
+            <div class="row g-4">
+                <!-- Gráfico 1: Etapas de Beneficio (Dona) -->
+                <div class="col-12 col-lg-6">
+                    <div class="chart-card p-3 p-md-4">
+                        <div class="d-flex align-items-center justify-content-between mb-3">
+                            <div>
+                                <h3 class="h5 fw-bold text-dark mb-0">
+                                    <i class="bi bi-pie-chart-fill text-success me-2"></i>Distribución por Etapa de Beneficio
+                                </h3>
+                                <small class="text-muted">Lotes en Cosecha, Despulpado, Fermentación, Lavado y Secado</small>
+                            </div>
+                        </div>
+                        <div class="chart-container-box">
+                            <canvas id="graficoEtapasBeneficio"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Gráfico 2: Comercialización por Variedad Botánica (Barras) -->
+                <div class="col-12 col-lg-6">
+                    <div class="chart-card p-3 p-md-4">
+                        <div class="d-flex align-items-center justify-content-between mb-3">
+                            <div>
+                                <h3 class="h5 fw-bold text-dark mb-0">
+                                    <i class="bi bi-bar-chart-fill text-danger me-2"></i>Volumen por Variedad Botánica
+                                </h3>
+                                <small class="text-muted">Kilogramos vendidos vs. disponibles en catálogo</small>
+                            </div>
+                        </div>
+                        <div class="chart-container-box">
+                            <canvas id="graficoVariedades"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Gráfico 3: Estados Comerciales de Lotes (Doughnut) -->
+                <div class="col-12 col-lg-6">
+                    <div class="chart-card p-3 p-md-4">
+                        <div class="d-flex align-items-center justify-content-between mb-3">
+                            <div>
+                                <h3 class="h5 fw-bold text-dark mb-0">
+                                    <i class="bi bi-tags-fill text-primary me-2"></i>Estado Comercial de Lotes
+                                </h3>
+                                <small class="text-muted">Proporción de inventario disponible, negociado y vendido</small>
+                            </div>
+                        </div>
+                        <div class="chart-container-box">
+                            <canvas id="graficoEstadosComerciales"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Gráfico 4: Distribución Regional / Top Productores (Barras) -->
+                <div class="col-12 col-lg-6">
+                    <div class="chart-card p-3 p-md-4">
+                        <div class="d-flex align-items-center justify-content-between mb-3">
+                            <div>
+                                <h3 class="h5 fw-bold text-dark mb-0">
+                                    <i class="bi bi-geo-fill text-warning me-2"></i>
+                                    {% if metricas.es_asociacion_o_admin %}Distribución por Municipio{% else %}Volumen por Finca Propia{% endif %}
+                                </h3>
+                                <small class="text-muted">Concentración de volumen y actividad productiva</small>
+                            </div>
+                        </div>
+                        <div class="chart-container-box">
+                            <canvas id="graficoRegional"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Tablas de Desglose Analítico Detallado -->
+        <section class="mb-4">
+            <div class="row g-4">
+                {% if metricas.es_asociacion_o_admin %}
+                <!-- Tabla Desglose Regional por Municipio -->
+                <div class="col-12 col-lg-8">
+                    <div class="chart-card p-3 p-md-4">
+                        <div class="d-flex align-items-center justify-content-between mb-3">
+                            <h3 class="h5 fw-bold text-dark mb-0">
+                                <i class="bi bi-map-fill text-success me-2"></i>Desglose Regional por Municipio
+                            </h3>
+                            <span class="badge bg-light text-dark border">
+                                {{ metricas.distribucion_regional|length }} municipios activos
+                            </span>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-hover align-middle mb-0" id="tablaDesgloseRegional">
+                                <thead class="table-light small text-uppercase">
+                                    <tr>
+                                        <th>Municipio</th>
+                                        <th class="text-center">Lotes</th>
+                                        <th class="text-end">Vol. Producido</th>
+                                        <th class="text-end">Vol. Vendido</th>
+                                        <th class="text-end">Ingresos (COP)</th>
+                                        <th class="text-center">Puntaje SCA</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for r in metricas.distribucion_regional %}
+                                    <tr>
+                                        <td class="fw-semibold">
+                                            <i class="bi bi-geo-alt-fill text-danger me-1"></i>{{ r.municipio }}
+                                        </td>
+                                        <td class="text-center">
+                                            <span class="badge bg-secondary rounded-pill">{{ r.lotes }}</span>
+                                        </td>
+                                        <td class="text-end fw-semibold">{{ r.volumen_total_kg|floatformat:1 }} kg</td>
+                                        <td class="text-end text-success fw-semibold">{{ r.volumen_vendido_kg|floatformat:1 }} kg</td>
+                                        <td class="text-end fw-bold">${{ r.ingresos_totales_cop|floatformat:0 }}</td>
+                                        <td class="text-center">
+                                            {% if r.puntaje_sca_promedio > 0 %}
+                                            <span class="badge bg-warning text-dark">{{ r.puntaje_sca_promedio }} pts</span>
+                                            {% else %}
+                                            <span class="text-muted small">—</span>
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                    {% empty %}
+                                    <tr>
+                                        <td colspan="6" class="text-center py-4 text-muted">
+                                            <i class="bi bi-inbox fs-4 d-block mb-1"></i> No hay lotes registrados para los filtros seleccionados.
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tabla Top Fincas Productoras -->
+                <div class="col-12 col-lg-4">
+                    <div class="chart-card p-3 p-md-4">
+                        <div class="d-flex align-items-center justify-content-between mb-3">
+                            <h3 class="h5 fw-bold text-dark mb-0">
+                                <i class="bi bi-trophy-fill text-warning me-2"></i>Top Predios
+                            </h3>
+                            <span class="badge bg-light text-dark border">Ranking</span>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-hover align-middle mb-0" id="tablaTopFincas">
+                                <thead class="table-light small text-uppercase">
+                                    <tr>
+                                        <th>Finca</th>
+                                        <th class="text-center">Lotes</th>
+                                        <th class="text-end">Volumen</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for f in metricas.indicadores_comercializacion.top_fincas %}
+                                    <tr>
+                                        <td>
+                                            <div class="fw-bold text-truncate" style="max-width: 140px;">{{ f.finca }}</div>
+                                            <small class="text-muted">{{ f.municipio }}</small>
+                                        </td>
+                                        <td class="text-center">
+                                            <span class="badge bg-light text-dark border">{{ f.lotes }}</span>
+                                        </td>
+                                        <td class="text-end fw-semibold">{{ f.volumen_kg|floatformat:1 }} kg</td>
+                                    </tr>
+                                    {% empty %}
+                                    <tr>
+                                        <td colspan="3" class="text-center py-3 text-muted small">Sin registros activos</td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <!-- Vista Productor: Embudo Comercial y Mis Fincas -->
+                <div class="col-12 col-lg-8">
+                    <div class="chart-card p-3 p-md-4">
+                        <div class="d-flex align-items-center justify-content-between mb-3">
+                            <h3 class="h5 fw-bold text-dark mb-0">
+                                <i class="bi bi-funnel-fill text-danger me-2"></i>Embudo de Negociaciones y Acuerdos
+                            </h3>
+                            <span class="badge bg-light text-dark border">
+                                {{ metricas.indicadores_comercializacion.embudo_negociaciones.total }} acuerdos totales
+                            </span>
+                        </div>
+                        <div class="row g-3">
+                            <div class="col-6 col-md-3 text-center p-3 border-end">
+                                <span class="d-block text-muted small text-uppercase fw-bold">Solicitadas</span>
+                                <span class="h4 fw-bold text-primary" id="embudoSolicitadas">{{ metricas.indicadores_comercializacion.embudo_negociaciones.solicitada }}</span>
+                            </div>
+                            <div class="col-6 col-md-3 text-center p-3 border-end">
+                                <span class="d-block text-muted small text-uppercase fw-bold">En Trámite</span>
+                                <span class="h4 fw-bold text-warning" id="embudoEnNegociacion">{{ metricas.indicadores_comercializacion.embudo_negociaciones.en_negociacion }}</span>
+                            </div>
+                            <div class="col-6 col-md-3 text-center p-3 border-end">
+                                <span class="d-block text-muted small text-uppercase fw-bold">Aceptadas</span>
+                                <span class="h4 fw-bold text-success" id="embudoAceptadas">{{ metricas.indicadores_comercializacion.embudo_negociaciones.aceptada }}</span>
+                            </div>
+                            <div class="col-6 col-md-3 text-center p-3">
+                                <span class="d-block text-muted small text-uppercase fw-bold">Rechazadas</span>
+                                <span class="h4 fw-bold text-danger" id="embudoRechazadas">{{ metricas.indicadores_comercializacion.embudo_negociaciones.rechazada }}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-12 col-lg-4">
+                    <div class="chart-card p-3 p-md-4">
+                        <div class="d-flex align-items-center justify-content-between mb-3">
+                            <h3 class="h5 fw-bold text-dark mb-0">
+                                <i class="bi bi-house-check-fill text-success me-2"></i>Mis Predios
+                            </h3>
+                            <a href="{% url 'mis_fincas' %}" class="btn btn-outline-pergamo btn-sm">Ver todas</a>
+                        </div>
+                        <ul class="list-group list-group-flush">
+                            {% for f in metricas.indicadores_comercializacion.top_fincas %}
+                            <li class="list-group-item d-flex justify-content-between align-items-center px-0">
+                                <div>
+                                    <span class="fw-semibold">{{ f.finca }}</span>
+                                    <small class="d-block text-muted">{{ f.municipio }}</small>
+                                </div>
+                                <span class="badge bg-secondary rounded-pill">{{ f.volumen_kg|floatformat:1 }} kg</span>
+                            </li>
+                            {% empty %}
+                            <li class="list-group-item text-muted text-center py-3">No hay predios asociados.</li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </section>
+    </div>
+</div>
+
+<!-- Datos iniciales serializados por Django para inicialización inmediata de Chart.js -->
+{{ metricas|json_script:"datos-dashboard-inicial" }}
+{% endblock %}
+
+{% block extra_js %}
+<!-- Librería oficial Chart.js para visualizaciones analíticas -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<!-- Controlador interactivo del Dashboard -->
+<script src="{% static 'js/dashboard_indicadores.js' %}"></script>
+{% endblock %}
