@@ -1104,6 +1104,124 @@ def obtener_requisitos_minimos_trazabilidad_lote() -> tuple:
     return tuple(dict(requisito) for requisito in REQUISITOS_MINIMOS_TRAZABILIDAD_LOTE)
 
 
+def evaluar_completitud_trazabilidad_lote(lote_or_id: Union[Lote, int, str]) -> Dict[str, Any]:
+    """
+    HU28-ST5 (SCRUM-303): evaluador reutilizable de completitud mínima
+    de trazabilidad y calidad antes de publicar un lote.
+
+    Reutiliza la ponderación de ficha digital existente y la lista central
+    HU28-ST2, devolviendo el porcentaje, faltantes estructurados y el
+    indicador que determina si la publicación puede permitirse.
+    """
+    if isinstance(lote_or_id, Lote):
+        lote = lote_or_id
+    else:
+        qs = Lote.objects.select_related(
+            "cosecha",
+            "cosecha__finca",
+            "cosecha__finca__municipio",
+            "cosecha__variedad",
+            "proceso_beneficio",
+            "estado_lote",
+        )
+        try:
+            if isinstance(lote_or_id, int) or str(lote_or_id).isdigit():
+                lote = qs.get(pk=int(lote_or_id))
+            else:
+                lote = qs.get(codigo=str(lote_or_id).strip().upper())
+        except (Lote.DoesNotExist, ValueError, TypeError):
+            raise ValidationError({"lote": "El lote indicado no existe."})
+
+    cosecha = getattr(lote, "cosecha", None)
+    finca = getattr(cosecha, "finca", None) if cosecha else None
+
+    try:
+        municipio = finca.municipio if finca else None
+    except ObjectDoesNotExist:
+        municipio = None
+
+    etapas = list(
+        lote.etapas_beneficio.filter(activo=True).values(
+            "etapa",
+            "fecha",
+            "observaciones",
+        )
+    )
+
+    try:
+        calidad = lote.caracteristicas_calidad
+    except CaracteristicasCalidad.DoesNotExist:
+        calidad = None
+
+    calidad_info = None
+    if calidad is not None:
+        calidad_info = {
+            "humedad": calidad.humedad,
+            "merma": calidad.merma,
+            "puntaje_taza": calidad.puntaje_taza,
+            "perfil_sensorial": calidad.perfil_sensorial,
+            "observaciones": calidad.observaciones,
+            "humedad_pct": calidad.humedad,
+            "puntaje_sca": calidad.puntaje_taza,
+        }
+
+    evaluacion_ficha = evaluar_consistencia_y_completitud_lote(
+        lote=lote,
+        finca=finca,
+        cosecha=cosecha,
+        proceso=lote.proceso_beneficio,
+        etapas_beneficio=etapas,
+        calidad_info=calidad_info,
+    )
+
+    faltantes = []
+
+    def agregar_faltante(codigo):
+        for requisito in REQUISITOS_MINIMOS_TRAZABILIDAD_LOTE:
+            if requisito["codigo"] == codigo:
+                faltantes.append(dict(requisito))
+                return
+
+    if not lote.activo:
+        agregar_faltante("lote_activo")
+    if lote.cantidad is None or lote.cantidad <= Decimal("0.00"):
+        agregar_faltante("cantidad_disponible")
+    if not cosecha or not cosecha.activo:
+        agregar_faltante("cosecha_activa")
+    if not finca or not finca.activo:
+        agregar_faltante("origen_finca_activa")
+    if finca and not municipio:
+        agregar_faltante("municipio_origen")
+    if not cosecha or not getattr(cosecha, "variedad", None):
+        agregar_faltante("variedad_cosecha")
+    if not lote.proceso_beneficio:
+        agregar_faltante("proceso_beneficio")
+    if not etapas:
+        agregar_faltante("etapas_beneficio")
+    if calidad is None:
+        agregar_faltante("registro_calidad")
+        agregar_faltante("datos_fisicos_sensoriales")
+    elif calidad.puntaje_taza is None and calidad.humedad is None:
+        agregar_faltante("datos_fisicos_sensoriales")
+
+    cumple = len(faltantes) == 0 and evaluacion_ficha["es_consistente"]
+
+    return {
+        "lote_id": lote.pk,
+        "lote_codigo": lote.codigo,
+        "porcentaje": evaluacion_ficha["porcentaje"],
+        "nivel_completitud": evaluacion_ficha["nivel"],
+        "color_nivel": evaluacion_ficha["color_nivel"],
+        "es_consistente": evaluacion_ficha["es_consistente"],
+        "cumple_requisitos_minimos": cumple,
+        "publicacion_permitida": cumple,
+        "faltantes": faltantes,
+        "campos_faltantes": [faltante["mensaje"] for faltante in faltantes],
+        "advertencias": evaluacion_ficha["advertencias"],
+        "campos_completos": evaluacion_ficha["campos_completos"],
+    }
+
+
 def validar_lote_para_publicacion(lote: Lote) -> tuple[bool, list[str]]:
     """
     Evalúa si un lote cumple con la información mínima requerida para ser
@@ -1159,6 +1277,9 @@ def validar_lote_para_publicacion(lote: Lote) -> tuple[bool, list[str]]:
 
     if not lote.proceso_beneficio:
         errores.append("El lote debe tener asignado un proceso de beneficio (Lavado, Natural, Honey, etc.).")
+
+    if not lote.etapas_beneficio.filter(activo=True).exists():
+        errores.append("El lote debe tener al menos una etapa de beneficio registrada.")
 
     # Validación de calidad (HU-15)
     calidad = getattr(lote, "caracteristicas_calidad", None)

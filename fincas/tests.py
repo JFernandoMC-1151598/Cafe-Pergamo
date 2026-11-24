@@ -97,6 +97,7 @@ from fincas.services import (
     registrar_manifestacion_interes,
     validar_lote_para_publicacion,
     obtener_requisitos_minimos_trazabilidad_lote,
+    evaluar_completitud_trazabilidad_lote,
     actualizar_visibilidad_codigo_qr,
     actualizar_lote,
     asociar_codigo_qr_a_lote,
@@ -4955,6 +4956,11 @@ class TestScrum241ValidacionInformacionMinimaPublicacion(TestCase):
             cantidad=Decimal("150.00"),
             proceso_beneficio=self.proceso,
             activo=True,
+        )
+        EtapaBeneficio.objects.create(
+            lote=self.lote,
+            etapa=EtapaBeneficio.TipoEtapa.DESPULPADO,
+            fecha=date(2026, 7, 16),
         )
         self.calidad = CaracteristicasCalidad.objects.create(
             lote=self.lote,
@@ -13130,5 +13136,93 @@ class HU28ST2RequisitosTrazabilidadTests(TestCase):
         self.assertIsInstance(requisitos, tuple)
         with self.assertRaises(AttributeError):
             requisitos.append({"codigo": "extra"})
+
+
+class HU28ST5EvaluadorCompletitudTrazabilidadTests(TestCase):
+    """HU28-ST5 / SCRUM-303: evaluación reutilizable de trazabilidad del lote."""
+
+    def setUp(self):
+        self.productor_id = uuid.uuid4()
+        self.municipio = Municipio.objects.create(
+            codigo="HU28-ST5-MUN",
+            nombre="Municipio HU28 ST5",
+            departamento="Norte de Santander",
+        )
+        self.finca = Finca.objects.create(
+            nombre="Finca Evaluador HU28",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+            latitud=Decimal("7.900000"),
+            longitud=Decimal("-72.500000"),
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo HU28",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="HU28-LAVADO",
+            nombre="Lavado",
+            activo=True,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 11, 20),
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-HU28-ST5",
+            cosecha=self.cosecha,
+            cantidad=Decimal("50.00"),
+            proceso_beneficio=self.proceso,
+            activo=True,
+        )
+
+    def test_lote_sin_beneficio_niccalidad_detecta_campos_faltantes(self):
+        evaluacion = evaluar_completitud_trazabilidad_lote(self.lote)
+
+        self.assertFalse(evaluacion["cumple_requisitos_minimos"])
+        self.assertFalse(evaluacion["publicacion_permitida"])
+        codigos = {faltante["codigo"] for faltante in evaluacion["faltantes"]}
+        self.assertIn("etapas_beneficio", codigos)
+        self.assertIn("registro_calidad", codigos)
+
+    def test_lote_sin_calidad_pero_con_etapas_permite_detectarla(self):
+        EtapaBeneficio.objects.create(
+            lote=self.lote,
+            etapa=EtapaBeneficio.TipoEtapa.DESPULPADO,
+            fecha=date(2026, 11, 21),
+        )
+
+        evaluacion = evaluar_completitud_trazabilidad_lote(self.lote)
+
+        codigos = {faltante["codigo"] for faltante in evaluacion["faltantes"]}
+        self.assertNotIn("etapas_beneficio", codigos)
+        self.assertIn("registro_calidad", codigos)
+        self.assertIn("datos_fisicos_sensoriales", codigos)
+
+    def test_lote_completo_aprueba_requisitos_y_alcanza_100(self):
+        EtapaBeneficio.objects.create(
+            lote=self.lote,
+            etapa=EtapaBeneficio.TipoEtapa.DESPULPADO,
+            fecha=date(2026, 11, 21),
+        )
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            humedad=Decimal("11.50"),
+            puntaje_taza=Decimal("86.50"),
+            perfil_sensorial="Chocolate y frutos rojos",
+        )
+
+        evaluacion = evaluar_completitud_trazabilidad_lote(self.lote)
+
+        self.assertTrue(evaluacion["cumple_requisitos_minimos"])
+        self.assertTrue(evaluacion["publicacion_permitida"])
+        self.assertEqual(evaluacion["porcentaje"], 100)
+        self.assertEqual(evaluacion["faltantes"], [])
 
 
