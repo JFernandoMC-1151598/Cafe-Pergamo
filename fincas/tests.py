@@ -12793,6 +12793,233 @@ class TestScrum285InterfazDashboardWeb(TestCase):
         self.assertContains(resp, reverse("dashboard_indicadores"))
 
 
+class TestScrum289SuiteIntegralPruebasQAIndicadores(TestCase):
+    """
+    Subtarea: SCRUM-289 / HU26-ST5: Implementar suite integral de pruebas automatizadas y QA.
+    Certifica la trazabilidad técnica de extremo a extremo, resiliencia ante estados parciales,
+    consistencia cruzada entre API y Web, y aislamiento multi-inquilino.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_dashboard_web = reverse("dashboard_indicadores")
+        self.url_dashboard_api = reverse("api_v1_dashboard_indicadores")
+
+        self.productor_a = uuid.uuid4()
+        self.productor_b = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.mun_toledo = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-TOL-QA",
+            nombre="Toledo",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.mun_chinacota = Municipio.objects.filter(
+            nombre="Chinácota", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-CHI-QA",
+            nombre="Chinácota",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.var_geisha = VariedadCafe.objects.create(
+            nombre="Geisha QA",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.var_castillo = VariedadCafe.objects.create(
+            nombre="Castillo QA",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso_lavado = ProcesoBeneficio.objects.create(
+            codigo="LAV-QA-01",
+            nombre="Lavado QA",
+            orden=1,
+            activo=True,
+        )
+
+        self.proceso_natural = ProcesoBeneficio.objects.create(
+            codigo="NAT-QA-02",
+            nombre="Natural QA",
+            orden=2,
+            activo=True,
+        )
+
+        # Finca A (Productor A en Toledo)
+        self.finca_a = Finca.objects.create(
+            nombre="Finca El Roble QA",
+            productor_id=self.productor_a,
+            municipio=self.mun_toledo,
+            activo=True,
+        )
+
+        # Finca B (Productor B en Chinácota)
+        self.finca_b = Finca.objects.create(
+            nombre="Finca La Cabaña QA",
+            productor_id=self.productor_b,
+            municipio=self.mun_chinacota,
+            activo=True,
+        )
+
+        # Cosechas
+        self.cosecha_a = Cosecha.objects.create(
+            finca=self.finca_a,
+            variedad=self.var_geisha,
+            fecha_cosecha=date(2026, 11, 1),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        self.cosecha_b = Cosecha.objects.create(
+            finca=self.finca_b,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 2),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        # Lotes
+        self.lote_a = Lote.objects.create(
+            cosecha=self.cosecha_a,
+            codigo="LOT-QA-GEISHA-01",
+            cantidad=Decimal("1000.00"),
+            proceso_beneficio=self.proceso_lavado,
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        self.lote_b = Lote.objects.create(
+            cosecha=self.cosecha_b,
+            codigo="LOT-QA-CASTILLO-02",
+            cantidad=Decimal("500.00"),
+            proceso_beneficio=self.proceso_natural,
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+    def test_qa_flujo_integral_trazabilidad_y_comercializacion(self):
+        """
+        Certifica el ciclo de vida completo: registro de etapas de beneficio, evaluación
+        de calidad SCA, negociación y venta liquidada, verificando su impacto en el Dashboard.
+        """
+        from fincas.services import obtener_metricas_dashboard
+        # 1. Registrar etapa de beneficio
+        EtapaBeneficio.objects.create(
+            lote=self.lote_a,
+            etapa=EtapaBeneficio.TipoEtapa.FERMENTACION,
+            fecha=date(2026, 11, 3),
+        )
+
+        # 2. Registrar evaluación sensorial SCA
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote_a,
+            puntaje_taza=Decimal("87.50"),
+            humedad=Decimal("11.50"),
+            perfil_sensorial="Jazmín, bergamota, miel y acidez brillante",
+        )
+
+        # 3. Negociación y Venta
+        negociacion = NegociacionLote.objects.create(
+            lote=self.lote_a,
+            comprador_id=self.comprador_id,
+            cantidad_kg=Decimal("600.00"),
+            precio_propuesto_por_kg=Decimal("30000.00"),
+            precio_acordado_por_kg=Decimal("30000.00"),
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+        )
+
+        VentaLote.objects.create(
+            lote=self.lote_a,
+            negociacion=negociacion,
+            comprador_id=self.comprador_id,
+            cantidad_kg=Decimal("600.00"),
+            precio_unitario_kg=Decimal("30000.00"),
+            precio_total=Decimal("18000000.00"),
+            codigo_comprobante="VTA-QA-0001",
+        )
+
+        # Consultar métricas del Productor A
+        metricas_a = obtener_metricas_dashboard(usuario=self.productor_a, rol_override="PRODUCTOR")
+        self.assertEqual(metricas_a["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(metricas_a["indicadores_trazabilidad"]["puntaje_sca_promedio"], 87.5)
+        self.assertEqual(metricas_a["indicadores_trazabilidad"]["lotes_con_evaluacion_calidad"], 1)
+        self.assertEqual(metricas_a["indicadores_trazabilidad"]["etapas_beneficio"]["fermentacion"], 1)
+        self.assertEqual(metricas_a["indicadores_comercializacion"]["volumen_vendido_kg"], 600.0)
+        self.assertEqual(metricas_a["indicadores_comercializacion"]["ingresos_totales_cop"], 18000000.0)
+        self.assertEqual(metricas_a["indicadores_comercializacion"]["precio_promedio_kg_cop"], 30000.0)
+        self.assertEqual(metricas_a["indicadores_comercializacion"]["tasa_conversion_porcentaje"], 100.0)
+
+    def test_qa_aislamiento_estricto_entre_productores_y_consolidacion_asociacion(self):
+        """
+        Certifica que el Productor A no acceda a información del Productor B,
+        y que la Asociación obtenga el consolidado macro de ambos municipios.
+        """
+        # Productor A consulta
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_a)
+        resp_a = self.client.get(self.url_dashboard_api)
+        self.assertEqual(resp_a.status_code, 200)
+        self.assertEqual(resp_a.data["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(resp_a.data["indicadores_comercializacion"]["volumen_total_producido_kg"], 1000.0)
+
+        # Productor B consulta
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_b)
+        resp_b = self.client.get(self.url_dashboard_api)
+        self.assertEqual(resp_b.status_code, 200)
+        self.assertEqual(resp_b.data["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(resp_b.data["indicadores_comercializacion"]["volumen_total_producido_kg"], 500.0)
+
+        # Asociación consulta
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_a)
+        resp_asoc = self.client.get(self.url_dashboard_api)
+        self.assertEqual(resp_asoc.status_code, 200)
+        self.assertTrue(resp_asoc.data["es_asociacion_o_admin"])
+        # Debe sumar ambos lotes (1000 + 500 = 1500)
+        self.assertEqual(resp_asoc.data["resumen_general"]["total_lotes"], 2)
+        self.assertEqual(resp_asoc.data["indicadores_comercializacion"]["volumen_total_producido_kg"], 1500.0)
+        self.assertEqual(len(resp_asoc.data["distribucion_regional"]), 2)
+
+    def test_qa_consistencia_filtros_entre_api_y_vista_web(self):
+        """
+        Certifica que la vista web y el endpoint REST devuelvan exactamente las mismas
+        métricas ante idénticos parámetros de filtro.
+        """
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_a)
+
+        params = f"?municipio_id={self.mun_toledo.id}&variedad_id={self.var_geisha.id}"
+        resp_api = self.client.get(f"{self.url_dashboard_api}{params}")
+        resp_web = self.client.get(f"{self.url_dashboard_web}{params}")
+
+        self.assertEqual(resp_api.status_code, 200)
+        self.assertEqual(resp_web.status_code, 200)
+
+        metricas_api = resp_api.data
+        metricas_web = resp_web.context["metricas"]
+
+        self.assertEqual(
+            metricas_api["resumen_general"]["total_lotes"],
+            metricas_web["resumen_general"]["total_lotes"],
+        )
+        self.assertEqual(
+            metricas_api["indicadores_comercializacion"]["volumen_total_producido_kg"],
+            metricas_web["indicadores_comercializacion"]["volumen_total_producido_kg"],
+        )
+        self.assertEqual(
+            metricas_api["indicadores_trazabilidad"]["completitud_promedio_porcentaje"],
+            metricas_web["indicadores_trazabilidad"]["completitud_promedio_porcentaje"],
+        )
+
+
+
 
 
 
