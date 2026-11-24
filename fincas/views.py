@@ -117,6 +117,7 @@ from .services import (
     sincronizar_o_generar_qr_lote,
     toggle_estado_municipio,
     validar_lote_para_publicacion,
+    construir_alerta_trazabilidad_lote,
     verificar_permiso_visibilidad_qr,
 )
 from usuarios.models import Usuario
@@ -1285,6 +1286,7 @@ def mis_lotes_view(request):
     lotes_info = []
     for lote in lotes:
         es_valido, errores_val = validar_lote_para_publicacion(lote)
+        alerta_trazabilidad = construir_alerta_trazabilidad_lote(lote)
         qr_obj = getattr(lote, "codigo_qr", None)
         if not qr_obj:
             try:
@@ -1296,6 +1298,7 @@ def mis_lotes_view(request):
             "codigo_qr": qr_obj,
             "puede_publicar": es_valido,
             "errores_publicacion": errores_val,
+            "alerta_trazabilidad": alerta_trazabilidad,
         })
 
     return render(
@@ -2078,14 +2081,17 @@ def api_validar_publicacion_lote_view(request, pk):
             status=status.HTTP_403_FORBIDDEN,
         )
 
-    puede_publicar, errores = validar_lote_para_publicacion(lote)
+    alerta = construir_alerta_trazabilidad_lote(lote)
     return Response(
         {
             "lote_id": lote.id,
             "codigo": lote.codigo,
             "publicado_en_catalogo": lote.publicado_en_catalogo,
-            "puede_publicar": puede_publicar,
-            "errores": errores,
+            "puede_publicar": alerta["puede_publicar"],
+            "porcentaje": alerta["porcentaje"],
+            "tipo": alerta["tipo"],
+            "errores": alerta["campos_faltantes"],
+            "alertas": alerta["alertas"],
         },
         status=status.HTTP_200_OK,
     )

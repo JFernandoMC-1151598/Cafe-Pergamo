@@ -98,6 +98,7 @@ from fincas.services import (
     validar_lote_para_publicacion,
     obtener_requisitos_minimos_trazabilidad_lote,
     evaluar_completitud_trazabilidad_lote,
+    construir_alerta_trazabilidad_lote,
     actualizar_visibilidad_codigo_qr,
     actualizar_lote,
     asociar_codigo_qr_a_lote,
@@ -13224,5 +13225,85 @@ class HU28ST5EvaluadorCompletitudTrazabilidadTests(TestCase):
         self.assertTrue(evaluacion["publicacion_permitida"])
         self.assertEqual(evaluacion["porcentaje"], 100)
         self.assertEqual(evaluacion["faltantes"], [])
+
+
+class HU28ST3ContenidoAlertaTrazabilidadTests(TestCase):
+    """HU28-ST3 / SCRUM-301: payload de alerta y enlaces de captura."""
+
+    def setUp(self):
+        self.municipio = Municipio.objects.create(
+            codigo="HU28-ST3-MUN",
+            nombre="Municipio HU28 ST3",
+            departamento="Norte de Santander",
+        )
+        self.finca = Finca.objects.create(
+            nombre="Finca Alerta HU28",
+            productor_id=uuid.uuid4(),
+            municipio=self.municipio,
+            activo=True,
+            latitud=Decimal("7.900000"),
+            longitud=Decimal("-72.500000"),
+        )
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo HU28 ST3",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="HU28-ST3-LAVADO",
+            nombre="Lavado",
+            activo=True,
+        )
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 11, 20),
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-HU28-ST3",
+            cosecha=self.cosecha,
+            cantidad=Decimal("50.00"),
+            proceso_beneficio=self.proceso,
+            activo=True,
+        )
+
+    def test_alerta_lista_etapas_calidad_mensajes_y_enlaces(self):
+        alerta = construir_alerta_trazabilidad_lote(self.lote)
+
+        self.assertEqual(alerta["tipo"], "TRAZABILIDAD_INCOMPLETA")
+        self.assertFalse(alerta["puede_publicar"])
+        self.assertIn("no puede publicarse", alerta["mensaje"])
+        codigos = {item["codigo"] for item in alerta["alertas"]}
+        self.assertIn("etapas_beneficio", codigos)
+        self.assertIn("registro_calidad", codigos)
+        self.assertIn("datos_fisicos_sensoriales", codigos)
+
+        for item in alerta["alertas"]:
+            self.assertTrue(item["mensaje"])
+            self.assertTrue(item["seccion"])
+            self.assertTrue(item["campo"])
+            self.assertTrue(item["enlace_captura"].startswith("/"))
+
+    def test_alerta_completa_no_reporta_campos_faltantes(self):
+        EtapaBeneficio.objects.create(
+            lote=self.lote,
+            etapa=EtapaBeneficio.TipoEtapa.DESPULPADO,
+            fecha=date(2026, 11, 21),
+        )
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            humedad=Decimal("11.50"),
+            puntaje_taza=Decimal("86.50"),
+        )
+
+        alerta = construir_alerta_trazabilidad_lote(self.lote)
+
+        self.assertEqual(alerta["tipo"], "TRAZABILIDAD_COMPLETA")
+        self.assertTrue(alerta["puede_publicar"])
+        self.assertEqual(alerta["alertas"], [])
+        self.assertEqual(alerta["campos_faltantes"], [])
 
 

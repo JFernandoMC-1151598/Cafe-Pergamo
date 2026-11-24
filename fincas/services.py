@@ -25,6 +25,7 @@ import uuid
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import transaction
 from django.db.models import Count, Prefetch, Q
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 import qrcode
@@ -1222,6 +1223,59 @@ def evaluar_completitud_trazabilidad_lote(lote_or_id: Union[Lote, int, str]) -> 
     }
 
 
+def construir_alerta_trazabilidad_lote(lote_or_id: Union[Lote, int, str]) -> Dict[str, Any]:
+    """
+    HU28-ST3 (SCRUM-301): transforma la evaluación técnica en una alerta
+    consumible por la interfaz, con mensaje, sección, campo y enlace directo
+    hacia el formulario necesario para completar el dato.
+    """
+    evaluacion = evaluar_completitud_trazabilidad_lote(lote_or_id)
+    lote_id = evaluacion["lote_id"]
+
+    alertas = []
+    for faltante in evaluacion["faltantes"]:
+        ruta_captura = faltante["ruta_captura"]
+        kwargs = None
+        if ruta_captura in ("lote_detalle", "lote_calidad", "lote_etapa_registro", "lote_registro"):
+            kwargs = {"pk": lote_id}
+        if ruta_captura == "lote_registro":
+            enlace = reverse("lote_registro")
+        elif ruta_captura in ("lote_calidad", "lote_etapa_registro", "lote_detalle"):
+            enlace = reverse(ruta_captura, kwargs=kwargs)
+        elif ruta_captura in ("finca_registro", "cosecha_registro"):
+            enlace = reverse(ruta_captura)
+        else:
+            enlace = reverse("lote_detalle", kwargs={"pk": lote_id})
+
+        alertas.append({
+            "codigo": faltante["codigo"],
+            "seccion": faltante["seccion"],
+            "campo": faltante["campo"],
+            "mensaje": faltante["mensaje"],
+            "enlace_captura": enlace,
+            "obligatorio": faltante["obligatorio"],
+        })
+
+    return {
+        "lote_id": lote_id,
+        "lote_codigo": evaluacion["lote_codigo"],
+        "tipo": "TRAZABILIDAD_INCOMPLETA" if alertas else "TRAZABILIDAD_COMPLETA",
+        "titulo": (
+            "Información de trazabilidad incompleta"
+            if alertas
+            else "Trazabilidad completa"
+        ),
+        "mensaje": (
+            "El lote no puede publicarse hasta completar los datos indicados."
+            if alertas
+            else "El lote cumple los requisitos mínimos de trazabilidad y calidad."
+        ),
+        "porcentaje": evaluacion["porcentaje"],
+        "puede_publicar": evaluacion["publicacion_permitida"],
+        "alertas": alertas,
+        "campos_faltantes": [alerta["mensaje"] for alerta in alertas],
+        "advertencias": evaluacion["advertencias"],
+    }
 def validar_lote_para_publicacion(lote: Lote) -> tuple[bool, list[str]]:
     """
     Evalúa si un lote cumple con la información mínima requerida para ser
