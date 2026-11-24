@@ -12522,5 +12522,154 @@ class TestScrum288ConsultasAgregacionYFiltrosAnaliticos(TestCase):
         self.assertTrue(len(opciones["estados_comerciales"]) > 0)
 
 
+class TestScrum287EndpointApiIndicadoresDashboard(TestCase):
+    """
+    Pruebas automatizadas de integración para los endpoints REST del Dashboard
+    de Indicadores (HU-26 / SCRUM-287 / HU26-ST4):
+    - GET /api/v1/indicadores/dashboard/
+    - GET /api/v1/indicadores/opciones-filtro/
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_dashboard = reverse("api_v1_dashboard_indicadores")
+        self.url_opciones = reverse("api_v1_opciones_filtro_dashboard")
+
+        self.productor_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-TOL-ST4",
+            nombre="Toledo",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo ST4",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.finca = Finca.objects.create(
+            nombre="Finca API Indicadores",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 11, 14),
+            cantidad_total=Decimal("600.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        self.lote = Lote.objects.create(
+            cosecha=self.cosecha,
+            codigo="LOTE-API-IND-01",
+            cantidad=Decimal("600.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+    def _autenticar(self, usuario_id, rol="PRODUCTOR"):
+        session = self.client.session
+        session["usuario_id"] = str(usuario_id)
+        session["rol"] = rol
+        session["correo"] = f"{rol.lower()}@cafepergamo.com"
+        session.save()
+
+    def test_api_dashboard_sin_autenticacion_401_unauthorized(self):
+        """
+        Petición GET anónima a /api/v1/indicadores/dashboard/ responde 401 Unauthorized.
+        """
+        resp = self.client.get(self.url_dashboard)
+        self.assertEqual(resp.status_code, 401)
+        self.assertIn("error", resp.data)
+
+    def test_api_dashboard_rol_sin_permiso_403_forbidden(self):
+        """
+        Petición con rol sin el permiso 'indicadores.ver_dashboard' (ej. COMPRADOR) responde 403.
+        """
+        self._autenticar(self.comprador_id, rol="COMPRADOR")
+        resp = self.client.get(self.url_dashboard)
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("permisos", resp.data["error"])
+
+    def test_api_dashboard_asociacion_200_ok(self):
+        """
+        Usuario con rol ASOCIACION recibe 200 OK con todas las secciones de analítica macro.
+        """
+        self._autenticar(self.productor_id, rol="ASOCIACION")
+        resp = self.client.get(self.url_dashboard)
+        self.assertEqual(resp.status_code, 200)
+
+        data = resp.data
+        self.assertTrue(data["es_asociacion_o_admin"])
+        self.assertIn("resumen_general", data)
+        self.assertIn("indicadores_trazabilidad", data)
+        self.assertIn("indicadores_comercializacion", data)
+        self.assertIn("volumen_por_variedad", data)
+        self.assertIn("top_fincas", data)
+        self.assertIn("distribucion_regional", data)
+
+    def test_api_dashboard_productor_200_ok_con_aislamiento(self):
+        """
+        Usuario con rol PRODUCTOR recibe 200 OK con sus datos aislados.
+        """
+        self._autenticar(self.productor_id, rol="PRODUCTOR")
+        resp = self.client.get(self.url_dashboard)
+        self.assertEqual(resp.status_code, 200)
+
+        data = resp.data
+        self.assertFalse(data["es_asociacion_o_admin"])
+        self.assertEqual(data["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(data["indicadores_comercializacion"]["volumen_total_producido_kg"], 600.0)
+
+    def test_api_dashboard_filtros_query_params(self):
+        """
+        Valida que los filtros pasados en la query string (?municipio_id=...) se apliquen.
+        """
+        self._autenticar(self.productor_id, rol="ASOCIACION")
+
+        # Filtro con el municipio de la finca
+        resp_ok = self.client.get(f"{self.url_dashboard}?municipio_id={self.municipio.pk}")
+        self.assertEqual(resp_ok.status_code, 200)
+        self.assertEqual(resp_ok.data["resumen_general"]["total_lotes"], 1)
+
+        # Filtro con municipio inexistente o sin fincas
+        resp_vacio = self.client.get(f"{self.url_dashboard}?municipio_id=999999")
+        self.assertEqual(resp_vacio.status_code, 200)
+        self.assertEqual(resp_vacio.data["resumen_general"]["total_lotes"], 0)
+
+    def test_api_opciones_filtro_sin_autenticacion_401(self):
+        """
+        Petición anónima a /api/v1/indicadores/opciones-filtro/ responde 401.
+        """
+        resp = self.client.get(self.url_opciones)
+        self.assertEqual(resp.status_code, 401)
+
+    def test_api_opciones_filtro_exitoso_200_ok(self):
+        """
+        Petición autenticada a /api/v1/indicadores/opciones-filtro/ responde 200 OK con catálogos.
+        """
+        self._autenticar(self.productor_id, rol="PRODUCTOR")
+        resp = self.client.get(self.url_opciones)
+        self.assertEqual(resp.status_code, 200)
+
+        data = resp.data
+        self.assertIn("municipios", data)
+        self.assertIn("fincas", data)
+        self.assertIn("variedades", data)
+        self.assertIn("estados_comerciales", data)
+        self.assertTrue(len(data["fincas"]) > 0)
+
+
 
 

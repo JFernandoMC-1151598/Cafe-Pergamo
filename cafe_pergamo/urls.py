@@ -18,7 +18,9 @@ from django.contrib import admin
 from django.urls import path, include
 from fincas.views import (
     api_consultar_ficha_desde_qr_view,
+    api_dashboard_indicadores_view,
     api_detalle_venta_view,
+    api_opciones_filtro_dashboard_view,
     api_registrar_venta_view,
     escanear_qr_web_view,
     ficha_digital_web_view,
@@ -34,5 +36,7 @@ urlpatterns = [
     path('api/v1/qr/<str:identificador>/', api_consultar_ficha_desde_qr_view, name='api_v1_qr_root'),
     path('api/v1/ventas/', api_registrar_venta_view, name='api_v1_ventas_root'),
     path('api/v1/ventas/<str:codigo_comprobante>/', api_detalle_venta_view, name='api_v1_venta_detalle_root'),
+    path('api/v1/indicadores/dashboard/', api_dashboard_indicadores_view, name='api_v1_dashboard_indicadores_root'),
+    path('api/v1/indicadores/opciones-filtro/', api_opciones_filtro_dashboard_view, name='api_v1_opciones_filtro_dashboard_root'),
     path('admin/', admin.site.urls),
 ]
