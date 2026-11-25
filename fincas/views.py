@@ -1980,10 +1980,22 @@ def api_publicar_lote_view(request, pk):
         if "lote" in msg_dict:
             return Response({"error": msg_dict["lote"][0]}, status=status.HTTP_404_NOT_FOUND)
         if "publicacion" in msg_dict:
+            lote = Lote.objects.select_related(
+                "cosecha",
+                "cosecha__finca",
+                "cosecha__finca__municipio",
+                "cosecha__variedad",
+                "proceso_beneficio",
+            ).get(pk=pk)
+            alerta = construir_alerta_trazabilidad_lote(lote)
             return Response(
                 {
                     "error": "El lote no cumple con la información mínima requerida para publicarse.",
                     "detalles": msg_dict["publicacion"],
+                    "tipo": "TRAZABILIDAD_INCOMPLETA",
+                    "porcentaje": alerta["porcentaje"],
+                    "alertas": alerta["alertas"],
+                    "puede_publicar": False,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -2152,6 +2164,7 @@ def detalle_lote_view(request, pk):
         lote=lote,
         productor_id=productor_id,
     )
+    alerta_trazabilidad = construir_alerta_trazabilidad_lote(lote)
 
     return render(
         request,
@@ -2161,6 +2174,7 @@ def detalle_lote_view(request, pk):
             "codigo_qr": qr_obj,
             "etapas": etapas,
             "historial_comercial": historial_comercial["eventos"],
+            "alerta_trazabilidad": alerta_trazabilidad,
         },
     )
 

@@ -81,6 +81,36 @@
                 </div>
             </div>
 
+            <!-- Alerta de trazabilidad incompleta (HU28-ST1) -->
+            {% if not alerta_trazabilidad.puede_publicar %}
+            <div class="card border-warning shadow-sm rounded-4 overflow-hidden mb-4" id="alerta-trazabilidad">
+                <div class="card-header bg-warning-subtle border-bottom border-warning p-4">
+                    <h2 class="h5 mb-0 fw-bold text-dark">
+                        <i class="bi bi-shield-exclamation text-warning me-2"></i>{{ alerta_trazabilidad.titulo }}
+                    </h2>
+                </div>
+                <div class="card-body p-4">
+                    <p class="small text-secondary mb-3">{{ alerta_trazabilidad.mensaje }}</p>
+                    <ul class="list-group list-group-flush mb-3">
+                        {% for alerta in alerta_trazabilidad.alertas %}
+                        <li class="list-group-item px-0">
+                            <div class="d-flex align-items-start justify-content-between gap-3">
+                                <div class="small">
+                                    <i class="bi bi-x-circle-fill text-danger me-2"></i>
+                                    <strong>{{ alerta.seccion }}:</strong> {{ alerta.mensaje }}
+                                </div>
+                                <a href="{{ alerta.enlace_captura }}" class="btn btn-outline-danger btn-sm text-nowrap">
+                                    Completar
+                                </a>
+                            </div>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                    <span class="badge bg-warning text-dark">Completitud: {{ alerta_trazabilidad.porcentaje }}%</span>
+                </div>
+            </div>
+            {% endif %}
+
             <!-- Código QR de Trazabilidad del Lote (HU18-ST6 / SCRUM-179) -->
             <div class="card border-0 shadow-sm rounded-4 overflow-hidden mb-4" id="seccion-codigo-qr">
                 <div class="card-header bg-white p-4 border-bottom">
