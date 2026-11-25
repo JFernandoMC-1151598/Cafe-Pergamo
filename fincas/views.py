@@ -43,6 +43,8 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
+from .busqueda import ejecutar_busqueda_global
+
 from .forms import (
     CaracteristicasCalidadForm,
     CosechaRegistroForm,
@@ -2657,6 +2659,83 @@ def api_manifestar_interes_lote_view(request, pk):
         )
 
 
+# =============================================================================
+# Vistas del Motor de Búsqueda Global Unificada (HU-29 / SCRUM-238)
+# Subtareas:
+# - SCRUM-291 (HU29-ST1): Diseñar la experiencia de búsqueda global en el navbar.
+# - SCRUM-293 (HU29-ST4): Implementar el endpoint de búsqueda unificada.
+# =============================================================================
+
+def busqueda_global_view(request):
+    """
+    Vista web para la consulta y exploración unificada de entidades en Café Pérgamo.
+    Permite filtrar por tipo ('todas', 'lotes', 'productores', 'compradores', 'operaciones')
+    y renderiza los resultados respetando el rol de sesión del usuario.
+    """
+    termino = request.GET.get("q", "")
+    tipo_filtro = request.GET.get("tipo", "todas")
+
+    usuario_id = _resolver_productor_id(request)
+    rol_codigo = request.session.get("rol", "")
+    if not rol_codigo and getattr(request, "user", None) and request.user.is_authenticated:
+        if request.user.is_superuser or request.user.is_staff:
+            rol_codigo = "ADMINISTRADOR"
+
+    contexto = ejecutar_busqueda_global(
+        termino=termino,
+        tipo_entidad=tipo_filtro,
+        usuario_o_id=usuario_id or getattr(request, "user", None),
+        rol_codigo=rol_codigo,
+    )
+    contexto["q"] = termino
+    contexto["tipo_activo"] = contexto.get("tipo_filtro", tipo_filtro)
+
+    return render(request, "busqueda/resultados.html", contexto)
+
+
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication, JWTAuthentication])
+@permission_classes([AllowAny])
+def api_busqueda_global_view(request):
+    """
+    Endpoint REST unificado para búsqueda global de entidades (HU29-ST4 / SCRUM-293).
+    Acepta parámetros GET:
+    - q: término de búsqueda (mínimo 2 caracteres para coincidencia)
+    - tipo: 'todas', 'lotes', 'productores', 'compradores', 'operaciones' (default: 'todas')
+    - limite: cantidad máxima de registros por entidad (default 25, máx 100)
+    """
+    termino = request.query_params.get("q", "")
+    tipo_filtro = request.query_params.get("tipo", "todas")
+    try:
+        limite = int(request.query_params.get("limite", 25))
+        limite = max(1, min(limite, 100))
+    except (TypeError, ValueError):
+        limite = 25
+
+    usuario_id = _resolver_productor_id(request)
+    token = getattr(request, "auth", None)
+    rol_codigo = ""
+    if token is not None:
+        try:
+            rol_codigo = (token.get("role_code", "") or "").upper()
+        except AttributeError:
+            rol_codigo = ""
+    if not rol_codigo:
+        rol_codigo = (request.session.get("rol", "") or "").upper()
+    if not rol_codigo and getattr(request, "user", None) and request.user.is_authenticated:
+        if request.user.is_superuser or request.user.is_staff:
+            rol_codigo = "ADMINISTRADOR"
+
+    resultado = ejecutar_busqueda_global(
+        termino=termino,
+        tipo_entidad=tipo_filtro,
+        usuario_o_id=usuario_id or getattr(request, "user", None),
+        rol_codigo=rol_codigo,
+        limite_por_entidad=limite,
+    )
+    return Response(resultado, status=status.HTTP_200_OK)
+
+
 # ==============================================================================
 # ENDPOINT REST: REGISTRO Y CONSULTA DE VENTA DE LOTE (HU-24 / SCRUM-276)
 # ==============================================================================
@@ -2903,3 +2982,4 @@ def negociacion_manifestacion_view(request, pk):
         })
 
     return render(request, "fincas/negociacion_manifestacion.html", {**contexto, "form": form})
+

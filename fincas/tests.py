@@ -11490,8 +11490,8 @@ class AvanceNegociacionHU23ST4Tests(_EntornoAvanceNegociacion, TestCase):
 
     def test_acepta_los_tres_estados_sin_importar_mayusculas(self):
         def reiniciar():
-            AvanceNegociacion.objects.all().delete()
-            NegociacionLote.objects.all().delete()
+            AvanceNegociacion.objects.all()._raw_delete(AvanceNegociacion.objects.db)
+            NegociacionLote.objects.all()._raw_delete(NegociacionLote.objects.db)
 
         for texto, esperado in (("abierta", "ABIERTA"), (" Aceptada ", "ACEPTADA")):
             reiniciar()
@@ -11521,7 +11521,7 @@ class AvanceNegociacionHU23ST4Tests(_EntornoAvanceNegociacion, TestCase):
 
     def test_presupuesto_es_opcional_pero_si_se_envia_debe_ser_positivo(self):
         self.assertIsNone(self.registrar()["presupuesto"])
-        AvanceNegociacion.objects.all().delete()
+        AvanceNegociacion.objects.all()._raw_delete(AvanceNegociacion.objects.db)
         self._assert_error("presupuesto", presupuesto="0")
         self._assert_error("presupuesto", presupuesto="-100")
 
