@@ -6157,7 +6157,8 @@ class EtapasBeneficioHU14Tests(TestCase):
         self.assertContains(response, self.url_detalle)
         # Un solo botón "Estado" (cambiar estado + registrar etapa), sin botón "Etapa" aparte.
         self.assertContains(response, reverse("lote_cambiar_estado", kwargs={"pk": self.lote.pk}))
-        self.assertNotContains(response, self.url_registro)
+        # La alerta de publicación incluye navegación directa al formulario de etapas.
+        self.assertContains(response, f'href="{self.url_registro}"')
 
     # ---------------------------- HU14-ST2 ----------------------------
     def test_historial_vacio_muestra_estado_claro(self):
@@ -11186,6 +11187,11 @@ class PublicadoYMiCatalogoTests(FixtureEstadosLoteBase):
 
     def _lote_publicable(self, codigo, estado):
         lote = self._lote(codigo, estado)
+        EtapaBeneficio.objects.create(
+            lote=lote,
+            etapa=EtapaBeneficio.TipoEtapa.DESPULPADO,
+            fecha=date(2026, 11, 25),
+        )
         CaracteristicasCalidad.objects.create(
             lote=lote, humedad=Decimal("11.00"), merma=Decimal("5.00"),
             puntaje_taza=Decimal("84.00"), perfil_sensorial="Dulce",
@@ -13416,4 +13422,121 @@ class HU28ST1IntegracionPublicacionAlertaTests(TestCase):
             any(reverse("lote_calidad", kwargs={"pk": self.lote.pk}) in enlace for enlace in enlaces)
         )
 
+
+class HU28ST4PruebasCompletitudTrazabilidadTests(TestCase):
+    """HU28-ST4 / SCRUM-302: detección de faltantes y publicación completa."""
+
+    def setUp(self):
+        self.productor_id = uuid.uuid4()
+        municipio = Municipio.objects.create(
+            codigo="HU28-ST4-MUN",
+            nombre="Municipio HU28 ST4",
+            departamento="Norte de Santander",
+        )
+        finca = Finca.objects.create(
+            nombre="Finca Pruebas HU28",
+            productor_id=self.productor_id,
+            municipio=municipio,
+            activo=True,
+            latitud=Decimal("7.900000"),
+            longitud=Decimal("-72.500000"),
+        )
+        variedad = VariedadCafe.objects.create(
+            nombre="Castillo HU28 ST4",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            variedad=variedad,
+            fecha_cosecha=date(2026, 11, 20),
+            cantidad_total=Decimal("100.00"),
+            cantidad_disponible=Decimal("100.00"),
+            activo=True,
+        )
+        proceso = ProcesoBeneficio.objects.create(
+            codigo="HU28-ST4-LAVADO",
+            nombre="Lavado",
+            activo=True,
+        )
+        self.lote = Lote.objects.create(
+            codigo="LOTE-HU28-ST4",
+            cosecha=cosecha,
+            cantidad=Decimal("50.00"),
+            proceso_beneficio=proceso,
+            activo=True,
+        )
+
+    def _registrar_etapa_beneficio(self):
+        return EtapaBeneficio.objects.create(
+            lote=self.lote,
+            etapa=EtapaBeneficio.TipoEtapa.DESPULPADO,
+            fecha=date(2026, 11, 21),
+        )
+
+    def test_lote_sin_beneficio_informa_el_requisito_exacto(self):
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            humedad=Decimal("11.50"),
+            puntaje_taza=Decimal("86.50"),
+        )
+
+        alerta = construir_alerta_trazabilidad_lote(self.lote)
+
+        self.assertFalse(alerta["puede_publicar"])
+        self.assertEqual(
+            alerta["campos_faltantes"],
+            ["El lote debe tener al menos una etapa de beneficio registrada."],
+        )
+
+    def test_lote_sin_calidad_informa_los_requisitos_exactos(self):
+        self._registrar_etapa_beneficio()
+
+        alerta = construir_alerta_trazabilidad_lote(self.lote)
+
+        self.assertFalse(alerta["puede_publicar"])
+        self.assertEqual(
+            alerta["campos_faltantes"],
+            [
+                "El lote debe tener un registro de características físicas y sensoriales.",
+                "La calidad debe incluir puntaje en taza o porcentaje de humedad.",
+            ],
+        )
+
+    def test_lote_parcialmente_completo_detalla_el_parametro_de_calidad_faltante(self):
+        self._registrar_etapa_beneficio()
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            perfil_sensorial="Chocolate y frutos rojos",
+        )
+
+        alerta = construir_alerta_trazabilidad_lote(self.lote)
+
+        self.assertFalse(alerta["puede_publicar"])
+        self.assertEqual(
+            alerta["campos_faltantes"],
+            ["La calidad debe incluir puntaje en taza o porcentaje de humedad."],
+        )
+
+    def test_lote_completo_al_cien_por_ciento_se_publica(self):
+        self._registrar_etapa_beneficio()
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote,
+            humedad=Decimal("11.50"),
+            puntaje_taza=Decimal("86.50"),
+            perfil_sensorial="Chocolate y frutos rojos",
+        )
+
+        evaluacion = evaluar_completitud_trazabilidad_lote(self.lote)
+        self.assertEqual(evaluacion["porcentaje"], 100)
+        self.assertTrue(evaluacion["publicacion_permitida"])
+        self.assertEqual(evaluacion["faltantes"], [])
+
+        lote_publicado = publicar_lote_en_catalogo(
+            lote_id=self.lote.pk,
+            productor_id=self.productor_id,
+        )
+
+        self.assertTrue(lote_publicado.publicado_en_catalogo)
+        self.assertIsNotNone(lote_publicado.fecha_publicacion)
 
