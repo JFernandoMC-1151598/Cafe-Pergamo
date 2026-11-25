@@ -117,9 +117,13 @@ urlpatterns = [
 
     # API REST de Manifestación de Interés en un Lote (HU-22 / SCRUM-264)
     path('api/lotes/<int:pk>/interes/', views.api_manifestar_interes_lote_view, name='api_lote_manifestar_interes'),
+    # Búsqueda Global Unificada (HU-29 / SCRUM-291, SCRUM-293)
+    path('buscar/', views.busqueda_global_view, name='busqueda_global_fincas'),
+    path('api/buscar/', views.api_busqueda_global_view, name='api_busqueda_global'),
+    path('api/v1/buscar/', views.api_busqueda_global_view, name='api_v1_busqueda_global'),
+
+    # Avances de Negociación (HU-23 / SCRUM-272)
     path('api/manifestaciones-interes/<int:pk>/avances/', views.api_registrar_avance_negociacion_view, name='api_registrar_avance_negociacion'),
-
-
 
     # API REST de Registro y Consulta de Ventas (HU-24 / SCRUM-276)
     path('api/ventas/', views.api_registrar_venta_view, name='api_venta_crear'),
