@@ -13,9 +13,13 @@
         <span class="badge bg-warning text-dark px-3 py-2 rounded-pill fw-bold text-uppercase mb-3 shadow-sm">
             <i class="bi bi-award me-1"></i> Origen Norte de Santander
         </span>
-        <h1 class="display-5 fw-bold mb-3" style="color: #ffffff !important;">Catálogo Comercial de Cafés Especiales</h1>
+        <h1 class="display-5 fw-bold mb-3" style="color: #ffffff !important;">{% if es_mi_catalogo %}Mi Catálogo{% else %}Catálogo Comercial de Cafés Especiales{% endif %}</h1>
         <p class="lead mx-auto mb-0" style="color: rgba(255, 255, 255, 0.9) !important; max-width: 720px;">
+            {% if es_mi_catalogo %}
+            Los lotes que usted tiene publicados en el catálogo comercial, tal como los ven los compradores.
+            {% else %}
             Vitrina pública de lotes con trazabilidad completa de origen, verificación de cosecha y evaluaciones sensoriales y físicas certificadas.
+            {% endif %}
         </p>
     </div>
 </section>
@@ -195,7 +199,7 @@
                 {% if hay_filtros_activos %}
                     Mostrando <strong>{{ total_lotes }}</strong> lote{{ total_lotes|pluralize:"s" }} de <strong>{{ total_catalogo }}</strong> disponible{{ total_catalogo|pluralize:"s" }} en el catálogo comercial.
                 {% else %}
-                    Mostrando <strong>{{ total_lotes }}</strong> lote{{ total_lotes|pluralize:"s" }} publicado{{ total_lotes|pluralize:"s" }} para comercialización directa.
+                    {% if es_mi_catalogo %}Mostrando <strong>{{ total_lotes }}</strong> lote{{ total_lotes|pluralize:"s" }} suyo{{ total_lotes|pluralize:"s" }} publicado{{ total_lotes|pluralize:"s" }} en el catálogo.{% else %}Mostrando <strong>{{ total_lotes }}</strong> lote{{ total_lotes|pluralize:"s" }} publicado{{ total_lotes|pluralize:"s" }} para comercialización directa.{% endif %}
                 {% endif %}
             </p>
         </div>

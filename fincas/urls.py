@@ -27,10 +27,12 @@ urlpatterns = [
     path('lotes/<int:pk>/', views.detalle_lote_view, name='lote_detalle'),
     path('lotes/<int:pk>/calidad/', views.registrar_calidad_lote_view, name='lote_calidad'),
     path('lotes/<int:pk>/etapas/nueva/', views.registrar_etapa_beneficio_view, name='lote_etapa_registro'),
+    path('lotes/<int:pk>/estado/', views.cambiar_estado_lote_view, name='lote_cambiar_estado'),
     path('lotes/<int:pk>/manifestar-interes/', views.manifestar_interes_lote_web_view, name='lote_manifestar_interes_web'),
     path('lotes/<int:pk>/publicar/', views.publicar_lote_web_view, name='lote_publicar'),
     path('lotes/<int:pk>/despublicar/', views.despublicar_lote_web_view, name='lote_despublicar'),
     path('mis-lotes/interes/', views.manifestaciones_interes_productor_view, name='mis_manifestaciones_interes'),
+    path('mis-lotes/interes/<int:pk>/negociacion/', views.negociacion_manifestacion_view, name='manifestacion_interes_negociacion'),
     path(
         'mis-lotes/interes/<int:pk>/marcar-vista/',
         views.marcar_manifestacion_interes_vista_web_view,
@@ -67,6 +69,16 @@ urlpatterns = [
     # API REST de Lotes (HU-13 / SCRUM-142, HU-15 / SCRUM-155, HU-19 / SCRUM-239)
     path('api/lotes/', views.api_crear_lote_view, name='api_lote_crear'),
     path('api/lotes/<int:pk>/', views.api_consultar_lote_view, name='api_lote_detalle'),
+    path(
+        'api/lotes/<int:pk>/historial-comercial/',
+        views.api_historial_comercial_lote_view,
+        name='api_lote_historial_comercial',
+    ),
+    path(
+        'api/v1/lotes/<int:pk>/historial-comercial/',
+        views.api_historial_comercial_lote_view,
+        name='api_v1_lote_historial_comercial',
+    ),
     path(
         'api/lotes/<int:lote_id>/calidad/',
         views.api_caracteristicas_calidad_view,
@@ -105,9 +117,17 @@ urlpatterns = [
 
     # API REST de Manifestación de Interés en un Lote (HU-22 / SCRUM-264)
     path('api/lotes/<int:pk>/interes/', views.api_manifestar_interes_lote_view, name='api_lote_manifestar_interes'),
-
     # Búsqueda Global Unificada (HU-29 / SCRUM-291, SCRUM-293)
     path('buscar/', views.busqueda_global_view, name='busqueda_global_fincas'),
     path('api/buscar/', views.api_busqueda_global_view, name='api_busqueda_global'),
     path('api/v1/buscar/', views.api_busqueda_global_view, name='api_v1_busqueda_global'),
+
+    # Avances de Negociación (HU-23 / SCRUM-272)
+    path('api/manifestaciones-interes/<int:pk>/avances/', views.api_registrar_avance_negociacion_view, name='api_registrar_avance_negociacion'),
+
+    # API REST de Registro y Consulta de Ventas (HU-24 / SCRUM-276)
+    path('api/ventas/', views.api_registrar_venta_view, name='api_venta_crear'),
+    path('api/v1/ventas/', views.api_registrar_venta_view, name='api_v1_venta_crear'),
+    path('api/ventas/<str:codigo_comprobante>/', views.api_detalle_venta_view, name='api_venta_detalle'),
+    path('api/v1/ventas/<str:codigo_comprobante>/', views.api_detalle_venta_view, name='api_v1_venta_detalle'),
 ]

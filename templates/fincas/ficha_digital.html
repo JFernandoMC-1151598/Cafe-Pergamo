@@ -115,9 +115,6 @@
             <button onclick="window.print()" class="btn btn-outline-secondary btn-sm rounded-pill px-3 fw-medium">
                 <i class="bi bi-printer me-1"></i> Imprimir Ficha
             </button>
-            <a href="{% url 'api_lote_ficha_digital' ficha.codigo %}" target="_blank" class="btn btn-outline-pergamo btn-sm rounded-pill px-3 fw-medium">
-                <i class="bi bi-code-slash me-1"></i> Ver JSON API
-            </a>
             <a href="{% url 'mis_lotes' %}" class="btn btn-primary btn-sm rounded-pill px-3 fw-semibold">
                 <i class="bi bi-arrow-left me-1"></i> Volver a Lotes
             </a>
@@ -404,10 +401,6 @@
                             {% endfor %}
                         </ul>
                     </div>
-                {% else %}
-                    <div class="border-top pt-2 text-center text-muted small py-2">
-                        <i class="bi bi-hourglass-split me-1"></i> Etapas detalladas en proceso de registro (HU-14).
-                    </div>
                 {% endif %}
             </div>
         </div>
@@ -462,7 +455,7 @@
                     <div class="text-center text-muted small py-3">
                         <i class="bi bi-clipboard2-pulse fs-3 d-block mb-2 text-secondary"></i>
                         <span class="fw-semibold d-block text-dark">Análisis de Calidad Pendiente</span>
-                        <span>Las características físicas y puntaje SCA se anexarán al culminar la catación (HU-15).</span>
+                        <span>Las características físicas y puntaje SCA se anexarán al culminar la catación.</span>
                     </div>
                 {% endif %}
             </div>
@@ -499,9 +492,6 @@
                             Ruta Canónica Pública
                         </span>
                     {% endif %}
-                    <div class="small text-truncate mt-2 text-muted font-monospace" style="font-size: 0.75rem;">
-                        {{ ficha.url_publica }}
-                    </div>
                 </div>
             </div>
         </div>

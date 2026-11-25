@@ -1,0 +1,182 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}Negociación del lote {{ lote.codigo }} — Café Pérgamo{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <!-- Encabezado -->
+    <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
+        <div>
+            <h1 class="h3 fw-bold text-dark mb-1">Negociación del lote {{ lote.codigo }}</h1>
+            <p class="text-muted mb-0">
+                Registre cómo avanza el proceso comercial con este comprador.
+            </p>
+        </div>
+        <a href="{% url 'mis_manifestaciones_interes' %}" class="btn btn-outline-pergamo px-4 fw-semibold">
+            <i class="bi bi-arrow-left me-1"></i> Volver a Interesados
+        </a>
+    </div>
+
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+    {% endif %}
+
+    <div class="row g-4">
+        <!-- Resumen + historial -->
+        <div class="col-lg-7">
+            <div class="card border-0 shadow-sm rounded-4 mb-4">
+                <div class="card-body p-4">
+                    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+                        <div>
+                            <h5 class="fw-bold text-dark mb-1">Resumen</h5>
+                            <p class="text-muted small mb-0">
+                                <i class="bi bi-geo-alt text-danger me-1"></i>{{ lote.cosecha.finca.nombre }}
+                                &middot; stock del lote: {{ lote.cantidad }} kg
+                            </p>
+                        </div>
+                        {% if negociacion %}
+                            {% if negociacion.estado == "ACEPTADA" %}
+                            <span class="badge bg-success fs-6">Aceptada</span>
+                            {% elif negociacion.estado == "RECHAZADA" or negociacion.estado == "CANCELADA" %}
+                            <span class="badge bg-secondary fs-6">{{ negociacion.get_estado_display }}</span>
+                            {% else %}
+                            <span class="badge bg-warning text-dark fs-6">{{ negociacion.get_estado_display }}</span>
+                            {% endif %}
+                        {% else %}
+                        <span class="badge bg-light text-dark border fs-6">Sin avances todavía</span>
+                        {% endif %}
+                    </div>
+                    <div class="small">
+                        <div><span class="text-muted">Comprador:</span> <span class="fw-semibold">{{ manifestacion.comprador_correo|default:"(sin correo registrado)" }}</span></div>
+                        {% if manifestacion.telefono_contacto %}
+                        <div><span class="text-muted">Teléfono:</span> <span class="fw-semibold">{{ manifestacion.telefono_contacto }}</span></div>
+                        {% endif %}
+                        {% if manifestacion.cantidad_kg %}
+                        <div><span class="text-muted">Cantidad de interés inicial:</span> <span class="fw-semibold">{{ manifestacion.cantidad_kg }} kg</span></div>
+                        {% endif %}
+                        {% if negociacion and negociacion.precio_acordado_por_kg %}
+                        <div><span class="text-muted">Precio acordado:</span> <span class="fw-semibold">${{ negociacion.precio_acordado_por_kg }} / kg</span></div>
+                        {% endif %}
+                    </div>
+                    {% if manifestacion.mensaje %}
+                    <p class="small text-secondary fst-italic bg-light rounded p-2 mt-3 mb-0">"{{ manifestacion.mensaje }}"</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="card border-0 shadow-sm rounded-4">
+                <div class="card-body p-4">
+                    <h5 class="fw-bold text-dark mb-3">Historial de avances</h5>
+                    {% if avances %}
+                    <div class="table-responsive">
+                        <table class="table align-middle small mb-0">
+                            <thead>
+                                <tr class="text-muted">
+                                    <th>Registro</th>
+                                    <th>Estado</th>
+                                    <th class="text-end">Cantidad</th>
+                                    <th class="text-end">Precio/kg</th>
+                                    <th class="text-end">Presupuesto</th>
+                                    <th>Cierre estimado</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for a in avances %}
+                                <tr>
+                                    <td class="text-nowrap">{{ a.creado_en|date:"d/m/Y H:i" }}</td>
+                                    <td>
+                                        {% if a.estado == "ACEPTADA" %}<span class="badge bg-success">Aceptada</span>
+                                        {% elif a.estado == "RECHAZADA" %}<span class="badge bg-secondary">Rechazada</span>
+                                        {% else %}<span class="badge bg-warning text-dark">Abierta</span>{% endif %}
+                                    </td>
+                                    <td class="text-end text-nowrap">{{ a.cantidad_kg }} kg</td>
+                                    <td class="text-end text-nowrap">${{ a.precio_por_kg }}</td>
+                                    <td class="text-end text-nowrap">{% if a.presupuesto %}${{ a.presupuesto }}{% else %}&mdash;{% endif %}</td>
+                                    <td>{% if a.fecha_estimada_cierre %}{{ a.fecha_estimada_cierre|date:"d/m/Y" }}{% else %}&mdash;{% endif %}</td>
+                                </tr>
+                                {% if a.observaciones %}
+                                <tr>
+                                    <td></td>
+                                    <td colspan="5" class="text-secondary fst-italic pt-0">{{ a.observaciones }}</td>
+                                </tr>
+                                {% endif %}
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <p class="text-muted mb-0">Aún no hay avances registrados. Use el formulario para registrar el primero.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Formulario -->
+        <div class="col-lg-5">
+            <div class="card border-0 shadow-sm rounded-4">
+                <div class="card-body p-4">
+                    <h5 class="fw-bold text-dark mb-3">Registrar avance</h5>
+                    {% if puede_registrar %}
+                    {% if form.non_field_errors %}
+                    <div class="alert alert-danger" role="alert">{{ form.non_field_errors|join:" " }}</div>
+                    {% endif %}
+                    <form method="post" novalidate>
+                        {% csrf_token %}
+                        <div class="mb-3">
+                            <label for="id_estado" class="form-label fw-semibold">{{ form.estado.label }} <span class="text-danger">*</span></label>
+                            {{ form.estado }}
+                            {% if form.estado.errors %}<div class="small text-danger mt-1">{{ form.estado.errors|join:" " }}</div>{% endif %}
+                            <div class="form-text">Aceptada o Rechazada cierran la negociación: después no se pueden registrar más avances.</div>
+                        </div>
+                        <div class="row g-3 mb-3">
+                            <div class="col-6">
+                                <label for="id_cantidad_kg" class="form-label fw-semibold">{{ form.cantidad_kg.label }} <span class="text-danger">*</span></label>
+                                {{ form.cantidad_kg }}
+                                {% if form.cantidad_kg.errors %}<div class="small text-danger mt-1">{{ form.cantidad_kg.errors|join:" " }}</div>{% endif %}
+                            </div>
+                            <div class="col-6">
+                                <label for="id_precio_por_kg" class="form-label fw-semibold">{{ form.precio_por_kg.label }} <span class="text-danger">*</span></label>
+                                {{ form.precio_por_kg }}
+                                {% if form.precio_por_kg.errors %}<div class="small text-danger mt-1">{{ form.precio_por_kg.errors|join:" " }}</div>{% endif %}
+                            </div>
+                        </div>
+                        <div class="row g-3 mb-3">
+                            <div class="col-6">
+                                <label for="id_presupuesto" class="form-label fw-semibold">{{ form.presupuesto.label }}</label>
+                                {{ form.presupuesto }}
+                                {% if form.presupuesto.errors %}<div class="small text-danger mt-1">{{ form.presupuesto.errors|join:" " }}</div>{% endif %}
+                            </div>
+                            <div class="col-6">
+                                <label for="id_fecha_estimada_cierre" class="form-label fw-semibold">{{ form.fecha_estimada_cierre.label }}</label>
+                                {{ form.fecha_estimada_cierre }}
+                                {% if form.fecha_estimada_cierre.errors %}<div class="small text-danger mt-1">{{ form.fecha_estimada_cierre.errors|join:" " }}</div>{% endif %}
+                            </div>
+                        </div>
+                        <div class="mb-4">
+                            <label for="id_observaciones" class="form-label fw-semibold">{{ form.observaciones.label }}</label>
+                            {{ form.observaciones }}
+                            {% if form.observaciones.errors %}<div class="small text-danger mt-1">{{ form.observaciones.errors|join:" " }}</div>{% endif %}
+                        </div>
+                        <button type="submit" class="btn btn-pergamo w-100 fw-semibold">
+                            <i class="bi bi-plus-circle me-1"></i>Registrar avance
+                        </button>
+                    </form>
+                    {% elif cerrada %}
+                    <div class="alert alert-light border mb-0">
+                        <i class="bi bi-lock me-1"></i>Esta negociación ya fue <strong>{{ negociacion.get_estado_display|lower }}</strong>: no admite más avances.
+                    </div>
+                    {% else %}
+                    <div class="alert alert-warning mb-0">El lote no está activo, así que no se pueden registrar avances.</div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

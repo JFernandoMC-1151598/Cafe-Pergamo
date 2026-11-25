@@ -499,11 +499,64 @@ class CosechaRegistroForm(forms.ModelForm):
         )
 
 
+def _campos_etapa_condicional():
+    """Campos 'etapa de beneficio' + fecha, visibles solo si el estado del lote es 'En Beneficio'."""
+    from django.utils import timezone
+
+    return {
+        "etapa_beneficio": forms.ChoiceField(
+            required=False,
+            label="Etapa de beneficio",
+            choices=[("", "Seleccione la etapa de beneficio...")] + list(EtapaBeneficio.TipoEtapa.choices),
+            widget=forms.Select(attrs={"class": "form-select", "id": "id_etapa_beneficio"}),
+            error_messages={"invalid_choice": "La etapa seleccionada no es una etapa de beneficio válida."},
+        ),
+        "fecha_etapa": forms.DateField(
+            required=False,
+            label="Fecha de la etapa",
+            initial=timezone.localdate,
+            widget=forms.DateInput(
+                format="%Y-%m-%d",
+                attrs={"class": "form-control", "id": "id_fecha_etapa", "type": "date"},
+            ),
+            error_messages={"invalid": "Ingrese una fecha válida."},
+        ),
+    }
+
+
+def _limpiar_etapa_condicional(form, cleaned):
+    """
+    Regla de negocio: si el estado elegido es 'En Beneficio', la etapa y su
+    fecha son obligatorias; con cualquier otro estado se descartan.
+    """
+    from .services import _es_estado_beneficio
+
+    estado = cleaned.get("estado_lote")
+    if estado is None:
+        return cleaned
+    if _es_estado_beneficio(estado):
+        if "proceso_beneficio" in form.fields and not cleaned.get("proceso_beneficio") and "proceso_beneficio" not in form.errors:
+            form.add_error("proceso_beneficio", "Debe seleccionar el proceso de beneficio del lote.")
+        if not cleaned.get("etapa_beneficio") and "etapa_beneficio" not in form.errors:
+            form.add_error("etapa_beneficio", "Debe indicar la etapa de beneficio en la que se encuentra el lote.")
+        if not cleaned.get("fecha_etapa") and "fecha_etapa" not in form.errors:
+            form.add_error("fecha_etapa", "Debe indicar la fecha de la etapa.")
+    else:
+        cleaned["etapa_beneficio"] = ""
+        cleaned["fecha_etapa"] = None
+        if "proceso_beneficio" in form.fields:
+            cleaned["proceso_beneficio"] = None
+    return cleaned
+
+
 class LoteRegistroForm(forms.Form):
     """
     Formulario de registro de lotes (HU13-ST4 / SCRUM-144): el productor
     selecciona una de SUS cosechas con saldo disponible, ingresa la
     cantidad del lote y, opcionalmente, un código propio.
+
+    El lote siempre nace en 'Recolección': el estado, el proceso y las etapas
+    de beneficio se registran después, con el cambio de estado del lote.
 
     Este formulario solo captura y valida el FORMATO de los datos de
     entrada (que el código, si se indica, sea alfanumérico; que la
@@ -523,30 +576,6 @@ class LoteRegistroForm(forms.Form):
         error_messages={
             "required": "Debe seleccionar la cosecha de la que proviene el lote.",
             "invalid_choice": "La cosecha seleccionada no es válida o no tiene saldo disponible.",
-        },
-    )
-
-    proceso_beneficio = forms.ModelChoiceField(
-        queryset=ProcesoBeneficio.objects.none(),
-        required=True,
-        label="Proceso de beneficio",
-        empty_label="Seleccione un proceso de beneficio...",
-        widget=forms.Select(attrs={"class": "form-select", "id": "id_proceso_beneficio"}),
-        error_messages={
-            "required": "Debe seleccionar un proceso de beneficio.",
-            "invalid_choice": "El proceso seleccionado no está activo o no es válido.",
-        },
-    )
-
-    estado_lote = forms.ModelChoiceField(
-        queryset=EstadoLote.objects.none(),
-        required=True,
-        label="Estado del lote",
-        empty_label="Seleccione el estado inicial del lote...",
-        widget=forms.Select(attrs={"class": "form-select", "id": "id_estado_lote"}),
-        error_messages={
-            "required": "Debe seleccionar un estado para el lote.",
-            "invalid_choice": "El estado seleccionado no está activo o no es válido.",
         },
     )
 
@@ -597,12 +626,6 @@ class LoteRegistroForm(forms.Form):
         self.fields["cosecha"].label_from_instance = lambda c: (
             f"{c.finca.nombre} — {c.fecha_cosecha} ({c.cantidad_disponible} kg disponibles)"
         )
-        self.fields["proceso_beneficio"].queryset = ProcesoBeneficio.objects.filter(
-            activo=True
-        ).order_by("orden", "nombre")
-        self.fields["estado_lote"].queryset = EstadoLote.objects.filter(
-            activo=True
-        ).order_by("orden", "nombre")
 
     def clean_codigo(self):
         codigo = self.cleaned_data.get("codigo", "")
@@ -610,6 +633,65 @@ class LoteRegistroForm(forms.Form):
         if codigo and not codigo.isalnum():
             raise forms.ValidationError("El código del lote debe ser alfanumérico (sin espacios ni símbolos).")
         return codigo
+
+
+class CambiarEstadoLoteForm(forms.Form):
+    """
+    Cambio de estado general de un lote existente. Solo cuando el nuevo estado
+    es 'En Beneficio' aparece (y es obligatoria) la etapa de beneficio exacta.
+    """
+
+    estado_lote = forms.ModelChoiceField(
+        queryset=EstadoLote.objects.none(),
+        required=True,
+        label="Nuevo estado del lote",
+        empty_label="Seleccione el nuevo estado del lote...",
+        widget=forms.Select(attrs={"class": "form-select", "id": "id_estado_lote"}),
+        error_messages={
+            "required": "Debe seleccionar el nuevo estado del lote.",
+            "invalid_choice": "El estado seleccionado no está activo o no es válido.",
+        },
+    )
+
+    observaciones = forms.CharField(
+        required=False,
+        label="Observaciones",
+        max_length=OBSERVACIONES_ETAPA_MAX,
+        validators=[validar_observaciones_etapa],
+        widget=forms.Textarea(attrs={
+            "class": "form-control",
+            "id": "id_observaciones",
+            "maxlength": str(OBSERVACIONES_ETAPA_MAX),
+            "rows": 3,
+            "placeholder": "Opcional: detalle de la etapa (solo se guarda con el estado 'En Beneficio').",
+        }),
+    )
+
+    def __init__(self, *args, lote=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields.update(_campos_etapa_condicional())
+        from .services import CODIGOS_ESTADO_RETIRADOS
+
+        estados = EstadoLote.objects.filter(activo=True).order_by("orden", "nombre")
+        for codigo in CODIGOS_ESTADO_RETIRADOS:
+            estados = estados.exclude(codigo__iexact=codigo)
+        self.fields["estado_lote"].queryset = estados
+        # El proceso se define una sola vez: solo se pide si el lote aún no tiene uno.
+        if lote is not None and lote.proceso_beneficio_id is None:
+            self.fields["proceso_beneficio"] = forms.ModelChoiceField(
+                queryset=ProcesoBeneficio.objects.filter(activo=True).order_by("orden", "nombre"),
+                required=False,
+                label="Proceso de beneficio",
+                empty_label="Seleccione un proceso de beneficio...",
+                widget=forms.Select(attrs={"class": "form-select", "id": "id_proceso_beneficio"}),
+                error_messages={"invalid_choice": "El proceso seleccionado no está activo o no es válido."},
+            )
+
+    def clean_observaciones(self):
+        return (self.cleaned_data.get("observaciones") or "").strip()
+
+    def clean(self):
+        return _limpiar_etapa_condicional(self, super().clean())
 
 
 class EtapaBeneficioForm(forms.ModelForm):
@@ -706,3 +788,79 @@ class CaracteristicasCalidadForm(forms.ModelForm):
             if cleaned_data.get(campo) is not None:
                 cleaned_data[campo] = cleaned_data[campo].strip()
         return cleaned_data
+
+
+class AvanceNegociacionForm(forms.Form):
+    """
+    Formulario para registrar un avance en la negociación de un lote
+    (HU23-ST2 / SCRUM-269).
+
+    Solo captura y valida el FORMATO de los datos. Las reglas de negocio
+    (estado permitido, negociación cerrada, cantidad contra el stock, precio,
+    fecha de cierre) las aplica `fincas.services.registrar_avance_negociacion`
+    (HU23-ST4), la misma función que usa la API.
+    """
+
+    ESTADOS = [
+        ("ABIERTA", "Abierta: la negociación sigue en curso"),
+        ("ACEPTADA", "Aceptada: se llegó a un acuerdo"),
+        ("RECHAZADA", "Rechazada: no hubo acuerdo"),
+    ]
+
+    estado = forms.ChoiceField(
+        choices=ESTADOS,
+        initial="ABIERTA",
+        label="Estado del avance",
+        widget=forms.Select(attrs={"class": "form-select", "id": "id_estado"}),
+        error_messages={
+            "required": "Seleccione el estado del avance.",
+            "invalid_choice": "El estado debe ser Abierta, Aceptada o Rechazada.",
+        },
+    )
+    cantidad_kg = forms.DecimalField(
+        max_digits=10, decimal_places=2, min_value=Decimal("0.01"),
+        label="Cantidad (kg)",
+        widget=forms.NumberInput(attrs={"class": "form-control", "id": "id_cantidad_kg", "step": "0.01", "min": "0.01"}),
+        error_messages={
+            "required": "La cantidad es obligatoria.",
+            "invalid": "Ingrese un valor numérico válido.",
+            "min_value": "La cantidad debe ser mayor a cero.",
+        },
+    )
+    precio_por_kg = forms.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal("0.01"),
+        label="Precio por kg (COP)",
+        widget=forms.NumberInput(attrs={"class": "form-control", "id": "id_precio_por_kg", "step": "0.01", "min": "0.01"}),
+        error_messages={
+            "required": "El precio por kg es obligatorio.",
+            "invalid": "Ingrese un valor numérico válido.",
+            "min_value": "El precio debe ser mayor a cero.",
+        },
+    )
+    presupuesto = forms.DecimalField(
+        required=False, max_digits=14, decimal_places=2, min_value=Decimal("0.01"),
+        label="Presupuesto del comprador (COP)",
+        widget=forms.NumberInput(attrs={"class": "form-control", "id": "id_presupuesto", "step": "0.01", "min": "0.01"}),
+        error_messages={
+            "invalid": "Ingrese un valor numérico válido.",
+            "min_value": "El presupuesto debe ser mayor a cero.",
+        },
+    )
+    fecha_estimada_cierre = forms.DateField(
+        required=False,
+        label="Fecha estimada de cierre",
+        widget=forms.DateInput(format="%Y-%m-%d", attrs={"class": "form-control", "id": "id_fecha_estimada_cierre", "type": "date"}),
+        error_messages={"invalid": "Ingrese una fecha válida."},
+    )
+    observaciones = forms.CharField(
+        required=False, max_length=1000,
+        label="Observaciones",
+        widget=forms.Textarea(attrs={
+            "class": "form-control", "id": "id_observaciones", "rows": 3, "maxlength": "1000",
+            "placeholder": "Acuerdos, condiciones de entrega, próximos pasos...",
+        }),
+        error_messages={"max_length": "Las observaciones no pueden superar los 1000 caracteres."},
+    )
+
+    def clean_observaciones(self):
+        return (self.cleaned_data.get("observaciones") or "").strip()

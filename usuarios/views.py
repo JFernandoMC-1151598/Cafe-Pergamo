@@ -666,9 +666,18 @@ def catalogo_view(request: HttpRequest) -> HttpResponse:
         for campo, err in errores.items():
             messages.warning(request, f"Filtro '{campo}': {err}")
 
-    lotes_filtrados = filtrar_catalogo_lotes(**filtros)
-    total_catalogo = lotes_disponibles_en_catalogo().count()
-    opciones = obtener_opciones_filtro_catalogo()
+    # "Mi Catálogo": el productor solo ve SUS lotes publicados, nunca los de otros.
+    productor_id = None
+    es_mi_catalogo = False
+    if request.session.get("rol") == "PRODUCTOR":
+        from fincas.views import _resolver_productor_id
+
+        productor_id = _resolver_productor_id(request)
+        es_mi_catalogo = productor_id is not None
+
+    lotes_filtrados = filtrar_catalogo_lotes(**filtros, productor_id=productor_id)
+    total_catalogo = lotes_disponibles_en_catalogo(productor_id=productor_id).count()
+    opciones = obtener_opciones_filtro_catalogo(productor_id=productor_id)
 
     filtros_activos = {
         "municipio": request.GET.get("municipio", "").strip(),
@@ -689,6 +698,7 @@ def catalogo_view(request: HttpRequest) -> HttpResponse:
             "opciones": opciones,
             "filtros_activos": filtros_activos,
             "hay_filtros_activos": hay_filtros_activos,
+            "es_mi_catalogo": es_mi_catalogo,
             "mensaje_sin_resultados": MENSAJE_CATALOGO_SIN_RESULTADOS_FILTRADO,
             "mensaje_catalogo_vacio": MENSAJE_CATALOGO_VACIO,
         },

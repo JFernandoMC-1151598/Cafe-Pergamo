@@ -64,25 +64,10 @@
                             <div class="form-text small text-muted">Solo se listan cosechas suyas, activas y con saldo disponible.</div>
                         </div>
 
-                        <div class="row g-3 mb-4">
-                            <div class="col-md-6">
-                                <label for="id_proceso_beneficio" class="form-label fw-semibold text-dark">
-                                    Proceso de beneficio <span class="text-danger">*</span>
-                                </label>
-                                {{ form.proceso_beneficio }}
-                                {% if form.proceso_beneficio.errors %}
-                                <div class="small text-danger mt-1">{{ form.proceso_beneficio.errors|join:" " }}</div>
-                                {% endif %}
-                            </div>
-                            <div class="col-md-6">
-                                <label for="id_estado_lote" class="form-label fw-semibold text-dark">
-                                    Estado del lote <span class="text-danger">*</span>
-                                </label>
-                                {{ form.estado_lote }}
-                                {% if form.estado_lote.errors %}
-                                <div class="small text-danger mt-1">{{ form.estado_lote.errors|join:" " }}</div>
-                                {% endif %}
-                            </div>
+                        <div class="alert alert-light border small mb-4" role="note">
+                            <i class="bi bi-info-circle me-1"></i>El lote se crea siempre en <strong>Recolección</strong>.
+                            Cuando empiece a procesarse, use el botón <strong>Estado</strong> en Mis Lotes para pasarlo a
+                            <strong>En Beneficio</strong> (ahí se elige el proceso y se registran las etapas).
                         </div>
 
                         <div class="row g-3 mb-4">

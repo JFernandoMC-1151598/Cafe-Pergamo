@@ -33,7 +33,7 @@ services:
     plan: free
     branch: main
     buildCommand: "pip install -r requirements.txt && python manage.py collectstatic --noinput"
-    preDeployCommand: "python manage.py migrate"
+    preDeployCommand: "python manage.py migrate && python manage.py sincronizar_qr_lotes"
     startCommand: "gunicorn cafe_pergamo.wsgi:application"
     envVars:
       - key: SECRET_KEY
