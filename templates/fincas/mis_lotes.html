@@ -1,5 +1,6 @@
 {% extends 'base.html' %}
 {% load static %}
+{% load rbac_tags %}
 
 {% block title %}Mis Lotes — Café Pérgamo{% endblock %}
 
@@ -14,6 +15,51 @@
             <p class="text-muted mb-0">Lotes de café registrados a partir de tus cosechas.</p>
         </div>
         <div class="d-flex gap-2">
+            <!-- HU-27 / SCRUM-304: Menú de Exportación de Reportes -->
+            {% if rol_actual|tiene_permiso:"reportes.generar" %}
+            <div class="dropdown">
+                <button class="btn btn-outline-success px-3 fw-semibold dropdown-toggle d-flex align-items-center" 
+                        type="button" 
+                        id="dropdownExportarLotes" 
+                        data-bs-toggle="dropdown" 
+                        aria-expanded="false"
+                        aria-label="Exportar reporte de mis lotes">
+                    <i class="bi bi-download me-1"></i> Exportar
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end shadow-sm border-0 rounded-3 py-2" aria-labelledby="dropdownExportarLotes">
+                    <li>
+                        <h6 class="dropdown-header text-uppercase small fw-bold text-muted">
+                            <i class="bi bi-file-earmark-text me-1"></i> Reportes de Lotes
+                        </h6>
+                    </li>
+                    <li>
+                        <a class="dropdown-item d-flex align-items-center py-2" 
+                           id="btnExportarExcel"
+                           href="{% url 'exportar_lotes_excel' %}{% if finca_id_filtro %}?finca={{ finca_id_filtro }}{% endif %}">
+                            <i class="bi bi-file-earmark-excel-fill text-success fs-5 me-2"></i>
+                            <div>
+                                <div class="fw-semibold">Descargar en Excel</div>
+                                <small class="text-muted">Hoja de cálculo (.xlsx)</small>
+                            </div>
+                        </a>
+                    </li>
+                    <li><hr class="dropdown-divider"></li>
+                    <li>
+                        <a class="dropdown-item d-flex align-items-center py-2" 
+                           id="btnExportarPdf"
+                           href="{% url 'exportar_lotes_pdf' %}{% if finca_id_filtro %}?finca={{ finca_id_filtro }}{% endif %}" 
+                           target="_blank">
+                            <i class="bi bi-file-earmark-pdf-fill text-danger fs-5 me-2"></i>
+                            <div>
+                                <div class="fw-semibold">Descargar en PDF</div>
+                                <small class="text-muted">Documento imprimible (.pdf)</small>
+                            </div>
+                        </a>
+                    </li>
+                </ul>
+            </div>
+            {% endif %}
+
             <!-- HU22-ST1 (SCRUM-260): mecanismo de notificacion in-app -- aqui es donde
                  el productor ve quien manifesto interes en sus lotes. -->
             <a href="{% url 'mis_manifestaciones_interes' %}" class="btn btn-outline-pergamo px-4 fw-semibold position-relative">

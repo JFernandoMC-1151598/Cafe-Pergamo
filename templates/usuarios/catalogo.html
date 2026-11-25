@@ -203,11 +203,57 @@
                 {% endif %}
             </p>
         </div>
-        {% if rol_actual|tiene_permiso:"lotes.consultar" %}
-        <a href="{% url 'mis_lotes' %}" class="btn btn-outline-primary btn-sm">
-            <i class="bi bi-boxes me-1"></i>Gestionar Mis Lotes
-        </a>
-        {% endif %}
+        <div class="d-flex align-items-center gap-2">
+            <!-- HU-27 / SCRUM-304: Menú de Exportación de Catálogo -->
+            {% if rol_actual|tiene_permiso:"reportes.generar" %}
+            <div class="dropdown">
+                <button class="btn btn-outline-success btn-sm dropdown-toggle d-flex align-items-center" 
+                        type="button" 
+                        id="dropdownExportarCatalogo" 
+                        data-bs-toggle="dropdown" 
+                        aria-expanded="false"
+                        aria-label="Exportar catálogo de lotes">
+                    <i class="bi bi-download me-1"></i> Exportar
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end shadow-sm border-0 rounded-3 py-2" aria-labelledby="dropdownExportarCatalogo">
+                    <li>
+                        <h6 class="dropdown-header text-uppercase small fw-bold text-muted">
+                            <i class="bi bi-file-earmark-text me-1"></i> Reporte de Catálogo
+                        </h6>
+                    </li>
+                    <li>
+                        <a class="dropdown-item d-flex align-items-center py-2" 
+                           id="btnExportarCatalogoExcel"
+                           href="{% url 'exportar_catalogo_excel' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}">
+                            <i class="bi bi-file-earmark-excel-fill text-success fs-5 me-2"></i>
+                            <div>
+                                <div class="fw-semibold">Descargar en Excel</div>
+                                <small class="text-muted">Hoja de cálculo (.xlsx)</small>
+                            </div>
+                        </a>
+                    </li>
+                    <li><hr class="dropdown-divider"></li>
+                    <li>
+                        <a class="dropdown-item d-flex align-items-center py-2" 
+                           id="btnExportarCatalogoPdf"
+                           href="{% url 'exportar_catalogo_pdf' %}{% if request.GET %}?{{ request.GET.urlencode }}{% endif %}" 
+                           target="_blank">
+                            <i class="bi bi-file-earmark-pdf-fill text-danger fs-5 me-2"></i>
+                            <div>
+                                <div class="fw-semibold">Descargar en PDF</div>
+                                <small class="text-muted">Documento imprimible (.pdf)</small>
+                            </div>
+                        </a>
+                    </li>
+                </ul>
+            </div>
+            {% endif %}
+            {% if rol_actual|tiene_permiso:"lotes.consultar" %}
+            <a href="{% url 'mis_lotes' %}" class="btn btn-outline-primary btn-sm">
+                <i class="bi bi-boxes me-1"></i>Gestionar Mis Lotes
+            </a>
+            {% endif %}
+        </div>
     </div>
 
     <!-- Grilla de Lotes -->

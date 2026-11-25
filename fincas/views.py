@@ -34,6 +34,7 @@ from django.db.models import Count, Prefetch, Q
 from django.http import Http404, HttpResponse, HttpResponseForbidden, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, authentication_classes, permission_classes
@@ -44,6 +45,11 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
 from .busqueda import ejecutar_busqueda_global
+from .reportes import (
+    generar_reporte_lotes_excel,
+    generar_reporte_lotes_pdf,
+    obtener_datos_reporte_lotes,
+)
 
 from .forms import (
     CaracteristicasCalidadForm,
@@ -146,6 +152,14 @@ def _resolver_productor_id(request):
     usuario_id = request.session.get("usuario_id")
     if usuario_id:
         return str(usuario_id)
+
+    if getattr(request, "user", None) and request.user.is_authenticated and getattr(request.user, "email", None):
+        try:
+            usuario = Usuario.objects.filter(correo=request.user.email).first()
+            if usuario:
+                return str(usuario.id)
+        except Exception:
+            pass
 
     token = getattr(request, "auth", None)
     correo = None
@@ -2962,4 +2976,120 @@ def negociacion_manifestacion_view(request, pk):
         })
 
     return render(request, "fincas/negociacion_manifestacion.html", {**contexto, "form": form})
+
+
+# ==============================================================================
+# Vistas de Exportación de Reportes en Excel y PDF (HU-27 / SCRUM-236)
+# Subtareas:
+# - SCRUM-304 (HU27-ST1): Diseñar la experiencia de exportación de reportes.
+# - SCRUM-305 (HU27-ST2): Definir el formato y estructura del reporte exportado.
+# ==============================================================================
+
+@permiso_requerido_sesion("reportes.generar")
+def exportar_lotes_excel_view(request):
+    """
+    Exporta el reporte de lotes en formato Excel (.xlsx), respetando permisos
+    multi-tenant y filtros activos en pantalla (SCRUM-304, SCRUM-305, SCRUM-306, SCRUM-307).
+    """
+    usuario_id = _resolver_productor_id(request)
+    rol_codigo = request.session.get("rol", "")
+    filtros = request.GET.dict()
+
+    datos = obtener_datos_reporte_lotes(
+        usuario=usuario_id or request.user,
+        rol_codigo=rol_codigo,
+        filtros=filtros,
+    )
+    contenido = generar_reporte_lotes_excel(datos)
+
+    timestamp = timezone.localtime().strftime("%Y%m%d_%H%M")
+    filename = f"reporte_lotes_pergamo_{timestamp}.xlsx"
+
+    response = HttpResponse(
+        contenido,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
+
+@permiso_requerido_sesion("reportes.generar")
+def exportar_lotes_pdf_view(request):
+    """
+    Exporta el reporte de lotes en formato PDF imprimible (.pdf), respetando permisos
+    multi-tenant y filtros activos en pantalla (SCRUM-304, SCRUM-305, SCRUM-306, SCRUM-308).
+    """
+    usuario_id = _resolver_productor_id(request)
+    rol_codigo = request.session.get("rol", "")
+    filtros = request.GET.dict()
+
+    datos = obtener_datos_reporte_lotes(
+        usuario=usuario_id or request.user,
+        rol_codigo=rol_codigo,
+        filtros=filtros,
+    )
+    contenido = generar_reporte_lotes_pdf(datos)
+
+    timestamp = timezone.localtime().strftime("%Y%m%d_%H%M")
+    filename = f"reporte_lotes_pergamo_{timestamp}.pdf"
+
+    response = HttpResponse(contenido, content_type="application/pdf")
+    response["Content-Disposition"] = f'inline; filename="{filename}"'
+    return response
+
+
+@permiso_requerido_sesion("reportes.generar")
+def exportar_catalogo_excel_view(request):
+    """
+    Exporta los lotes publicados disponibles del catálogo en Excel (.xlsx) con filtros activos.
+    """
+    usuario_id = _resolver_productor_id(request)
+    rol_codigo = request.session.get("rol", "")
+    filtros = request.GET.dict()
+    filtros["publicado"] = True
+
+    datos = obtener_datos_reporte_lotes(
+        usuario=usuario_id or request.user,
+        rol_codigo=rol_codigo,
+        filtros=filtros,
+    )
+    datos["metadata"]["subtitulo"] = "Catálogo Comercial de Cafés Especiales — Lotes Disponibles"
+    contenido = generar_reporte_lotes_excel(datos)
+
+    timestamp = timezone.localtime().strftime("%Y%m%d_%H%M")
+    filename = f"catalogo_lotes_pergamo_{timestamp}.xlsx"
+
+    response = HttpResponse(
+        contenido,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+
+
+@permiso_requerido_sesion("reportes.generar")
+def exportar_catalogo_pdf_view(request):
+    """
+    Exporta los lotes publicados disponibles del catálogo en PDF (.pdf) con filtros activos.
+    """
+    usuario_id = _resolver_productor_id(request)
+    rol_codigo = request.session.get("rol", "")
+    filtros = request.GET.dict()
+    filtros["publicado"] = True
+
+    datos = obtener_datos_reporte_lotes(
+        usuario=usuario_id or request.user,
+        rol_codigo=rol_codigo,
+        filtros=filtros,
+    )
+    datos["metadata"]["subtitulo"] = "Catálogo Comercial de Cafés Especiales — Lotes Disponibles"
+    contenido = generar_reporte_lotes_pdf(datos)
+
+    timestamp = timezone.localtime().strftime("%Y%m%d_%H%M")
+    filename = f"catalogo_lotes_pergamo_{timestamp}.pdf"
+
+    response = HttpResponse(contenido, content_type="application/pdf")
+    response["Content-Disposition"] = f'inline; filename="{filename}"'
+    return response
+
 

@@ -130,4 +130,10 @@ urlpatterns = [
     path('api/v1/ventas/', views.api_registrar_venta_view, name='api_v1_venta_crear'),
     path('api/ventas/<str:codigo_comprobante>/', views.api_detalle_venta_view, name='api_venta_detalle'),
     path('api/v1/ventas/<str:codigo_comprobante>/', views.api_detalle_venta_view, name='api_v1_venta_detalle'),
+
+    # Exportación de Reportes en Excel y PDF (HU-27 / SCRUM-304, SCRUM-305)
+    path('reportes/lotes/excel/', views.exportar_lotes_excel_view, name='exportar_lotes_excel'),
+    path('reportes/lotes/pdf/', views.exportar_lotes_pdf_view, name='exportar_lotes_pdf'),
+    path('reportes/catalogo/excel/', views.exportar_catalogo_excel_view, name='exportar_catalogo_excel'),
+    path('reportes/catalogo/pdf/', views.exportar_catalogo_pdf_view, name='exportar_catalogo_pdf'),
 ]
