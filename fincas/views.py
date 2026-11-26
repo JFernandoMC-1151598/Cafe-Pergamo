@@ -26,7 +26,10 @@ poder consultarse ahora, no solo en el siguiente sprint.
 """
 
 from decimal import Decimal
+import logging
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
@@ -3002,6 +3005,13 @@ def exportar_lotes_excel_view(request):
     )
     contenido = generar_reporte_lotes_excel(datos)
 
+    logger.info(
+        "Exportación exitosa: tipo=lotes, formato=excel, usuario=%s, rol=%s, registros=%d",
+        usuario_id or getattr(request.user, "username", "anonimo"),
+        rol_codigo or "N/A",
+        datos["totales"]["total_lotes"],
+    )
+
     timestamp = timezone.localtime().strftime("%Y%m%d_%H%M")
     filename = f"reporte_lotes_pergamo_{timestamp}.xlsx"
 
@@ -3030,6 +3040,13 @@ def exportar_lotes_pdf_view(request):
     )
     contenido = generar_reporte_lotes_pdf(datos)
 
+    logger.info(
+        "Exportación exitosa: tipo=lotes, formato=pdf, usuario=%s, rol=%s, registros=%d",
+        usuario_id or getattr(request.user, "username", "anonimo"),
+        rol_codigo or "N/A",
+        datos["totales"]["total_lotes"],
+    )
+
     timestamp = timezone.localtime().strftime("%Y%m%d_%H%M")
     filename = f"reporte_lotes_pergamo_{timestamp}.pdf"
 
@@ -3055,6 +3072,13 @@ def exportar_catalogo_excel_view(request):
     )
     datos["metadata"]["subtitulo"] = "Catálogo Comercial de Cafés Especiales — Lotes Disponibles"
     contenido = generar_reporte_lotes_excel(datos)
+
+    logger.info(
+        "Exportación exitosa: tipo=catalogo, formato=excel, usuario=%s, rol=%s, registros=%d",
+        usuario_id or getattr(request.user, "username", "anonimo"),
+        rol_codigo or "N/A",
+        datos["totales"]["total_lotes"],
+    )
 
     timestamp = timezone.localtime().strftime("%Y%m%d_%H%M")
     filename = f"catalogo_lotes_pergamo_{timestamp}.xlsx"
@@ -3084,6 +3108,13 @@ def exportar_catalogo_pdf_view(request):
     )
     datos["metadata"]["subtitulo"] = "Catálogo Comercial de Cafés Especiales — Lotes Disponibles"
     contenido = generar_reporte_lotes_pdf(datos)
+
+    logger.info(
+        "Exportación exitosa: tipo=catalogo, formato=pdf, usuario=%s, rol=%s, registros=%d",
+        usuario_id or getattr(request.user, "username", "anonimo"),
+        rol_codigo or "N/A",
+        datos["totales"]["total_lotes"],
+    )
 
     timestamp = timezone.localtime().strftime("%Y%m%d_%H%M")
     filename = f"catalogo_lotes_pergamo_{timestamp}.pdf"

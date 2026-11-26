@@ -198,6 +198,42 @@ class TestReportesEstructuraYGeneradoresUnitarios(TestCase):
         self.assertGreater(len(pdf_bytes), 1000)
         self.assertTrue(pdf_bytes.startswith(b"%PDF-"))
 
+    def test_excel_freeze_panes_y_propiedades_avanzadas(self):
+        """Verifica que el archivo Excel generado tenga freeze panes en A7 y orientación horizontal."""
+        datos = obtener_datos_reporte_lotes(
+            usuario=self.productor_id,
+            rol_codigo="PRODUCTOR",
+        )
+        xlsx_bytes = generar_reporte_lotes_excel(datos)
+        wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes))
+        ws = wb["Lotes de Café"]
+
+        self.assertEqual(ws.freeze_panes, "A7")
+        self.assertEqual(ws.page_setup.orientation, ws.ORIENTATION_LANDSCAPE)
+        self.assertEqual(str(ws.page_setup.paperSize), str(ws.PAPERSIZE_LETTER))
+
+    def test_pdf_multipage_con_numbered_canvas(self):
+        """Verifica que la generación de reportes extensos use NumberedCanvas para paginación dinámica."""
+        # Crear 25 lotes adicionales para provocar múltiples páginas
+        for i in range(10, 35):
+            l = Lote.objects.create(
+                codigo=f"LOT-MP-{i:03d}",
+                cosecha=self.cosecha,
+                proceso_beneficio=self.proceso,
+                cantidad=Decimal("100.00"),
+                activo=True,
+            )
+            CaracteristicasCalidad.objects.create(lote=l, puntaje_taza=Decimal("85.00"), humedad=Decimal("11.0"))
+
+        datos = obtener_datos_reporte_lotes(
+            usuario=self.productor_id,
+            rol_codigo="PRODUCTOR",
+        )
+        pdf_bytes = generar_reporte_lotes_pdf(datos)
+        self.assertIsInstance(pdf_bytes, bytes)
+        self.assertGreater(len(pdf_bytes), 3000)
+        self.assertTrue(pdf_bytes.startswith(b"%PDF-"))
+
 
 class TestFiltrosYAislamientoMultiTenantReportes(TestCase):
     """Pruebas para el respeto de filtros activos y aislamiento multi-tenant (SCRUM-306, SCRUM-309)."""
@@ -328,6 +364,66 @@ class TestFiltrosYAislamientoMultiTenantReportes(TestCase):
         codigos = [f.codigo for f in datos["filas"]]
         self.assertEqual(codigos, ["LOT-FLT-A2"])
 
+    def test_filtro_por_busqueda_en_perfil_sensorial(self):
+        """El filtro q busca también dentro del perfil sensorial del lote."""
+        self.lote_a1.caracteristicas_calidad.perfil_sensorial = "Notas a chocolate oscuro y avellanas tostadas"
+        self.lote_a1.caracteristicas_calidad.save()
+
+        datos = obtener_datos_reporte_lotes(
+            rol_codigo="ADMINISTRADOR",
+            filtros={"q": "avellanas"},
+        )
+        codigos = [f.codigo for f in datos["filas"]]
+        self.assertEqual(codigos, ["LOT-FLT-A1"])
+
+    def test_filtros_combinados_multicriterio(self):
+        """Múltiples filtros aplicados en conjunto operan con lógica AND (SCRUM-306)."""
+        datos = obtener_datos_reporte_lotes(
+            rol_codigo="ADMINISTRADOR",
+            filtros={
+                "municipio": self.mun_arboledas.id,
+                "variedad": self.var_geisha.id,
+                "proceso": self.proc_natural.id,
+                "puntaje_min": "88.0",
+            },
+        )
+        codigos = [f.codigo for f in datos["filas"]]
+        self.assertEqual(codigos, ["LOT-FLT-A2"])
+        self.assertIn("Municipio: Arboledas", datos["metadata"]["filtros_texto"])
+        self.assertIn("Variedad: Geisha", datos["metadata"]["filtros_texto"])
+
+    def test_filtro_por_ordenamiento_puntaje_desc(self):
+        """El parámetro orden='puntaje_desc' sitúa al lote con mayor SCA en primer lugar."""
+        datos = obtener_datos_reporte_lotes(
+            rol_codigo="ADMINISTRADOR",
+            filtros={"orden": "puntaje_desc"},
+        )
+        codigos = [f.codigo for f in datos["filas"]]
+        # LOT-FLT-A2 (89.50) > LOT-FLT-A1 (87.00) > LOT-FLT-B1 (84.00)
+        self.assertEqual(codigos[0], "LOT-FLT-A2")
+        self.assertEqual(codigos[-1], "LOT-FLT-B1")
+
+    def test_filtro_por_ordenamiento_precio_asc(self):
+        """El parámetro orden='precio_asc' sitúa al lote más económico en primer lugar."""
+        datos = obtener_datos_reporte_lotes(
+            rol_codigo="ADMINISTRADOR",
+            filtros={"orden": "precio_asc"},
+        )
+        codigos = [f.codigo for f in datos["filas"]]
+        # LOT-FLT-B1 ($36.000) < LOT-FLT-A1 ($40.000) < LOT-FLT-A2 ($48.000)
+        self.assertEqual(codigos[0], "LOT-FLT-B1")
+        self.assertEqual(codigos[-1], "LOT-FLT-A2")
+
+    def test_filtro_por_rango_fechas(self):
+        """Filtra lotes dentro de un rango de fechas (desde / hasta)."""
+        hoy_str = timezone.now().date().isoformat()
+        datos = obtener_datos_reporte_lotes(
+            rol_codigo="ADMINISTRADOR",
+            filtros={"desde": hoy_str, "hasta": hoy_str},
+        )
+        self.assertEqual(len(datos["filas"]), 3)
+        self.assertIn(f"Desde: {hoy_str}", datos["metadata"]["filtros_texto"])
+
 
 @patch("usuarios.models.RolPermiso")
 class TestVistasExportacionReportesHTTP(TestCase):
@@ -422,6 +518,21 @@ class TestVistasExportacionReportesHTTP(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "application/pdf")
         self.assertTrue(response.content.startswith(b"%PDF-"))
+
+    def test_exportar_lotes_emite_log_auditoria(self, mock_rol_permiso):
+        """La generación de reportes emite logs de auditoría estructurados (SCRUM-309)."""
+        _mockear_matriz_real(mock_rol_permiso)
+        self.client.force_login(self.user_productor)
+        session = self.client.session
+        session["rol"] = "PRODUCTOR"
+        session["usuario_id"] = str(self.productor_id)
+        session.save()
+
+        with self.assertLogs("fincas.views", level="INFO") as cm:
+            resp = self.client.get(reverse("exportar_lotes_excel"))
+            self.assertEqual(resp.status_code, 200)
+
+        self.assertTrue(any("Exportación exitosa: tipo=lotes, formato=excel" in msg for msg in cm.output))
 
 
 @patch("usuarios.models.RolPermiso")
@@ -536,3 +647,17 @@ class TestExperienciaUIExportacionWCAG(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, 'id="dropdownExportarCatalogo"')
         self.assertNotContains(response, 'id="btnExportarCatalogoExcel"')
+
+    def test_mis_lotes_preserva_filtros_query_params(self, mock_rol_permiso):
+        """Los enlaces de exportación en Mis Lotes preservan todos los query params activos en URL."""
+        _mockear_matriz_real(mock_rol_permiso)
+        self.client.force_login(self.user_productor)
+        session = self.client.session
+        session["rol"] = "PRODUCTOR"
+        session["usuario_id"] = str(uuid.uuid4())
+        session.save()
+
+        response = self.client.get(reverse("mis_lotes") + "?finca=99&q=geisha")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'href="/fincas/reportes/lotes/excel/?finca=99&amp;q=geisha"')
+        self.assertContains(response, 'href="/fincas/reportes/lotes/pdf/?finca=99&amp;q=geisha"')

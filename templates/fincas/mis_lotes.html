@@ -35,7 +35,7 @@
                     <li>
                         <a class="dropdown-item d-flex align-items-center py-2" 
                            id="btnExportarExcel"
-                           href="{% url 'exportar_lotes_excel' %}{% if finca_id_filtro %}?finca={{ finca_id_filtro }}{% endif %}">
+                           href="{% url 'exportar_lotes_excel' %}{% if request.GET %}?{{ request.GET.urlencode }}{% elif finca_id_filtro %}?finca={{ finca_id_filtro }}{% endif %}">
                             <i class="bi bi-file-earmark-excel-fill text-success fs-5 me-2"></i>
                             <div>
                                 <div class="fw-semibold">Descargar en Excel</div>
@@ -47,7 +47,7 @@
                     <li>
                         <a class="dropdown-item d-flex align-items-center py-2" 
                            id="btnExportarPdf"
-                           href="{% url 'exportar_lotes_pdf' %}{% if finca_id_filtro %}?finca={{ finca_id_filtro }}{% endif %}" 
+                           href="{% url 'exportar_lotes_pdf' %}{% if request.GET %}?{{ request.GET.urlencode }}{% elif finca_id_filtro %}?finca={{ finca_id_filtro }}{% endif %}" 
                            target="_blank">
                             <i class="bi bi-file-earmark-pdf-fill text-danger fs-5 me-2"></i>
                             <div>

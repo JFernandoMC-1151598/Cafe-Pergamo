@@ -30,6 +30,7 @@ from openpyxl.utils import get_column_letter
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.pdfgen import canvas
 from reportlab.platypus import (
     PageBreak,
     Paragraph,
@@ -235,8 +236,53 @@ def obtener_datos_reporte_lotes(
                 | Q(cosecha__finca__municipio__nombre__icontains=q_limpio)
                 | Q(cosecha__variedad__nombre__icontains=q_limpio)
                 | Q(proceso_beneficio__nombre__icontains=q_limpio)
+                | Q(caracteristicas_calidad__perfil_sensorial__icontains=q_limpio)
             )
             textos_filtros.append(f'Búsqueda libre: "{q_limpio}"')
+
+    # Filtros de fecha (SCRUM-306)
+    fecha_inicio = filtros.get("fecha_inicio") or filtros.get("desde")
+    if fecha_inicio:
+        try:
+            base_qs = base_qs.filter(
+                Q(fecha_publicacion__date__gte=fecha_inicio)
+                | Q(cosecha__fecha_cosecha__gte=fecha_inicio)
+            )
+            textos_filtros.append(f"Desde: {fecha_inicio}")
+        except Exception:
+            pass
+
+    fecha_fin = filtros.get("fecha_fin") or filtros.get("hasta")
+    if fecha_fin:
+        try:
+            base_qs = base_qs.filter(
+                Q(fecha_publicacion__date__lte=fecha_fin)
+                | Q(cosecha__fecha_cosecha__lte=fecha_fin)
+            )
+            textos_filtros.append(f"Hasta: {fecha_fin}")
+        except Exception:
+            pass
+
+    # Ordenamiento respetado desde la UI (SCRUM-306)
+    orden = filtros.get("orden") or filtros.get("ordering")
+    if orden == "puntaje_desc":
+        base_qs = base_qs.order_by("-caracteristicas_calidad__puntaje_taza", "-id")
+        textos_filtros.append("Orden: Mayor puntaje SCA")
+    elif orden == "puntaje_asc":
+        base_qs = base_qs.order_by("caracteristicas_calidad__puntaje_taza", "-id")
+        textos_filtros.append("Orden: Menor puntaje SCA")
+    elif orden == "precio_desc":
+        base_qs = base_qs.order_by("-precio_referencial", "-id")
+        textos_filtros.append("Orden: Mayor precio")
+    elif orden == "precio_asc":
+        base_qs = base_qs.order_by("precio_referencial", "-id")
+        textos_filtros.append("Orden: Menor precio")
+    elif orden == "cantidad_desc":
+        base_qs = base_qs.order_by("-cantidad", "-id")
+        textos_filtros.append("Orden: Mayor cantidad")
+    elif orden == "fecha_asc":
+        base_qs = base_qs.order_by("fecha_publicacion", "id")
+        textos_filtros.append("Orden: Más antiguos primero")
 
     # 3. Construcción de filas tabulares
     lotes_list = list(base_qs)
@@ -498,10 +544,24 @@ def generar_reporte_lotes_excel(datos_reporte: Dict[str, Any]) -> bytes:
         c.fill = fill_totales
         c.border = border_total
 
-    # Autoajuste de anchos de columna
+    # Congelamiento de paneles bajo la cabecera (SCRUM-307)
+    ws.freeze_panes = "A7"
+
+    # Configuración de página e impresión apaisada (Landscape)
+    ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+    ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    # Autoajuste dinámico de anchos de columna según contenido
     for c_idx, col in enumerate(columnas, start=1):
         col_letter = get_column_letter(c_idx)
-        ws.column_dimensions[col_letter].width = col.ancho_excel
+        max_len = len(str(col.encabezado or ""))
+        for r_idx in range(7, 7 + len(filas)):
+            cell_val = ws.cell(row=r_idx, column=c_idx).value
+            if cell_val is not None:
+                max_len = max(max_len, len(str(cell_val)))
+        ancho_optimo = max(col.ancho_excel, min(max_len + 3, 38))
+        ws.column_dimensions[col_letter].width = ancho_optimo
 
     output = io.BytesIO()
     wb.save(output)
@@ -512,12 +572,54 @@ def generar_reporte_lotes_excel(datos_reporte: Dict[str, Any]) -> bytes:
 # 4. Generación Binaria en PDF (SCRUM-308 / HU27-ST5)
 # ==============================================================================
 
+class NumberedCanvas(canvas.Canvas):
+    """
+    Canvas especializado de ReportLab con técnica de dos pasadas (two-pass)
+    para calcular el total exacto de páginas y estampar pie institucional
+    y numeración 'Página X de Y' en todas las hojas.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_page_states = []
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        num_pages = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self.draw_page_number(num_pages)
+            super().showPage()
+        super().save()
+
+    def draw_page_number(self, page_count):
+        self.saveState()
+        self.setFont("Helvetica", 7.5)
+        self.setFillColor(colors.HexColor("#666666"))
+
+        # Línea divisoria tenue
+        self.setStrokeColor(colors.HexColor("#CCCCCC"))
+        self.setLineWidth(0.5)
+        self.line(30, 26, 792 - 30, 26)
+
+        texto_izq = "Café Pérgamo — Sistema de Trazabilidad y Comercialización | UFPS Norte de Santander"
+        texto_der = f"Página {self._pageNumber} de {page_count}"
+
+        self.drawString(30, 16, texto_izq)
+        self.drawRightString(792 - 30, 16, texto_der)
+        self.restoreState()
+
+
 def generar_reporte_lotes_pdf(datos_reporte: Dict[str, Any]) -> bytes:
     """
     Construye un documento PDF vectorial apaisado (landscape) con Platypus:
     - Encabezado institucional UFPS / Café Pérgamo.
     - Bloque de filtros activos y metadatos del emisor.
     - Tabla estructurada con anchos proporcionales, colores alternos y paginación.
+    - Paginación dinámica de dos pasadas ('Página X de Y') con NumberedCanvas.
     - Resumen numérico y pie de página legal.
     """
     output = io.BytesIO()
@@ -527,7 +629,7 @@ def generar_reporte_lotes_pdf(datos_reporte: Dict[str, Any]) -> bytes:
         leftMargin=30,
         rightMargin=30,
         topMargin=30,
-        bottomMargin=30,
+        bottomMargin=40,
     )
 
     styles = getSampleStyleSheet()
@@ -693,5 +795,5 @@ def generar_reporte_lotes_pdf(datos_reporte: Dict[str, Any]) -> bytes:
     )
     story.append(Paragraph(nota_legal, style_meta))
 
-    doc.build(story)
+    doc.build(story, canvasmaker=NumberedCanvas)
     return output.getvalue()
