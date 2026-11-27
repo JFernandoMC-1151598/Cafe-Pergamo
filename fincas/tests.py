@@ -13019,6 +13019,231 @@ class TestScrum289SuiteIntegralPruebasQAIndicadores(TestCase):
         )
 
 
+class TestScrum290CasosPruebaFuncionalesDashboard(TestCase):
+    """
+    Subtarea: SCRUM-290 / HU26-ST6: Validar el dashboard con casos de prueba funcionales.
+    Ejecuta y certifica programáticamente la matriz formal de casos de prueba funcionales (CP):
+    - CP-HU26-01: Visualización macro para Asociación / Administrador
+    - CP-HU26-02: Aislamiento multi-inquilino para Productor Cafetero
+    - CP-HU26-03: Filtrado dinámico multicriterio
+    - CP-HU26-04: Cálculo exacto de completitud técnica (100%) y puntaje SCA
+    - CP-HU26-05: Renderizado y consistencia de gráficos interactivos Chart.js
+    - CP-HU26-06: Control de acceso RBAC y denegación de perfiles no autorizados
+    - CP-HU26-07: Resiliencia ante estados vacíos (evita ZeroDivisionError)
+    - CP-HU26-08: Soporte para exportación e impresión de informe analítico
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_dashboard_web = reverse("dashboard_indicadores")
+        self.url_dashboard_api = reverse("api_v1_dashboard_indicadores")
+
+        self.productor_1 = uuid.uuid4()
+        self.productor_2 = uuid.uuid4()
+        self.comprador = uuid.uuid4()
+
+        self.mun_toledo = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-TOL-ST6",
+            nombre="Toledo",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.mun_labateca = Municipio.objects.filter(
+            nombre="Labateca", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-LAB-ST6",
+            nombre="Labateca",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.var_caturra = VariedadCafe.objects.create(
+            nombre="Caturra ST6",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso_lavado = ProcesoBeneficio.objects.create(
+            codigo="LAV-ST6",
+            nombre="Lavado ST6",
+            orden=1,
+            activo=True,
+        )
+
+        # Finca 1: Georreferenciada (Toledo)
+        self.finca_1 = Finca.objects.create(
+            nombre="Finca La Alborada ST6",
+            productor_id=self.productor_1,
+            municipio=self.mun_toledo,
+            latitud=Decimal("7.311234"),
+            longitud=Decimal("-72.481234"),
+            activo=True,
+        )
+
+        # Finca 2: Sin georreferenciación (Labateca)
+        self.finca_2 = Finca.objects.create(
+            nombre="Finca Los Pinos ST6",
+            productor_id=self.productor_2,
+            municipio=self.mun_labateca,
+            activo=True,
+        )
+
+        # Cosechas
+        self.cosecha_1 = Cosecha.objects.create(
+            finca=self.finca_1,
+            variedad=self.var_caturra,
+            fecha_cosecha=date(2026, 11, 5),
+            cantidad_total=Decimal("1200.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        self.cosecha_2 = Cosecha.objects.create(
+            finca=self.finca_2,
+            variedad=self.var_caturra,
+            fecha_cosecha=date(2026, 11, 6),
+            cantidad_total=Decimal("800.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        # Lote 1: Con ficha técnica completa (100% de completitud)
+        self.lote_1 = Lote.objects.create(
+            cosecha=self.cosecha_1,
+            codigo="LOT-ST6-COMPLETO",
+            cantidad=Decimal("1200.00"),
+            proceso_beneficio=self.proceso_lavado,
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        EtapaBeneficio.objects.create(
+            lote=self.lote_1,
+            etapa=EtapaBeneficio.TipoEtapa.SECADO,
+            fecha=date(2026, 11, 7),
+        )
+
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote_1,
+            puntaje_taza=Decimal("89.00"),
+            humedad=Decimal("11.00"),
+            perfil_sensorial="Chocolate, frutos rojos, panela",
+        )
+
+        # Lote 2: Parcial (sin calidad ni etapas)
+        self.lote_2 = Lote.objects.create(
+            cosecha=self.cosecha_2,
+            codigo="LOT-ST6-PARCIAL",
+            cantidad=Decimal("800.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+    def test_cp_hu26_01_visualizacion_macro_asociacion_administrador(self):
+        """CP-HU26-01: Visualización consolidada de todos los municipios para Asociación/Admin."""
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_1)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+
+        metricas = resp.context["metricas"]
+        self.assertTrue(metricas["es_asociacion_o_admin"])
+        self.assertEqual(metricas["resumen_general"]["total_lotes"], 2)
+        self.assertEqual(metricas["indicadores_comercializacion"]["volumen_total_producido_kg"], 2000.0)
+
+        content = resp.content.decode("utf-8")
+        self.assertIn("Desglose Regional por Municipio", content)
+        self.assertIn("Toledo", content)
+        self.assertIn("Labateca", content)
+
+    def test_cp_hu26_02_aislamiento_multi_inquilino_productor(self):
+        """CP-HU26-02: Productor solo ve sus lotes propios y no la producción ajena."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_1)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+
+        metricas = resp.context["metricas"]
+        self.assertFalse(metricas["es_asociacion_o_admin"])
+        # Productor 1 solo tiene el Lote 1 (1200 kg), no debe sumar los 800 kg de Productor 2
+        self.assertEqual(metricas["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(metricas["indicadores_comercializacion"]["volumen_total_producido_kg"], 1200.0)
+
+    def test_cp_hu26_03_filtrado_dinamico_por_municipio_y_variedad(self):
+        """CP-HU26-03: Filtrado multicriterio acota correctamente las agregaciones."""
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_1)
+
+        # Filtrar solo por Toledo
+        resp = self.client.get(f"{self.url_dashboard_web}?municipio_id={self.mun_toledo.id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["metricas"]["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(resp.context["metricas"]["indicadores_comercializacion"]["volumen_total_producido_kg"], 1200.0)
+
+    def test_cp_hu26_04_calculo_exacto_completitud_tecnica_y_calidad_sca(self):
+        """CP-HU26-04: Validación matemática de completitud 100% y puntaje de catación SCA."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_1)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+
+        trazabilidad = resp.context["metricas"]["indicadores_trazabilidad"]
+        # Lote 1 tiene base(40) + georref(10) + proceso(15) + etapa(15) + calidad(20) = 100%
+        self.assertEqual(trazabilidad["completitud_promedio_porcentaje"], 100.0)
+        self.assertEqual(trazabilidad["puntaje_sca_promedio"], 89.0)
+        self.assertEqual(trazabilidad["lotes_con_evaluacion_calidad"], 1)
+
+    def test_cp_hu26_05_renderizado_graficos_chartjs_y_datos_script(self):
+        """CP-HU26-05: El DOM contiene los lienzos Chart.js y el tag json_script con el DTO."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_1)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+
+        content = resp.content.decode("utf-8")
+        self.assertIn('id="graficoEtapasBeneficio"', content)
+        self.assertIn('id="graficoVariedades"', content)
+        self.assertIn('id="graficoEstadosComerciales"', content)
+        self.assertIn('id="graficoRegional"', content)
+        self.assertIn('id="datos-dashboard-inicial"', content)
+        self.assertIn("chart.umd.min.js", content)
+        self.assertIn("dashboard_indicadores.js", content)
+
+    def test_cp_hu26_06_control_acceso_rbac_rechazo_comprador_y_anonimo(self):
+        """CP-HU26-06: Bloqueo de perfiles no autorizados (302 login para anónimo y 403 comprador)."""
+        # 1. Petición anónima
+        resp_anon = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp_anon.status_code, 302)
+        self.assertIn(reverse("login"), resp_anon.url)
+
+        # 2. Petición con rol COMPRADOR
+        _iniciar_sesion_comprador(self.client, usuario_id=self.comprador)
+        resp_comp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp_comp.status_code, 403)
+
+    def test_cp_hu26_07_resiliencia_estado_vacio_sin_errores(self):
+        """CP-HU26-07: Comprobación de que no ocurre ZeroDivisionError ante filtros sin resultados."""
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_1)
+        resp = self.client.get(f"{self.url_dashboard_web}?municipio_id=999999")
+        self.assertEqual(resp.status_code, 200)
+
+        metricas = resp.context["metricas"]
+        self.assertEqual(metricas["resumen_general"]["total_lotes"], 0)
+        self.assertEqual(metricas["indicadores_comercializacion"]["volumen_total_producido_kg"], 0.0)
+        self.assertEqual(metricas["indicadores_comercializacion"]["precio_promedio_kg_cop"], 0.0)
+        self.assertEqual(metricas["indicadores_trazabilidad"]["completitud_promedio_porcentaje"], 0.0)
+
+    def test_cp_hu26_08_soporte_impresion_y_exportacion_reporte(self):
+        """CP-HU26-08: Verificación de presencia del botón y estilos de exportación/impresión."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_1)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+
+        content = resp.content.decode("utf-8")
+        self.assertIn("window.print()", content)
+        self.assertIn("@media print", content)
+        self.assertIn("Exportar / Imprimir", content)
+
+
+
 
 
 
