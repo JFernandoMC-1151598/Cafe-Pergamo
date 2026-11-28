@@ -31,11 +31,13 @@ from django.db.models import (
     DecimalField,
     F,
     FloatField,
+    Prefetch,
     Q,
     Sum,
     Value,
     When,
 )
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 import qrcode
@@ -48,6 +50,7 @@ from qrcode.constants import (
 
 
 from .models import (
+    AvanceNegociacion,
     BitacoraFichaDigital,
     BitacoraPublicacionLote,
     CaracteristicasCalidad,
@@ -419,6 +422,8 @@ def crear_lote(
        de la cosecha, así que dos lotes creados al mismo tiempo contra la
        misma cosecha nunca pueden, juntos, superar su saldo (se procesan
        uno a la vez, nunca leen un saldo "desactualizado").
+    4. El lote siempre nace en el estado 'Recolección' (sin proceso ni etapas
+       de beneficio): el resto del recorrido se registra con `cambiar_estado_lote`.
     """
     if cantidad is None:
         raise ValidationError({"cantidad": "La cantidad del lote es obligatoria."})
@@ -439,26 +444,31 @@ def crear_lote(
                 {"proceso_beneficio": "El proceso seleccionado no está activo o no existe."}
             )
 
+    # Regla de negocio: un lote nuevo SIEMPRE nace en 'Recolección'. Los demás
+    # estados se alcanzan después, uno a uno, con `cambiar_estado_lote`, que sí
+    # valida el orden, el proceso de beneficio y la publicación real.
     estado = None
-    if estado_lote_id is not None:
-        estado = EstadoLote.objects.filter(
-            pk=estado_lote_id, activo=True
-        ).first()
+    if estado_lote_id not in (None, ""):
+        estado = EstadoLote.objects.filter(pk=estado_lote_id, activo=True).first()
         if estado is None:
             raise ValidationError(
                 {"estado_lote": "El estado seleccionado no está activo o no existe."}
             )
+        if (estado.codigo or "").strip().upper() != CODIGO_ESTADO_RECOLECCION:
+            raise ValidationError({
+                "estado_lote": (
+                    "Un lote nuevo siempre se crea en 'Recolección'. Para avanzarlo a otro "
+                    "estado use el cambio de estado del lote."
+                )
+            })
+    else:
+        estado = EstadoLote.objects.filter(
+            codigo__iexact=CODIGO_ESTADO_RECOLECCION, activo=True
+        ).first()
 
-    # Regla de negocio: la etapa de beneficio se indica solo si (y siempre que)
-    # el lote nace en el estado 'En Beneficio'.
+    # La etapa de beneficio solo existe cuando el lote entra a 'En Beneficio';
+    # al crear el lote no aplica.
     _validar_etapa_segun_estado(estado, etapa_beneficio)
-    if _es_estado_beneficio(estado) and proceso is None:
-        raise ValidationError({
-            "proceso_beneficio": "Si el lote está 'En Beneficio', debe indicar el proceso de beneficio."
-        })
-    fecha_etapa_normalizada = (
-        _normalizar_fecha_etapa(fecha_etapa) if _es_estado_beneficio(estado) else None
-    )
 
     with transaction.atomic():
         try:
@@ -513,15 +523,6 @@ def crear_lote(
         # refleje el nuevo saldo (o viceversa).
         cosecha.cantidad_disponible = cosecha.cantidad_disponible - cantidad
         cosecha.save(update_fields=["cantidad_disponible", "actualizado_en"])
-
-        if _es_estado_beneficio(estado):
-            _crear_etapa_beneficio(
-                lote,
-                etapa_beneficio,
-                fecha_etapa_normalizada,
-                campo_etapa="etapa_beneficio",
-                campo_fecha="fecha_etapa",
-            )
 
         # HU18-ST1 (SCRUM-174): Generación y persistencia automática del código QR asociado al lote
         sincronizar_o_generar_qr_lote(lote)
@@ -1021,6 +1022,272 @@ def registrar_auditoria_ficha_digital(
     )
 
 
+REQUISITOS_MINIMOS_TRAZABILIDAD_LOTE = (
+    {
+        "codigo": "lote_activo",
+        "seccion": "Datos del lote",
+        "campo": "activo",
+        "mensaje": "El lote debe estar activo.",
+        "ruta_captura": "lote_detalle",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "cantidad_disponible",
+        "seccion": "Datos del lote",
+        "campo": "cantidad",
+        "mensaje": "El lote debe tener una cantidad disponible mayor a cero.",
+        "ruta_captura": "lote_detalle",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "cosecha_activa",
+        "seccion": "Cosecha",
+        "campo": "activo",
+        "mensaje": "La cosecha asociada debe estar activa.",
+        "ruta_captura": "cosecha_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "origen_finca_activa",
+        "seccion": "Origen",
+        "campo": "finca.activo",
+        "mensaje": "La finca de origen debe estar registrada y activa.",
+        "ruta_captura": "finca_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "municipio_origen",
+        "seccion": "Origen",
+        "campo": "finca.municipio",
+        "mensaje": "La finca debe tener un municipio registrado.",
+        "ruta_captura": "finca_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "variedad_cosecha",
+        "seccion": "Cosecha",
+        "campo": "variedad",
+        "mensaje": "La cosecha debe tener una variedad de café asignada.",
+        "ruta_captura": "cosecha_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "proceso_beneficio",
+        "seccion": "Beneficio",
+        "campo": "proceso_beneficio",
+        "mensaje": "El lote debe tener asignado un proceso de beneficio.",
+        "ruta_captura": "lote_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "etapas_beneficio",
+        "seccion": "Beneficio",
+        "campo": "etapas_beneficio",
+        "mensaje": "El lote debe tener al menos una etapa de beneficio registrada.",
+        "ruta_captura": "lote_etapa_registro",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "registro_calidad",
+        "seccion": "Calidad",
+        "campo": "caracteristicas_calidad",
+        "mensaje": "El lote debe tener un registro de características físicas y sensoriales.",
+        "ruta_captura": "lote_calidad",
+        "obligatorio": True,
+    },
+    {
+        "codigo": "datos_fisicos_sensoriales",
+        "seccion": "Calidad",
+        "campo": "puntaje_taza|humedad",
+        "mensaje": "La calidad debe incluir puntaje en taza o porcentaje de humedad.",
+        "ruta_captura": "lote_calidad",
+        "obligatorio": True,
+    },
+)
+
+
+def obtener_requisitos_minimos_trazabilidad_lote() -> tuple:
+    """
+    HU28-ST2 (SCRUM-300): devuelve la lista central de requisitos mínimos
+    de trazabilidad y calidad que deben cumplirse antes de publicar un lote.
+
+    La tupla conserva el orden de presentación y permite que publicación,
+    ficha digital y futuros indicadores reutilicen la misma lista.
+    """
+    return tuple(dict(requisito) for requisito in REQUISITOS_MINIMOS_TRAZABILIDAD_LOTE)
+
+
+def evaluar_completitud_trazabilidad_lote(lote_or_id: Union[Lote, int, str]) -> Dict[str, Any]:
+    """
+    HU28-ST5 (SCRUM-303): evaluador reutilizable de completitud mínima
+    de trazabilidad y calidad antes de publicar un lote.
+
+    Reutiliza la ponderación de ficha digital existente y la lista central
+    HU28-ST2, devolviendo el porcentaje, faltantes estructurados y el
+    indicador que determina si la publicación puede permitirse.
+    """
+    if isinstance(lote_or_id, Lote):
+        lote = lote_or_id
+    else:
+        qs = Lote.objects.select_related(
+            "cosecha",
+            "cosecha__finca",
+            "cosecha__finca__municipio",
+            "cosecha__variedad",
+            "proceso_beneficio",
+            "estado_lote",
+        )
+        try:
+            if isinstance(lote_or_id, int) or str(lote_or_id).isdigit():
+                lote = qs.get(pk=int(lote_or_id))
+            else:
+                lote = qs.get(codigo=str(lote_or_id).strip().upper())
+        except (Lote.DoesNotExist, ValueError, TypeError):
+            raise ValidationError({"lote": "El lote indicado no existe."})
+
+    cosecha = getattr(lote, "cosecha", None)
+    finca = getattr(cosecha, "finca", None) if cosecha else None
+
+    try:
+        municipio = finca.municipio if finca else None
+    except ObjectDoesNotExist:
+        municipio = None
+
+    etapas = list(
+        lote.etapas_beneficio.filter(activo=True).values(
+            "etapa",
+            "fecha",
+            "observaciones",
+        )
+    )
+
+    try:
+        calidad = lote.caracteristicas_calidad
+    except CaracteristicasCalidad.DoesNotExist:
+        calidad = None
+
+    calidad_info = None
+    if calidad is not None:
+        calidad_info = {
+            "humedad": calidad.humedad,
+            "merma": calidad.merma,
+            "puntaje_taza": calidad.puntaje_taza,
+            "perfil_sensorial": calidad.perfil_sensorial,
+            "observaciones": calidad.observaciones,
+            "humedad_pct": calidad.humedad,
+            "puntaje_sca": calidad.puntaje_taza,
+        }
+
+    evaluacion_ficha = evaluar_consistencia_y_completitud_lote(
+        lote=lote,
+        finca=finca,
+        cosecha=cosecha,
+        proceso=lote.proceso_beneficio,
+        etapas_beneficio=etapas,
+        calidad_info=calidad_info,
+    )
+
+    faltantes = []
+
+    def agregar_faltante(codigo):
+        for requisito in REQUISITOS_MINIMOS_TRAZABILIDAD_LOTE:
+            if requisito["codigo"] == codigo:
+                faltantes.append(dict(requisito))
+                return
+
+    if not lote.activo:
+        agregar_faltante("lote_activo")
+    if lote.cantidad is None or lote.cantidad <= Decimal("0.00"):
+        agregar_faltante("cantidad_disponible")
+    if not cosecha or not cosecha.activo:
+        agregar_faltante("cosecha_activa")
+    if not finca or not finca.activo:
+        agregar_faltante("origen_finca_activa")
+    if finca and not municipio:
+        agregar_faltante("municipio_origen")
+    if not cosecha or not getattr(cosecha, "variedad", None):
+        agregar_faltante("variedad_cosecha")
+    if not lote.proceso_beneficio:
+        agregar_faltante("proceso_beneficio")
+    if not etapas:
+        agregar_faltante("etapas_beneficio")
+    if calidad is None:
+        agregar_faltante("registro_calidad")
+        agregar_faltante("datos_fisicos_sensoriales")
+    elif calidad.puntaje_taza is None and calidad.humedad is None:
+        agregar_faltante("datos_fisicos_sensoriales")
+
+    cumple = len(faltantes) == 0 and evaluacion_ficha["es_consistente"]
+
+    return {
+        "lote_id": lote.pk,
+        "lote_codigo": lote.codigo,
+        "porcentaje": evaluacion_ficha["porcentaje"],
+        "nivel_completitud": evaluacion_ficha["nivel"],
+        "color_nivel": evaluacion_ficha["color_nivel"],
+        "es_consistente": evaluacion_ficha["es_consistente"],
+        "cumple_requisitos_minimos": cumple,
+        "publicacion_permitida": cumple,
+        "faltantes": faltantes,
+        "campos_faltantes": [faltante["mensaje"] for faltante in faltantes],
+        "advertencias": evaluacion_ficha["advertencias"],
+        "campos_completos": evaluacion_ficha["campos_completos"],
+    }
+
+
+def construir_alerta_trazabilidad_lote(lote_or_id: Union[Lote, int, str]) -> Dict[str, Any]:
+    """
+    HU28-ST3 (SCRUM-301): transforma la evaluación técnica en una alerta
+    consumible por la interfaz, con mensaje, sección, campo y enlace directo
+    hacia el formulario necesario para completar el dato.
+    """
+    evaluacion = evaluar_completitud_trazabilidad_lote(lote_or_id)
+    lote_id = evaluacion["lote_id"]
+
+    alertas = []
+    for faltante in evaluacion["faltantes"]:
+        ruta_captura = faltante["ruta_captura"]
+        kwargs = None
+        if ruta_captura in ("lote_detalle", "lote_calidad", "lote_etapa_registro", "lote_registro"):
+            kwargs = {"pk": lote_id}
+        if ruta_captura == "lote_registro":
+            enlace = reverse("lote_registro")
+        elif ruta_captura in ("lote_calidad", "lote_etapa_registro", "lote_detalle"):
+            enlace = reverse(ruta_captura, kwargs=kwargs)
+        elif ruta_captura in ("finca_registro", "cosecha_registro"):
+            enlace = reverse(ruta_captura)
+        else:
+            enlace = reverse("lote_detalle", kwargs={"pk": lote_id})
+
+        alertas.append({
+            "codigo": faltante["codigo"],
+            "seccion": faltante["seccion"],
+            "campo": faltante["campo"],
+            "mensaje": faltante["mensaje"],
+            "enlace_captura": enlace,
+            "obligatorio": faltante["obligatorio"],
+        })
+
+    return {
+        "lote_id": lote_id,
+        "lote_codigo": evaluacion["lote_codigo"],
+        "tipo": "TRAZABILIDAD_INCOMPLETA" if alertas else "TRAZABILIDAD_COMPLETA",
+        "titulo": (
+            "Información de trazabilidad incompleta"
+            if alertas
+            else "Trazabilidad completa"
+        ),
+        "mensaje": (
+            "El lote no puede publicarse hasta completar los datos indicados."
+            if alertas
+            else "El lote cumple los requisitos mínimos de trazabilidad y calidad."
+        ),
+        "porcentaje": evaluacion["porcentaje"],
+        "puede_publicar": evaluacion["publicacion_permitida"],
+        "alertas": alertas,
+        "campos_faltantes": [alerta["mensaje"] for alerta in alertas],
+        "advertencias": evaluacion["advertencias"],
+    }
 def validar_lote_para_publicacion(lote: Lote) -> tuple[bool, list[str]]:
     """
     Evalúa si un lote cumple con la información mínima requerida para ser
@@ -1076,6 +1343,9 @@ def validar_lote_para_publicacion(lote: Lote) -> tuple[bool, list[str]]:
 
     if not lote.proceso_beneficio:
         errores.append("El lote debe tener asignado un proceso de beneficio (Lavado, Natural, Honey, etc.).")
+
+    if not lote.etapas_beneficio.filter(activo=True).exists():
+        errores.append("El lote debe tener al menos una etapa de beneficio registrada.")
 
     # Validación de calidad (HU-15)
     calidad = getattr(lote, "caracteristicas_calidad", None)
@@ -1546,11 +1816,16 @@ def resumen_trazabilidad_productor(productor_id) -> dict:
 
 # Fases generales del ciclo de vida del lote (catálogo EstadoLote), en orden.
 # Al cambiar el estado manualmente, el lote solo avanza por esta secuencia.
+CODIGO_ESTADO_RECOLECCION = "RECOLECCION"
 CODIGO_ESTADO_BENEFICIO = "BENEFICIO"
+# El secado es una etapa del beneficio (EtapaBeneficio.TipoEtapa.SECADO), no una fase
+# aparte del lote: el estado "En Secado" se retiró para no duplicarla. Los lotes que
+# aún lo tengan se tratan como "En Beneficio".
+CODIGOS_ESTADO_RETIRADOS = ("SECADO",)
+CODIGO_FASE_EQUIVALENTE = {"SECADO": CODIGO_ESTADO_BENEFICIO}
 ORDEN_FASES_ESTADO_LOTE = (
-    "RECOLECCION",
+    CODIGO_ESTADO_RECOLECCION,
     CODIGO_ESTADO_BENEFICIO,
-    "SECADO",
     "ALMACENADO",
     "CATACION",
     "PUBLICADO",
@@ -1570,6 +1845,7 @@ def _alinear_estado_con_publicacion(lote: Lote) -> bool:
     actual = lote.estado_lote
     if actual is not None:
         codigo_actual = (actual.codigo or "").strip().upper()
+        codigo_actual = CODIGO_FASE_EQUIVALENTE.get(codigo_actual, codigo_actual)
         if codigo_actual not in ORDEN_FASES_ESTADO_LOTE:
             return False
         if ORDEN_FASES_ESTADO_LOTE.index(codigo_actual) >= ORDEN_FASES_ESTADO_LOTE.index(CODIGO_ESTADO_PUBLICADO):
@@ -1721,6 +1997,13 @@ def cambiar_estado_lote(
         destino = EstadoLote.objects.filter(pk=estado_lote_id, activo=True).first()
         if destino is None:
             raise ValidationError({"estado_lote": "El estado seleccionado no está activo o no existe."})
+        if (destino.codigo or "").strip().upper() in CODIGOS_ESTADO_RETIRADOS:
+            raise ValidationError({
+                "estado_lote": (
+                    f"El estado '{destino.nombre}' ya no se usa: el secado se registra como una "
+                    "etapa del beneficio, con el lote en 'En Beneficio'."
+                )
+            })
 
         actual = lote.estado_lote
         es_beneficio = _es_estado_beneficio(destino)
@@ -1729,6 +2012,7 @@ def cambiar_estado_lote(
 
         if actual is not None:
             codigo_actual = (actual.codigo or "").strip().upper()
+            codigo_actual = CODIGO_FASE_EQUIVALENTE.get(codigo_actual, codigo_actual)
             codigo_destino = (destino.codigo or "").strip().upper()
             if codigo_actual in ORDEN_FASES_ESTADO_LOTE and codigo_destino in ORDEN_FASES_ESTADO_LOTE:
                 if ORDEN_FASES_ESTADO_LOTE.index(codigo_destino) < ORDEN_FASES_ESTADO_LOTE.index(codigo_actual):
@@ -2614,6 +2898,444 @@ def marcar_manifestacion_interes_vista(*, manifestacion_id, productor_id):
 
     manifestacion.marcar_vista_por_productor()
     return manifestacion
+
+
+# ==============================================================================
+# HU-23 (SCRUM-232): REGISTRAR EL AVANCE DE UNA NEGOCIACIÓN
+# =======================================================================
+
+
+
+ESTADOS_AVANCE_NEGOCIACION = tuple(AvanceNegociacion.EstadoAvance.values)
+
+
+def _decimal_avance(valor, etiqueta, *, requerido):
+    """
+    Convierte a Decimal un campo numérico del avance. Retorna `(numero, error)`;
+    `error` es None cuando el valor es válido (o está vacío y no es requerido).
+    """
+    if valor is None or str(valor).strip() == "":
+        return None, (f"{etiqueta} es obligatorio." if requerido else None)
+    try:
+        numero = Decimal(str(valor).strip())
+    except Exception:
+        return None, f"{etiqueta} debe ser un valor numérico válido."
+    if not numero.is_finite():
+        return None, f"{etiqueta} debe ser un valor numérico válido."
+    if numero <= Decimal("0"):
+        return None, f"{etiqueta} debe ser mayor a cero."
+    return numero, None
+
+
+ESTADOS_NEGOCIACION_CERRADOS = (
+    NegociacionLote.EstadoNegociacion.ACEPTADA,
+    NegociacionLote.EstadoNegociacion.RECHAZADA,
+    NegociacionLote.EstadoNegociacion.CANCELADA,
+)
+
+# Estado de la NegociacionLote que corresponde al estado del último avance.
+MAPA_ESTADO_AVANCE_A_NEGOCIACION = {
+    AvanceNegociacion.EstadoAvance.ABIERTA: NegociacionLote.EstadoNegociacion.EN_NEGOCIACION,
+    AvanceNegociacion.EstadoAvance.ACEPTADA: NegociacionLote.EstadoNegociacion.ACEPTADA,
+    AvanceNegociacion.EstadoAvance.RECHAZADA: NegociacionLote.EstadoNegociacion.RECHAZADA,
+}
+
+
+def validar_datos_avance_negociacion(lote, negociacion, productor_id, datos) -> Dict[str, Any]:
+    """
+    HU23-ST4 (SCRUM-271): reglas de negocio del avance de una negociación.
+
+    Se aplican siempre en backend (RNF-09), sin depender de la vista que
+    llame al servicio. `negociacion` es la NegociacionLote ya existente de la
+    manifestación, o None si este sería el primer avance. Devuelve los datos
+    ya normalizados; si alguna regla falla lanza `ValidationError` con el
+    error por campo.
+
+    Condiciones previas (se informan de inmediato, una a la vez):
+      - Solo el productor dueño del lote puede registrar avances (`permiso`).
+      - El lote debe seguir activo (`lote`).
+      - Una negociación ya Aceptada, Rechazada o Cancelada está cerrada: no
+        admite más avances, porque el estado solo avanza (`estado`).
+
+    Reglas sobre los datos (se informan todas juntas, por campo):
+      - Estado limitado a Abierta, Aceptada o Rechazada; si no se envía queda
+        en Abierta (`estado`).
+      - Cantidad obligatoria, positiva y sin superar el stock del lote
+        (`cantidad_kg`).
+      - Precio por kg obligatorio y positivo (`precio_por_kg`).
+      - Presupuesto, si se indica, positivo (`presupuesto`).
+      - Fecha estimada de cierre, si se indica, no anterior a hoy
+        (`fecha_estimada_cierre`).
+      - Observaciones de máximo 1000 caracteres (`observaciones`).
+    """
+    if str(lote.cosecha.finca.productor_id) != str(productor_id):
+        raise ValidationError({"permiso": "Solo el productor dueño del lote puede registrar avances de su negociación."})
+
+    if not lote.activo:
+        raise ValidationError({"lote": "El lote de esta negociación no se encuentra activo."})
+
+    if negociacion is not None and negociacion.estado in ESTADOS_NEGOCIACION_CERRADOS:
+        raise ValidationError(
+            {"estado": f"La negociación ya fue {negociacion.get_estado_display().lower()}; no admite más avances."}
+        )
+
+    errores: Dict[str, str] = {}
+
+    estado_bruto = datos.get("estado")
+    estado = str(estado_bruto).strip().upper() if estado_bruto is not None else ""
+    if not estado:
+        estado = AvanceNegociacion.EstadoAvance.ABIERTA
+    if estado not in ESTADOS_AVANCE_NEGOCIACION:
+        errores["estado"] = "El estado del avance debe ser Abierta, Aceptada o Rechazada."
+
+    cantidad, error = _decimal_avance(datos.get("cantidad_kg"), "La cantidad", requerido=True)
+    if error:
+        errores["cantidad_kg"] = error
+    elif cantidad > lote.cantidad:
+        errores["cantidad_kg"] = f"La cantidad ({cantidad} kg) no puede superar el stock del lote ({lote.cantidad} kg)."
+
+    precio, error = _decimal_avance(datos.get("precio_por_kg"), "El precio por kg", requerido=True)
+    if error:
+        errores["precio_por_kg"] = error
+
+    presupuesto, error = _decimal_avance(datos.get("presupuesto"), "El presupuesto", requerido=False)
+    if error:
+        errores["presupuesto"] = error
+
+    fecha_cierre = datos.get("fecha_estimada_cierre")
+    if fecha_cierre in (None, ""):
+        fecha_cierre = None
+    else:
+        if isinstance(fecha_cierre, str):
+            texto = fecha_cierre.strip()
+            try:
+                fecha_cierre = parse_date(texto) if re.fullmatch(r"\d{4}-\d{2}-\d{2}", texto) else None
+            except ValueError:
+                fecha_cierre = None
+            if fecha_cierre is None:
+                errores["fecha_estimada_cierre"] = "La fecha estimada de cierre debe tener formato AAAA-MM-DD."
+        if fecha_cierre is not None and fecha_cierre < timezone.localdate():
+            errores["fecha_estimada_cierre"] = "La fecha estimada de cierre no puede ser anterior a hoy."
+
+    observaciones = (datos.get("observaciones") or "").strip()
+    if len(observaciones) > 1000:
+        errores["observaciones"] = "Las observaciones no pueden superar los 1000 caracteres."
+
+    if errores:
+        raise ValidationError(errores)
+
+    return {
+        "estado": estado,
+        "cantidad_kg": cantidad,
+        "precio_por_kg": precio,
+        "presupuesto": presupuesto,
+        "fecha_estimada_cierre": fecha_cierre,
+        "observaciones": observaciones,
+    }
+
+
+def registrar_avance_negociacion(
+    *,
+    manifestacion_id: Any,
+    productor_id: Any,
+    estado: Optional[str] = None,
+    cantidad_kg: Any = None,
+    precio_por_kg: Any = None,
+    presupuesto: Any = None,
+    fecha_estimada_cierre: Any = None,
+    observaciones: str = "",
+) -> Dict[str, Any]:
+    """
+    HU23-ST5 (SCRUM-272): registra un avance en la negociación que nace de
+    una manifestación de interés, guardando la fecha de registro y el estado
+    (Abierta por defecto, o el indicado). Las reglas están en
+    `validar_datos_avance_negociacion` (HU23-ST4).
+
+    Persistencia (HU23-ST1 / SCRUM-268): el primer avance abre la
+    `NegociacionLote` de la manifestación; los siguientes se agregan a la
+    misma. El estado de la negociación sigue al del último avance (Abierta =
+    En negociación; Aceptada o Rechazada la cierran) y, al aceptarse, queda
+    con el precio acordado para que HU-24 pueda registrar la venta.
+
+    Operación atómica: bloquea la manifestación y su negociación mientras
+    valida y guarda, así dos peticiones simultáneas no pueden registrar
+    avances sobre una negociación que la otra acaba de cerrar. Si algo falla
+    no queda nada guardado. Retorna un diccionario con el avance persistido.
+    """
+    if not productor_id:
+        raise ValidationError({"permiso": "Se requiere la identificación del productor."})
+
+    with transaction.atomic():
+        try:
+            manifestacion = (
+                ManifestacionInteres.objects.select_for_update(of=("self",))
+                .select_related("lote__cosecha__finca")
+                .get(pk=manifestacion_id)
+            )
+        except (ManifestacionInteres.DoesNotExist, ValueError, TypeError):
+            raise ValidationError({"manifestacion": "La manifestación de interés indicada no existe."})
+
+        lote = manifestacion.lote
+        negociacion = (
+            NegociacionLote.objects.select_for_update(of=("self",))
+            .filter(manifestacion_interes=manifestacion)
+            .order_by("-creado_en", "-id")
+            .first()
+        )
+
+        datos = validar_datos_avance_negociacion(
+            lote,
+            negociacion,
+            productor_id,
+            {
+                "estado": estado,
+                "cantidad_kg": cantidad_kg,
+                "precio_por_kg": precio_por_kg,
+                "presupuesto": presupuesto,
+                "fecha_estimada_cierre": fecha_estimada_cierre,
+                "observaciones": observaciones,
+            },
+        )
+
+        estado_negociacion = MAPA_ESTADO_AVANCE_A_NEGOCIACION[datos["estado"]]
+        if negociacion is None:
+            negociacion = NegociacionLote(
+                lote=lote,
+                comprador_id=manifestacion.comprador_id,
+                comprador_correo=manifestacion.comprador_correo,
+                manifestacion_interes=manifestacion,
+            )
+        negociacion.estado = estado_negociacion
+        negociacion.cantidad_kg = datos["cantidad_kg"]
+        negociacion.precio_propuesto_por_kg = datos["precio_por_kg"]
+        if estado_negociacion == NegociacionLote.EstadoNegociacion.ACEPTADA:
+            negociacion.precio_acordado_por_kg = datos["precio_por_kg"]
+        # Usuario es managed=False: no existe en la BD de pruebas.
+        negociacion.full_clean(exclude=["comprador"])
+        negociacion.save()
+
+        avance = AvanceNegociacion(
+            negociacion=negociacion,
+            registrado_por_id=productor_id,
+            **datos,
+        )
+        avance.full_clean(exclude=["registrado_por"])
+        avance.save()
+
+        return {
+            "id": avance.pk,
+            "negociacion_id": negociacion.pk,
+            "negociacion_estado": negociacion.estado,
+            "manifestacion_id": manifestacion.pk,
+            "lote_id": lote.id,
+            "lote_codigo": lote.codigo,
+            "comprador_id": str(manifestacion.comprador_id),
+            "estado": avance.estado,
+            "estado_display": avance.get_estado_display(),
+            "cantidad_kg": str(avance.cantidad_kg),
+            "precio_por_kg": str(avance.precio_por_kg),
+            "presupuesto": str(avance.presupuesto) if avance.presupuesto is not None else None,
+            "fecha_estimada_cierre": avance.fecha_estimada_cierre.isoformat() if avance.fecha_estimada_cierre else None,
+            "observaciones": avance.observaciones,
+            "fecha_registro": avance.creado_en.isoformat(),
+            "negociacion_cerrada": negociacion.estado in ESTADOS_NEGOCIACION_CERRADOS,
+        }
+
+
+def obtener_historial_comercial_lote(
+    *,
+    lote_id: Optional[Union[int, str]] = None,
+    lote_codigo: Optional[str] = None,
+    lote: Optional[Lote] = None,
+    productor_id: Any = None,
+) -> Dict[str, Any]:
+    """
+    HU25-ST4 (SCRUM-282): consulta consolidada y solo lectura del historial
+    comercial asociado a un lote.
+
+    Reúne manifestaciones de interés, negociaciones formales, avances registrados
+    y ventas cerradas. Valida que el lote exista y que pertenezca al productor
+    autenticado antes de construir la línea de tiempo.
+
+    Los resultados se ordenan por fecha ascendente y no realizan escrituras ni
+    eliminaciones sobre ninguna entidad comercial.
+    """
+    if not productor_id:
+        raise ValidationError({"productor": "Se requiere la identificación del productor."})
+
+    lote_obj = lote
+    if lote_obj is None:
+        try:
+            if lote_id is not None:
+                lote_obj = Lote.objects.select_related(
+                    "cosecha__finca",
+                    "cosecha__variedad",
+                ).get(pk=lote_id)
+            elif lote_codigo:
+                lote_obj = Lote.objects.select_related(
+                    "cosecha__finca",
+                    "cosecha__variedad",
+                ).get(codigo=str(lote_codigo).strip())
+            else:
+                raise ValidationError({"lote": "Debe indicar el identificador o código del lote."})
+        except (Lote.DoesNotExist, ValueError, TypeError):
+            raise ValidationError({"lote": "El lote indicado no existe."})
+
+    if str(lote_obj.cosecha.finca.productor_id) != str(productor_id):
+        raise ValidationError({
+            "permiso": "No tiene permiso para consultar el historial comercial de este lote."
+        })
+
+    manifestaciones = ManifestacionInteres.objects.filter(lote=lote_obj).select_related(
+        "lote",
+    )
+
+    negociaciones = NegociacionLote.objects.filter(lote=lote_obj).select_related(
+        "manifestacion_interes",
+        "lote",
+    ).prefetch_related(
+        Prefetch(
+            "avances",
+            queryset=AvanceNegociacion.objects.select_related(
+                "negociacion",
+            ).order_by("creado_en", "id"),
+        )
+    )
+
+    ventas = VentaLote.objects.filter(lote=lote_obj).select_related(
+        "negociacion",
+        "lote",
+    )
+
+    eventos: List[Dict[str, Any]] = []
+
+    for manifestacion in manifestaciones:
+        eventos.append({
+            "tipo_operacion": "MANIFESTACION",
+            "tipo": "MANIFESTACION",
+            "fecha": manifestacion.creado_en,
+            "comprador_id": manifestacion.comprador_id,
+            "comprador_correo": manifestacion.comprador_correo,
+            "cantidad_kg": manifestacion.cantidad_kg,
+            "precio_por_kg": None,
+            "presupuesto": None,
+            "estado": manifestacion.estado,
+            "estado_display": manifestacion.get_estado_display(),
+            "observaciones": manifestacion.mensaje,
+            "registro": manifestacion,
+        })
+
+    for negociacion in negociaciones:
+        eventos.append({
+            "tipo_operacion": "NEGOCIACION",
+            "tipo": "NEGOCIACION",
+            "fecha": negociacion.creado_en,
+            "comprador_id": negociacion.comprador_id,
+            "comprador_correo": negociacion.comprador_correo,
+            "cantidad_kg": negociacion.cantidad_kg,
+            "precio_por_kg": negociacion.precio_acordado_por_kg or negociacion.precio_propuesto_por_kg,
+            "presupuesto": None,
+            "estado": negociacion.estado,
+            "estado_display": negociacion.get_estado_display(),
+            "observaciones": negociacion.observaciones,
+            "registro": negociacion,
+        })
+
+        for avance in negociacion.avances.all():
+            eventos.append({
+                "tipo_operacion": "AVANCE_NEGOCIACION",
+                "tipo": "AVANCE_NEGOCIACION",
+                "fecha": avance.creado_en,
+                "comprador_id": negociacion.comprador_id,
+                "comprador_correo": negociacion.comprador_correo,
+                "registrado_por_id": avance.registrado_por_id,
+                "cantidad_kg": avance.cantidad_kg,
+                "precio_por_kg": avance.precio_por_kg,
+                "presupuesto": avance.presupuesto,
+                "estado": avance.estado,
+                "estado_display": avance.get_estado_display(),
+                "observaciones": avance.observaciones,
+                "fecha_estimada_cierre": avance.fecha_estimada_cierre,
+                "registro": avance,
+            })
+
+    for venta in ventas:
+        eventos.append({
+            "tipo_operacion": "VENTA",
+            "tipo": "VENTA",
+            "fecha": venta.fecha_venta or venta.creado_en,
+            "comprador_id": venta.comprador_id,
+            "comprador_correo": venta.comprador_correo,
+            "cantidad_kg": venta.cantidad_kg,
+            "precio_por_kg": venta.precio_unitario_kg,
+            "precio_total": venta.precio_total,
+            "codigo_comprobante": venta.codigo_comprobante,
+            "estado": "VENTA",
+            "estado_display": "Venta cerrada",
+            "observaciones": venta.observaciones,
+            "registro": venta,
+        })
+
+    eventos.sort(key=lambda evento: (evento["fecha"], evento["tipo_operacion"]))
+
+    return {
+        "lote": lote_obj,
+        "lote_id": lote_obj.pk,
+        "lote_codigo": lote_obj.codigo,
+        "productor_id": str(lote_obj.cosecha.finca.productor_id),
+        "eventos": eventos,
+        "operaciones": eventos,
+        "total_eventos": len(eventos),
+    }
+
+
+def listar_historial_comercial_lote(**kwargs) -> Dict[str, Any]:
+    """Alias descriptivo para listar el historial comercial consolidado."""
+    return obtener_historial_comercial_lote(**kwargs)
+
+
+def consultar_historial_comercial_lote(**kwargs) -> Dict[str, Any]:
+    """Alias compatible con los nombres de consulta usados por vistas y API."""
+    return obtener_historial_comercial_lote(**kwargs)
+
+
+def obtener_negociacion_manifestacion(*, manifestacion_id: Any, productor_id: Any) -> Dict[str, Any]:
+    """
+    HU23-ST3 (SCRUM-270): reúne lo necesario para consultar el avance de la
+    negociación de una manifestación de interés: la manifestación, la
+    negociación (None si todavía no hay avances) y su historial de avances,
+    del más reciente al más antiguo.
+
+    Solo el productor dueño del lote puede consultarla (`permiso`); si la
+    manifestación no existe se informa en `manifestacion`.
+    """
+    try:
+        manifestacion = ManifestacionInteres.objects.select_related(
+            "lote__cosecha__finca"
+        ).get(pk=manifestacion_id)
+    except (ManifestacionInteres.DoesNotExist, ValueError, TypeError):
+        raise ValidationError({"manifestacion": "La manifestación de interés indicada no existe."})
+
+    lote = manifestacion.lote
+    if not productor_id or str(lote.cosecha.finca.productor_id) != str(productor_id):
+        raise ValidationError({"permiso": "No tiene permiso para ver la negociación de este lote."})
+
+    negociacion = (
+        NegociacionLote.objects.filter(manifestacion_interes=manifestacion)
+        .order_by("-creado_en", "-id")
+        .first()
+    )
+    avances = list(negociacion.avances.order_by("-creado_en", "-id")) if negociacion else []
+    cerrada = negociacion is not None and negociacion.estado in ESTADOS_NEGOCIACION_CERRADOS
+    return {
+        "manifestacion": manifestacion,
+        "lote": lote,
+        "negociacion": negociacion,
+        "avances": avances,
+        "ultimo_avance": avances[0] if avances else None,
+        "cerrada": cerrada,
+        "puede_registrar": (not cerrada) and lote.activo,
+    }
 
 
 # ==============================================================================

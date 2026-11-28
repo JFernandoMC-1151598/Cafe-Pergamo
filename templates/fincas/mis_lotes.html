@@ -220,6 +220,9 @@
                             <a href="{% url 'lote_detalle' lote.id %}" class="btn btn-outline-secondary btn-sm" title="Ver historial de beneficio">
                                 <i class="bi bi-clock-history me-1"></i>Historial
                             </a>
+                            <a href="{% url 'lote_detalle' lote.id %}#historial-comercial" class="btn btn-outline-primary btn-sm" title="Ver historial comercial del lote">
+                                <i class="bi bi-cash-stack me-1"></i>Comercial
+                            </a>
                             <!-- Un solo botón: cambia el estado del lote y, si pasa a "En Beneficio", registra la etapa -->
                             <a href="{% url 'lote_cambiar_estado' lote.id %}" class="btn btn-outline-success btn-sm" title="Cambiar el estado del lote (y registrar la etapa de beneficio)">
                                 <i class="bi bi-arrow-left-right me-1"></i>Estado
@@ -412,9 +415,19 @@
                                 </div>
                                 <h6 class="fw-bold small text-dark mb-2">Información pendiente por completar:</h6>
                                 <ul class="list-group list-group-flush small mb-3">
-                                    {% for err in item.errores_publicacion %}
+                                    {% for alerta in item.alerta_trazabilidad.alertas %}
                                     <li class="list-group-item px-0 py-2 text-danger">
-                                        <i class="bi bi-x-circle-fill me-2"></i>{{ err }}
+                                        <div class="d-flex align-items-start justify-content-between gap-3">
+                                            <div>
+                                                <i class="bi bi-x-circle-fill me-2"></i>
+                                                <span class="fw-semibold">{{ alerta.seccion }}:</span>
+                                                {{ alerta.mensaje }}
+                                            </div>
+                                            <a href="{{ alerta.enlace_captura }}" class="btn btn-outline-danger btn-sm text-nowrap flex-shrink-0">
+                                                Completar
+                                                <i class="bi bi-arrow-right ms-1"></i>
+                                            </a>
+                                        </div>
                                     </li>
                                     {% endfor %}
                                 </ul>

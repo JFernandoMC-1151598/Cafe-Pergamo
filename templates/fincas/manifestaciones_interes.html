@@ -1,7 +1,10 @@
 {% extends 'base.html' %}
 {% load static %}
+{% load rbac_tags %}
 
 {% block title %}Manifestaciones de Interés — Café Pérgamo{% endblock %}
+
+{% block messages %}{% endblock %}
 
 {% block content %}
 <div class="container py-5">
@@ -60,7 +63,12 @@
                             </p>
                             {% endif %}
                         </div>
-                        <div class="text-end">
+                        <div class="text-end d-flex flex-column align-items-end gap-2">
+                            {% if rol_actual|tiene_permiso:"negociaciones.registrar_avance" %}
+                            <a href="{% url 'manifestacion_interes_negociacion' m.pk %}" class="btn btn-pergamo btn-sm fw-semibold">
+                                <i class="bi bi-chat-left-text me-1"></i>Negociación
+                            </a>
+                            {% endif %}
                             {% if not m.vista_por_productor %}
                             <form method="post" action="{% url 'manifestacion_interes_marcar_vista' m.pk %}">
                                 {% csrf_token %}

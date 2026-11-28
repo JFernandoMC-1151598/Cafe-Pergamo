@@ -1,0 +1,544 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}
+    {% if q %}Resultados para "{{ q }}" — Búsqueda Global | Café Pérgamo{% else %}Búsqueda Global | Café Pérgamo{% endif %}
+{% endblock %}
+
+{% block messages %}{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* =========================================================================
+       Estilos Institucionales de Búsqueda Global (HU-29 / SCRUM-295, SCRUM-297)
+       Cumplimiento estricto WCAG 2.1 AA (contraste >= 4.5:1) y paleta Pérgamo.
+       Degradado institucional directo para evitar colisiones con Bootstrap 5.
+       ========================================================================= */
+    .busqueda-hero {
+        background: linear-gradient(135deg, #2B1810 0%, #4A2C2A 55%, #1B381E 100%);
+        color: #ffffff;
+    }
+
+    .busqueda-hero-badge {
+        background-color: rgba(255, 255, 255, 0.16);
+        color: #ffffff;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        font-size: 0.85rem;
+    }
+
+    .busqueda-hero-resumen {
+        color: #ffffff;
+        font-size: 1rem;
+        background-color: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        border-radius: 0.75rem;
+        padding: 0.65rem 1rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .busqueda-hero-tip {
+        background-color: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        color: #ffffff;
+    }
+
+    /* Pestañas de segmentación por entidad (estilo primario institucional) */
+    .busqueda-tab {
+        background-color: #F4EFEA;
+        color: #4A2C2A;
+        border: 1px solid #E2D6CA;
+        transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+    }
+
+    .busqueda-tab:hover,
+    .busqueda-tab:focus-visible {
+        background-color: #EAE0D5;
+        color: #361F1E;
+        border-color: #C9B7A6;
+    }
+
+    .busqueda-tab:focus-visible {
+        outline: 3px solid #B07D4B;
+        outline-offset: 2px;
+    }
+
+    .busqueda-tab.active {
+        background-color: #4A2C2A !important;
+        color: #ffffff !important;
+        border-color: #4A2C2A !important;
+        box-shadow: 0 4px 12px rgba(74, 44, 42, 0.24);
+    }
+
+    .busqueda-tab-count {
+        background-color: #4A2C2A;
+        color: #ffffff;
+        font-weight: 700;
+    }
+
+    .busqueda-tab.active .busqueda-tab-count {
+        background-color: #ffffff;
+        color: #4A2C2A;
+    }
+
+    /* Tarjetas de resultados */
+    .busqueda-card {
+        border: 1px solid #E8DED4;
+        transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+    }
+
+    .busqueda-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 24px rgba(74, 44, 42, 0.1) !important;
+        border-color: #C9B7A6;
+    }
+
+    .busqueda-icon-box {
+        width: 56px;
+        height: 56px;
+        flex-shrink: 0;
+        border-radius: 0.85rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.55rem;
+    }
+
+    .busqueda-icon-lote {
+        background-color: #E7F3E8;
+        color: #1E4620;
+        border: 1px solid #C6E2C8;
+    }
+
+    .busqueda-icon-productor {
+        background-color: #E6F4FA;
+        color: #0B4F6C;
+        border: 1px solid #BFE2F0;
+    }
+
+    .busqueda-icon-comprador {
+        background-color: #FFF4DC;
+        color: #6B4500;
+        border: 1px solid #F3DCAA;
+    }
+
+    .busqueda-icon-operacion {
+        background-color: #F3EAE8;
+        color: #4A2C2A;
+        border: 1px solid #DFCCC7;
+    }
+
+    .busqueda-titulo-link {
+        color: #2B2B2B;
+        text-decoration: none;
+        transition: color 0.15s ease;
+    }
+
+    .busqueda-titulo-link:hover,
+    .busqueda-titulo-link:focus-visible {
+        color: #4A2C2A;
+        text-decoration: underline;
+    }
+
+    .busqueda-badge-relevancia {
+        background-color: #E6F4EA;
+        color: #1E4620;
+        border: 1px solid #B7DFC2;
+        font-size: 0.72rem;
+        font-weight: 600;
+    }
+
+    .busqueda-meta-chip {
+        background-color: #F8F6F3;
+        color: #2B2B2B;
+        border: 1px solid #E5DCD2;
+        font-size: 0.8rem;
+        font-weight: 500;
+    }
+
+    .busqueda-meta-chip strong {
+        color: #4A2C2A;
+    }
+
+    .busqueda-empty-card {
+        border: 1px dashed #D8CBBF;
+        background-color: #FCFBF9;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container py-4">
+
+    {% if messages %}
+    <div class="mb-3">
+        {% for message in messages %}
+        <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show shadow-sm" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Cerrar"></button>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- =========================================================================
+         Encabezado Institucional con Resumen de Búsqueda (HU29-ST5 / SCRUM-295)
+         Degradado institucional directo con texto blanco (#ffffff), WCAG 2.1 AA
+         ========================================================================= -->
+    <section class="card border-0 shadow-sm rounded-4 mb-4 overflow-hidden busqueda-hero" aria-label="Encabezado de búsqueda global">
+        <div class="card-body p-4 p-md-5">
+            <div class="row align-items-center g-4">
+                <div class="col-lg-8">
+                    <span class="badge busqueda-hero-badge mb-2 px-3 py-2 rounded-pill fw-semibold">
+                        <i class="bi bi-search me-1" aria-hidden="true"></i> Subsistema de Consulta y Trazabilidad Unificada
+                    </span>
+
+                    <h1 class="h2 fw-bold text-white mb-2">Búsqueda Global en Café Pérgamo</h1>
+
+                    {% if q %}
+                    <p class="busqueda-hero-resumen mb-4" id="resumenBusqueda">
+                        <i class="bi bi-funnel-fill text-warning" aria-hidden="true"></i>
+                        <span>
+                            Resultados para <strong>{{ q }}</strong> ({{ total_resultados }} encontrado{{ total_resultados|pluralize:"s" }} en {{ tiempo_ms|default:0 }} ms)
+                        </span>
+                    </p>
+                    {% else %}
+                    <p class="mb-4" style="max-width: 650px; color: rgba(255, 255, 255, 0.92);">
+                        Explora simultáneamente lotes en oferta, caficultores de Norte de Santander, compradores certificados y operaciones comerciales con trazabilidad garantizada.
+                    </p>
+                    {% endif %}
+
+                    <!-- Formulario de búsqueda principal -->
+                    <form method="GET" action="{% url 'busqueda_global' %}" class="row g-2 align-items-center" role="search">
+                        <input type="hidden" name="tipo" value="{{ tipo_activo|default:'todas' }}">
+                        <div class="col-12 col-md-9">
+                            <div class="input-group input-group-lg shadow-sm rounded-3 overflow-hidden">
+                                <span class="input-group-text bg-white border-0 ps-3" style="color: #4A2C2A;">
+                                    <i class="bi bi-search" aria-hidden="true"></i>
+                                </span>
+                                <input type="search"
+                                       name="q"
+                                       id="mainSearchInput"
+                                       class="form-control border-0 ps-2 bg-white"
+                                       style="color: #2B2B2B;"
+                                       placeholder="Buscar por código de lote, finca, municipio, productor o comprador..."
+                                       value="{{ q|default:'' }}"
+                                       aria-label="Término de búsqueda"
+                                       autocomplete="off"
+                                       autofocus>
+                                {% if q %}
+                                <a href="{% url 'busqueda_global' %}"
+                                   class="btn bg-white border-0 text-secondary d-flex align-items-center"
+                                   title="Limpiar búsqueda"
+                                   aria-label="Limpiar búsqueda">
+                                    <i class="bi bi-x-circle-fill" aria-hidden="true"></i>
+                                </a>
+                                {% endif %}
+                            </div>
+                        </div>
+                        <div class="col-12 col-md-3">
+                            <button type="submit"
+                                    class="btn btn-warning w-100 btn-lg fw-bold text-dark shadow-sm d-flex align-items-center justify-content-center">
+                                <i class="bi bi-search me-2" aria-hidden="true"></i> Buscar
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="col-lg-4 d-none d-lg-block">
+                    <div class="p-3 rounded-4 busqueda-hero-tip">
+                        <div class="d-flex align-items-center mb-2">
+                            <i class="bi bi-keyboard text-warning fs-4 me-2" aria-hidden="true"></i>
+                            <span class="fw-semibold text-white">Atajo de teclado</span>
+                        </div>
+                        <p class="small mb-0" style="color: rgba(255, 255, 255, 0.92);">
+                            Presiona en cualquier pantalla la tecla <kbd class="bg-dark text-white px-2 py-1 rounded">/</kbd> para activar la búsqueda global al instante.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- =========================================================================
+         Avisos informativos / Validación de término corto
+         ========================================================================= -->
+    {% if aviso %}
+    <div class="alert alert-warning border-0 shadow-sm rounded-3 d-flex align-items-center mb-4 text-dark" role="alert">
+        <i class="bi bi-info-circle-fill fs-5 me-3" aria-hidden="true"></i>
+        <div>{{ aviso }}</div>
+    </div>
+    {% endif %}
+
+    <!-- =========================================================================
+         Barra de Filtro por Entidad (Pestañas / Tabs Interactivos)
+         Oculta entidades fuera de entidades_permitidas según RBAC.
+         La pestaña activa resalta con estilo primario institucional (#4A2C2A).
+         ========================================================================= -->
+    <div class="d-flex flex-wrap justify-content-between align-items-center border-bottom pb-3 mb-4 gap-3">
+        <nav aria-label="Filtrar resultados por entidad" class="flex-grow-1">
+            <ul class="nav nav-pills flex-wrap gap-2" id="tabsFiltroEntidad">
+                <!-- Pestaña: Todas -->
+                <li class="nav-item">
+                    <a class="nav-link busqueda-tab rounded-pill px-3 py-2 fw-semibold {% if tipo_activo == 'todas' or not tipo_activo %}active{% endif %}"
+                       href="{% url 'busqueda_global' %}?q={{ q|urlencode }}&tipo=todas"
+                       data-entidad="todas"
+                       {% if tipo_activo == 'todas' or not tipo_activo %}aria-current="page"{% endif %}>
+                        <i class="bi bi-grid-fill me-1" aria-hidden="true"></i> Todas
+                        <span class="badge busqueda-tab-count ms-1 rounded-pill">
+                            {{ conteo_por_entidad.todas|default:0 }}
+                        </span>
+                    </a>
+                </li>
+
+                <!-- Pestaña: Lotes -->
+                {% if 'lotes' in entidades_permitidas %}
+                <li class="nav-item">
+                    <a class="nav-link busqueda-tab rounded-pill px-3 py-2 fw-semibold {% if tipo_activo == 'lotes' %}active{% endif %}"
+                       href="{% url 'busqueda_global' %}?q={{ q|urlencode }}&tipo=lotes"
+                       data-entidad="lotes"
+                       {% if tipo_activo == 'lotes' %}aria-current="page"{% endif %}>
+                        <i class="bi bi-box-seam me-1" aria-hidden="true"></i> Lotes
+                        <span class="badge busqueda-tab-count ms-1 rounded-pill">
+                            {{ conteo_por_entidad.lotes|default:0 }}
+                        </span>
+                    </a>
+                </li>
+                {% endif %}
+
+                <!-- Pestaña: Productores -->
+                {% if 'productores' in entidades_permitidas %}
+                <li class="nav-item">
+                    <a class="nav-link busqueda-tab rounded-pill px-3 py-2 fw-semibold {% if tipo_activo == 'productores' %}active{% endif %}"
+                       href="{% url 'busqueda_global' %}?q={{ q|urlencode }}&tipo=productores"
+                       data-entidad="productores"
+                       {% if tipo_activo == 'productores' %}aria-current="page"{% endif %}>
+                        <i class="bi bi-person-badge me-1" aria-hidden="true"></i> Productores
+                        <span class="badge busqueda-tab-count ms-1 rounded-pill">
+                            {{ conteo_por_entidad.productores|default:0 }}
+                        </span>
+                    </a>
+                </li>
+                {% endif %}
+
+                <!-- Pestaña: Compradores -->
+                {% if 'compradores' in entidades_permitidas %}
+                <li class="nav-item">
+                    <a class="nav-link busqueda-tab rounded-pill px-3 py-2 fw-semibold {% if tipo_activo == 'compradores' %}active{% endif %}"
+                       href="{% url 'busqueda_global' %}?q={{ q|urlencode }}&tipo=compradores"
+                       data-entidad="compradores"
+                       {% if tipo_activo == 'compradores' %}aria-current="page"{% endif %}>
+                        <i class="bi bi-bag-check me-1" aria-hidden="true"></i> Compradores
+                        <span class="badge busqueda-tab-count ms-1 rounded-pill">
+                            {{ conteo_por_entidad.compradores|default:0 }}
+                        </span>
+                    </a>
+                </li>
+                {% endif %}
+
+                <!-- Pestaña: Operaciones -->
+                {% if 'operaciones' in entidades_permitidas %}
+                <li class="nav-item">
+                    <a class="nav-link busqueda-tab rounded-pill px-3 py-2 fw-semibold {% if tipo_activo == 'operaciones' %}active{% endif %}"
+                       href="{% url 'busqueda_global' %}?q={{ q|urlencode }}&tipo=operaciones"
+                       data-entidad="operaciones"
+                       {% if tipo_activo == 'operaciones' %}aria-current="page"{% endif %}>
+                        <i class="bi bi-receipt me-1" aria-hidden="true"></i> Operaciones
+                        <span class="badge busqueda-tab-count ms-1 rounded-pill">
+                            {{ conteo_por_entidad.operaciones|default:0 }}
+                        </span>
+                    </a>
+                </li>
+                {% endif %}
+            </ul>
+        </nav>
+
+        <!-- Resumen compacto junto a las pestañas -->
+        {% if q %}
+        <div class="text-secondary small fw-medium">
+            <strong class="text-dark">{{ total_resultados }}</strong>
+            resultado{{ total_resultados|pluralize:"s" }}
+            {% if tiempo_ms is not None %}
+            <span>({{ tiempo_ms }} ms)</span>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- =========================================================================
+         Listado de Tarjetas de Resultados (ResultadoBusqueda)
+         Con iconos distintivos, badges de entidad/estado, metadatos y accesos
+         directos contextuales (SCRUM-295, SCRUM-297)
+         ========================================================================= -->
+    {% if resultados %}
+    <div class="row g-3" id="listaResultadosBusqueda">
+        {% for item in resultados %}
+        <div class="col-12">
+            <article class="card shadow-sm rounded-4 h-100 busqueda-card" data-tipo-entidad="{{ item.tipo_entidad }}">
+                <div class="card-body p-3 p-md-4">
+                    <div class="d-flex flex-column flex-md-row justify-content-between align-items-start gap-3">
+
+                        <!-- Columna Principal: Icono distintivo + Badges + Textos + Metadatos -->
+                        <div class="d-flex align-items-start gap-3 flex-grow-1">
+                            <div class="busqueda-icon-box {% if item.tipo_entidad == 'LOTE' %}busqueda-icon-lote{% elif item.tipo_entidad == 'PRODUCTOR' %}busqueda-icon-productor{% elif item.tipo_entidad == 'COMPRADOR' %}busqueda-icon-comprador{% else %}busqueda-icon-operacion{% endif %}"
+                                 aria-hidden="true">
+                                <i class="bi {{ item.icono|default:'bi-search' }}"></i>
+                            </div>
+
+                            <div class="flex-grow-1">
+                                <!-- Badges visuales de entidad y estado -->
+                                <div class="d-flex align-items-center gap-2 mb-1 flex-wrap">
+                                    <!-- Badge de Entidad -->
+                                    <span class="badge rounded-pill px-2 py-1 {% if item.tipo_entidad == 'LOTE' %}bg-success text-white{% elif item.tipo_entidad == 'PRODUCTOR' %}bg-info text-dark{% elif item.tipo_entidad == 'COMPRADOR' %}bg-warning text-dark{% else %}bg-primary text-white{% endif %}"
+                                          style="font-size: 0.75rem;">
+                                        <i class="bi {{ item.icono|default:'bi-tag' }} me-1" aria-hidden="true"></i>{{ item.tipo_entidad_display }}
+                                    </span>
+
+                                    <!-- Badge de Estado (si aporta información adicional al tipo de entidad) -->
+                                    {% if item.badge_texto and item.badge_texto != item.tipo_entidad_display %}
+                                    <span class="badge {{ item.badge_clase|default:'bg-secondary' }} px-2 py-1 rounded-pill"
+                                          style="font-size: 0.75rem;">
+                                        {{ item.badge_texto }}
+                                    </span>
+                                    {% endif %}
+
+                                    {% if item.fecha %}
+                                    <span class="text-secondary small">
+                                        <i class="bi bi-calendar3 me-1" aria-hidden="true"></i>{{ item.fecha }}
+                                    </span>
+                                    {% endif %}
+
+                                    {% if item.relevancia >= 80 %}
+                                    <span class="badge busqueda-badge-relevancia rounded-pill px-2 py-1">
+                                        <i class="bi bi-lightning-charge-fill me-1" aria-hidden="true"></i>Coincidencia alta
+                                    </span>
+                                    {% endif %}
+                                </div>
+
+                                <!-- Título y Subtítulo -->
+                                <h2 class="h5 fw-bold mb-1">
+                                    <a href="{{ item.url_detalle }}" class="busqueda-titulo-link">
+                                        {{ item.titulo }}
+                                    </a>
+                                </h2>
+                                <p class="text-secondary mb-2 small">{{ item.subtitulo }}</p>
+
+                                <!-- Metadatos formateados (Variedad, Beneficio, Puntaje SCA, Precio, etc.) -->
+                                {% if item.detalles %}
+                                <div class="d-flex flex-wrap gap-2 pt-1">
+                                    {% for clave, valor in item.detalles.items %}
+                                    <span class="badge busqueda-meta-chip px-2 py-1 rounded-2">
+                                        <strong>{{ clave }}:</strong> {{ valor }}
+                                    </span>
+                                    {% endfor %}
+                                </div>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <!-- Columna de Accesos Directos Contextuales (HU29-ST7 / SCRUM-297) -->
+                        <div class="d-flex flex-row flex-md-column gap-2 align-self-stretch align-self-md-center justify-content-end flex-wrap"
+                             style="min-width: 185px;">
+                            {% if item.acciones %}
+                                {% for accion in item.acciones %}
+                                <a href="{{ accion.url }}"
+                                   class="btn {{ accion.clase_btn|default:'btn-outline-pergamo' }} btn-sm w-100 d-flex align-items-center justify-content-center text-nowrap"
+                                   title="{{ accion.tooltip|default:accion.etiqueta }}">
+                                    <i class="bi {{ accion.icono|default:'bi-arrow-right-circle' }} me-1" aria-hidden="true"></i>{{ accion.etiqueta }}
+                                </a>
+                                {% endfor %}
+                            {% else %}
+                                <a href="{{ item.url_detalle }}"
+                                   class="btn btn-outline-pergamo btn-sm w-100 d-flex align-items-center justify-content-center text-nowrap">
+                                    <i class="bi bi-eye me-1" aria-hidden="true"></i>Ver Detalle
+                                </a>
+                            {% endif %}
+                        </div>
+
+                    </div>
+                </div>
+            </article>
+        </div>
+        {% endfor %}
+    </div>
+
+    <!-- =========================================================================
+         Componente de Empty State / Estado Sin Resultados (HU29-ST5 / SCRUM-295)
+         ========================================================================= -->
+    {% elif total_resultados == 0 and q %}
+    <section class="card shadow-sm rounded-4 p-4 p-md-5 text-center my-4 busqueda-empty-card"
+             id="emptyStateBusqueda"
+             aria-live="polite">
+        <div class="py-3">
+            <div class="rounded-circle bg-white shadow-sm d-inline-flex align-items-center justify-content-center mb-3"
+                 style="width: 84px; height: 84px; border: 1px solid #E8DED4;">
+                <i class="bi bi-search fs-1" style="color: #4A2C2A;" aria-hidden="true"></i>
+            </div>
+            <h2 class="h4 fw-bold text-dark mb-2">No se encontraron resultados para &laquo;{{ q }}&raquo;</h2>
+            <p class="text-secondary mx-auto mb-4" style="max-width: 540px;">
+                No encontramos registros activos que coincidan con tu búsqueda en la categoría seleccionada.
+            </p>
+
+            <div class="d-inline-flex flex-column flex-sm-row gap-2 justify-content-center">
+                {% if tipo_activo and tipo_activo != 'todas' %}
+                <a href="{% url 'busqueda_global' %}?q={{ q|urlencode }}&tipo=todas" class="btn btn-pergamo px-4">
+                    <i class="bi bi-grid-fill me-1" aria-hidden="true"></i> Buscar en todas las entidades
+                </a>
+                {% endif %}
+                <a href="{% url 'catalogo' %}" class="btn btn-outline-success px-4 fw-semibold">
+                    <i class="bi bi-shop me-1" aria-hidden="true"></i> Explorar Catálogo Comercial
+                </a>
+                <a href="{% url 'busqueda_global' %}" class="btn btn-outline-pergamo px-4">
+                    <i class="bi bi-arrow-counterclockwise me-1" aria-hidden="true"></i> Nueva búsqueda
+                </a>
+            </div>
+
+            <div class="mt-4 pt-3 border-top text-start mx-auto text-secondary small" style="max-width: 520px;">
+                <strong class="d-block mb-2" style="color: #4A2C2A;">
+                    <i class="bi bi-lightbulb me-1" aria-hidden="true"></i> Recomendaciones para mejorar tu búsqueda:
+                </strong>
+                <ul class="mb-0 ps-3">
+                    <li class="mb-1">Revisa la ortografía de las palabras ingresadas o prueba con términos más generales.</li>
+                    <li class="mb-1">Si buscas un lote, intenta con su código (ej: <code>LOT-</code>), municipio o variedad botánica (ej: <em>Geisha</em>, <em>Castillo</em>).</li>
+                    <li class="mb-1">Explora el <a href="{% url 'catalogo' %}" class="fw-semibold" style="color: #4A2C2A;">Catálogo Comercial</a> para ver todos los cafés disponibles actualmente.</li>
+                    <li>Recuerda que algunas entidades privadas (compradores y operaciones) dependen de tu rol y permisos en la plataforma.</li>
+                </ul>
+            </div>
+        </div>
+    </section>
+
+    <!-- =========================================================================
+         Estado Inicial (Sin término ingresado aún)
+         ========================================================================= -->
+    {% else %}
+    <section class="card shadow-sm rounded-4 p-4 p-md-5 text-center my-3 busqueda-empty-card" id="estadoInicialBusqueda">
+        <div class="py-3">
+            <div class="rounded-circle bg-white shadow-sm d-inline-flex align-items-center justify-content-center mb-3"
+                 style="width: 84px; height: 84px; border: 1px solid #E8DED4;">
+                <i class="bi bi-cup-hot fs-1" style="color: #4A2C2A;" aria-hidden="true"></i>
+            </div>
+            <h2 class="h4 fw-bold text-dark mb-2">¿Qué deseas consultar hoy en Café Pérgamo?</h2>
+            <p class="text-secondary mx-auto mb-4" style="max-width: 540px;">
+                Ingresa el nombre de una finca, municipio de Norte de Santander, código de lote, variedad botánica, caficultor o referencia de operación comercial.
+            </p>
+            <div class="d-flex flex-wrap justify-content-center gap-2">
+                <a href="{% url 'busqueda_global' %}?q=Toledo" class="btn btn-outline-pergamo btn-sm rounded-pill px-3">
+                    <i class="bi bi-geo-alt me-1" aria-hidden="true"></i> Toledo
+                </a>
+                <a href="{% url 'busqueda_global' %}?q=Geisha" class="btn btn-outline-pergamo btn-sm rounded-pill px-3">
+                    <i class="bi bi-tag me-1" aria-hidden="true"></i> Geisha
+                </a>
+                <a href="{% url 'busqueda_global' %}?q=Honey" class="btn btn-outline-pergamo btn-sm rounded-pill px-3">
+                    <i class="bi bi-droplet me-1" aria-hidden="true"></i> Honey
+                </a>
+                <a href="{% url 'catalogo' %}" class="btn btn-outline-success btn-sm rounded-pill px-3 fw-semibold">
+                    <i class="bi bi-shop me-1" aria-hidden="true"></i> Explorar Catálogo Comercial
+                </a>
+            </div>
+        </div>
+    </section>
+    {% endif %}
+
+</div>
+{% endblock %}

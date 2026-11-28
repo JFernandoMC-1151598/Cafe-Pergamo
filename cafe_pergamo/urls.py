@@ -17,11 +17,13 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 from fincas.views import (
+    api_busqueda_global_view,
     api_consultar_ficha_desde_qr_view,
     api_dashboard_indicadores_view,
     api_detalle_venta_view,
     api_opciones_filtro_dashboard_view,
     api_registrar_venta_view,
+    busqueda_global_view,
     dashboard_indicadores_web_view,
     escanear_qr_web_view,
     ficha_digital_web_view,
@@ -32,6 +34,9 @@ urlpatterns = [
     path('fincas/', include('fincas.urls')),
     path('actores/', include('actores.urls')),
     path('catalogos/', include('catalogos.urls')),
+    path('buscar/', busqueda_global_view, name='busqueda_global'),
+    path('api/buscar/', api_busqueda_global_view, name='api_busqueda_global_root'),
+    path('api/v1/buscar/', api_busqueda_global_view, name='api_v1_busqueda_global_root'),
     path('dashboard/', dashboard_indicadores_web_view, name='dashboard_indicadores_root'),
     path('indicadores/dashboard/', dashboard_indicadores_web_view, name='dashboard_indicadores_alias'),
     path('trazabilidad/lote/<str:codigo>/', ficha_digital_web_view, name='trazabilidad_lote_publica_root'),

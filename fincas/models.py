@@ -36,6 +36,7 @@ from typing import Optional
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 
 from catalogos.models import EstadoLote, ProcesoBeneficio, VariedadCafe
@@ -810,7 +811,25 @@ class BitacoraPublicacionLote(models.Model):
         return f"{self.accion} - Lote {self.lote.codigo} ({self.creado_en})"
 
 
-class ManifestacionInteres(models.Model):
+class OperacionComercialInmutableMixin:
+    """Impide el borrado físico de registros históricos comerciales."""
+
+    def delete(self, using=None, keep_parents=False):
+        raise ProtectedError(
+            "Las operaciones comerciales históricas no pueden eliminarse.",
+            [self],
+        )
+
+
+class OperacionComercialInmutableQuerySet(models.QuerySet):
+    def delete(self):
+        raise ProtectedError(
+            "Las operaciones comerciales históricas no pueden eliminarse.",
+            list(self),
+        )
+
+
+class ManifestacionInteres(OperacionComercialInmutableMixin, models.Model):
     """
     Manifestación de interés de un Comprador sobre un Lote publicado en el
     catálogo comercial (HU-22 / SCRUM-231).
@@ -914,6 +933,8 @@ class ManifestacionInteres(models.Model):
 
     creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de registro")
 
+    objects = OperacionComercialInmutableQuerySet.as_manager()
+
     class Meta:
         managed = True
         db_table = "fincas_manifestacion_interes"
@@ -930,6 +951,111 @@ class ManifestacionInteres(models.Model):
             self.vista_por_productor = True
             self.vista_en = timezone.now()
             self.save(update_fields=["vista_por_productor", "vista_en"])
+class AvanceNegociacion(OperacionComercialInmutableMixin, models.Model):
+    """
+    Avance registrado por el productor en una negociación de compra-venta de
+    un lote (HU-23 / SCRUM-232, subtarea HU23-ST1 / SCRUM-268).
+
+    Cada avance cuelga de una `NegociacionLote` (el acuerdo bilateral entre el
+    productor y el comprador, que a su vez nace de una `ManifestacionInteres`
+    de HU-22) y deja constancia, con fecha de registro, de la cantidad, el
+    precio, el presupuesto, la fecha estimada de cierre y las observaciones
+    del momento, junto con el estado en que quedó la negociación.
+
+    Estados (HU23-ST4 / SCRUM-271): ABIERTA, ACEPTADA o RECHAZADA. Solo
+    ABIERTA permite seguir registrando avances; ACEPTADA y RECHAZADA cierran
+    la negociación. Las reglas se validan en
+    `fincas.services.registrar_avance_negociacion()`, que además mantiene
+    sincronizado el estado de la `NegociacionLote` (ABIERTA la deja "En
+    negociación"; ACEPTADA la deja lista para registrar la venta de HU-24).
+
+    Sin eliminación física (RNF-14): `negociacion` usa on_delete=PROTECT.
+    """
+
+    class EstadoAvance(models.TextChoices):
+        ABIERTA = "ABIERTA", "Abierta"
+        ACEPTADA = "ACEPTADA", "Aceptada"
+        RECHAZADA = "RECHAZADA", "Rechazada"
+
+    negociacion = models.ForeignKey(
+        "NegociacionLote",
+        on_delete=models.PROTECT,
+        related_name="avances",
+        verbose_name="Negociación",
+        help_text="Negociación del lote a la que pertenece este avance.",
+    )
+
+    registrado_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        db_constraint=False,
+        related_name="avances_negociacion_registrados",
+        verbose_name="Registrado por",
+        help_text="Productor (usuarios.Usuario) que registró el avance.",
+    )
+
+    estado = models.CharField(
+        max_length=20,
+        choices=EstadoAvance.choices,
+        default=EstadoAvance.ABIERTA,
+        verbose_name="Estado del avance",
+    )
+
+    cantidad_kg = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        verbose_name="Cantidad negociada (kg)",
+    )
+
+    precio_por_kg = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        verbose_name="Precio acordado o propuesto por kg (COP)",
+    )
+
+    presupuesto = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        verbose_name="Presupuesto del comprador (COP)",
+    )
+
+    fecha_estimada_cierre = models.DateField(
+        null=True,
+        blank=True,
+        verbose_name="Fecha estimada de cierre",
+    )
+
+    observaciones = models.TextField(
+        blank=True,
+        default="",
+        verbose_name="Observaciones",
+        help_text="Notas libres del productor sobre este avance (máximo 1000 caracteres).",
+    )
+
+    creado_en = models.DateTimeField(auto_now_add=True, verbose_name="Fecha de registro")
+
+    objects = OperacionComercialInmutableQuerySet.as_manager()
+
+    class Meta:
+        managed = True
+        db_table = "fincas_avance_negociacion"
+        verbose_name = "Avance de negociación"
+        verbose_name_plural = "Avances de negociación"
+        ordering = ["-creado_en", "-id"]
+
+    def __str__(self):
+        return f"Avance {self.estado} - negociación {self.negociacion_id} ({self.creado_en})"
+
+    @property
+    def lote(self):
+        return self.negociacion.lote
+
+
 class BitacoraFichaDigital(models.Model):
     """
     Registro inmutable de auditoría para la Ficha Digital Consolidada
@@ -1123,7 +1249,7 @@ class CodigoQRLote(models.Model):
 # MODELO DE NEGOCIACIÓN BILATERAL DE LOTE (HU-23 / SCRUM-232)
 # ==============================================================================
 
-class NegociacionLote(models.Model):
+class NegociacionLote(OperacionComercialInmutableMixin, models.Model):
     """
     Negociación formal de compra-venta sobre un lote de café (HU-23 / SCRUM-232).
     Controla el acuerdo bilateral entre el productor y el comprador con una
@@ -1208,6 +1334,8 @@ class NegociacionLote(models.Model):
         verbose_name="Última actualización",
     )
 
+    objects = OperacionComercialInmutableQuerySet.as_manager()
+
     class Meta:
         managed = True
         db_table = "fincas_negociacion_lote"
@@ -1227,7 +1355,7 @@ class NegociacionLote(models.Model):
 # MODELO DE REGISTRO DE VENTA RESULTANTE DE NEGOCIACIÓN (HU-24 / SCRUM-278)
 # ==============================================================================
 
-class VentaLote(models.Model):
+class VentaLote(OperacionComercialInmutableMixin, models.Model):
     """
     Registro formal, atómico e inmutable del cierre de venta resultante de
     una negociación (HU-24 / SCRUM-233 / SCRUM-278).
@@ -1307,6 +1435,8 @@ class VentaLote(models.Model):
         auto_now=True,
         verbose_name="Última actualización",
     )
+
+    objects = OperacionComercialInmutableQuerySet.as_manager()
 
     class Meta:
         managed = True

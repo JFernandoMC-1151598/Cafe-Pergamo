@@ -44,9 +44,12 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
+from .busqueda import ejecutar_busqueda_global
+
 from .forms import (
     CaracteristicasCalidadForm,
     CosechaRegistroForm,
+    AvanceNegociacionForm,
     CambiarEstadoLoteForm,
     EtapaBeneficioForm,
     FincaRegistroForm,
@@ -72,6 +75,7 @@ from .serializers import (
     CatalogoLoteSerializer,
     CosechaCreateSerializer,
     CosechaSerializer,
+    AvanceNegociacionInputSerializer,
     FichaDigitalSerializer,
     FincaGeorreferenciacionSerializer,
     LoteDespublicarInputSerializer,
@@ -104,17 +108,21 @@ from .services import (
     registrar_etapa_beneficio,
     registrar_venta_lote,
     obtener_venta_lote,
+    obtener_historial_comercial_lote,
     obtener_metricas_dashboard,
     obtener_opciones_filtro_dashboard,
     resumen_trazabilidad_productor,
     cambiar_estado_lote,
     lote_esta_en_beneficio,
     registrar_manifestacion_interes,
+    obtener_negociacion_manifestacion,
+    registrar_avance_negociacion,
     resolver_lote_desde_qr,
     sanitizar_ficha_por_visibilidad,
     sincronizar_o_generar_qr_lote,
     toggle_estado_municipio,
     validar_lote_para_publicacion,
+    construir_alerta_trazabilidad_lote,
     verificar_permiso_visibilidad_qr,
 )
 from usuarios.models import Usuario
@@ -891,6 +899,99 @@ def api_crear_lote_view(request):
     return Response(LoteSerializer(lote).data, status=status.HTTP_201_CREATED)
 
 
+def _serializar_evento_historial_comercial(evento):
+    """Convierte un evento del historial consolidado a valores JSON seguros."""
+    fecha = evento["fecha"]
+    if hasattr(fecha, "isoformat"):
+        fecha = fecha.isoformat()
+
+    fecha_estimada_cierre = evento.get("fecha_estimada_cierre")
+    if fecha_estimada_cierre is not None and hasattr(fecha_estimada_cierre, "isoformat"):
+        fecha_estimada_cierre = fecha_estimada_cierre.isoformat()
+
+    cantidad_kg = evento.get("cantidad_kg")
+    precio_por_kg = evento.get("precio_por_kg")
+    presupuesto = evento.get("presupuesto")
+    precio_total = evento.get("precio_total")
+
+    return {
+        "tipo_operacion": evento["tipo_operacion"],
+        "tipo": evento["tipo"],
+        "fecha": fecha,
+        "comprador_id": str(evento["comprador_id"]),
+        "comprador_correo": evento.get("comprador_correo", ""),
+        "registrado_por_id": (
+            str(evento["registrado_por_id"])
+            if evento.get("registrado_por_id") is not None
+            else None
+        ),
+        "cantidad_kg": str(cantidad_kg) if cantidad_kg is not None else None,
+        "precio_por_kg": str(precio_por_kg) if precio_por_kg is not None else None,
+        "presupuesto": str(presupuesto) if presupuesto is not None else None,
+        "precio_total": str(precio_total) if precio_total is not None else None,
+        "codigo_comprobante": evento.get("codigo_comprobante"),
+        "estado": evento["estado"],
+        "estado_display": evento["estado_display"],
+        "observaciones": evento.get("observaciones", ""),
+        "fecha_estimada_cierre": fecha_estimada_cierre,
+    }
+
+
+@api_view(["GET"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_historial_comercial_lote_view(request, pk):
+    """
+    HU25-ST2 (SCRUM-280): consulta GET de la línea de tiempo comercial de un lote.
+    Solo el productor dueño puede consultar el historial de su lote.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        return Response(
+            {"error": "Debe autenticarse como productor para consultar el historial comercial."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    rol = _resolver_rol_codigo(request)
+    if rol and str(rol).upper() != "PRODUCTOR":
+        return Response(
+            {"error": "Acceso denegado.", "detalles": {"permiso": "Solo el rol Productor puede consultar este historial."}},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    try:
+        resultado = obtener_historial_comercial_lote(
+            lote_id=pk,
+            productor_id=productor_id,
+        )
+    except ValidationError as exc:
+        detalles = exc.message_dict if hasattr(exc, "message_dict") else {"error": str(exc)}
+        if "permiso" in detalles:
+            return Response(
+                {"error": "Acceso denegado.", "detalles": detalles},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return Response(
+            {"error": "Lote no encontrado.", "detalles": detalles},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    eventos = [
+        _serializar_evento_historial_comercial(evento)
+        for evento in resultado["eventos"]
+    ]
+    return Response(
+        {
+            "lote_id": resultado["lote_id"],
+            "lote_codigo": resultado["lote_codigo"],
+            "productor_id": resultado["productor_id"],
+            "total_eventos": len(eventos),
+            "eventos": eventos,
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def api_consultar_lote_view(request, pk):
@@ -1084,13 +1185,6 @@ def registrar_lote_view(request):
                     cosecha_id=cosecha.pk,
                     cantidad=form.cleaned_data["cantidad"],
                     codigo=form.cleaned_data.get("codigo") or None,
-                    proceso_beneficio_id=(
-                        form.cleaned_data["proceso_beneficio"].pk
-                        if form.cleaned_data.get("proceso_beneficio") else None
-                    ),
-                    estado_lote_id=form.cleaned_data["estado_lote"].pk,
-                    etapa_beneficio=form.cleaned_data.get("etapa_beneficio") or None,
-                    fecha_etapa=form.cleaned_data.get("fecha_etapa"),
                 )
             except ValidationError as exc:
                 # Traduce los errores de negocio de crear_lote() (que no
@@ -1197,6 +1291,7 @@ def mis_lotes_view(request):
     lotes_info = []
     for lote in lotes:
         es_valido, errores_val = validar_lote_para_publicacion(lote)
+        alerta_trazabilidad = construir_alerta_trazabilidad_lote(lote)
         qr_obj = getattr(lote, "codigo_qr", None)
         if not qr_obj:
             try:
@@ -1208,6 +1303,7 @@ def mis_lotes_view(request):
             "codigo_qr": qr_obj,
             "puede_publicar": es_valido,
             "errores_publicacion": errores_val,
+            "alerta_trazabilidad": alerta_trazabilidad,
         })
 
     return render(
@@ -1889,10 +1985,22 @@ def api_publicar_lote_view(request, pk):
         if "lote" in msg_dict:
             return Response({"error": msg_dict["lote"][0]}, status=status.HTTP_404_NOT_FOUND)
         if "publicacion" in msg_dict:
+            lote = Lote.objects.select_related(
+                "cosecha",
+                "cosecha__finca",
+                "cosecha__finca__municipio",
+                "cosecha__variedad",
+                "proceso_beneficio",
+            ).get(pk=pk)
+            alerta = construir_alerta_trazabilidad_lote(lote)
             return Response(
                 {
                     "error": "El lote no cumple con la información mínima requerida para publicarse.",
                     "detalles": msg_dict["publicacion"],
+                    "tipo": "TRAZABILIDAD_INCOMPLETA",
+                    "porcentaje": alerta["porcentaje"],
+                    "alertas": alerta["alertas"],
+                    "puede_publicar": False,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -1990,14 +2098,17 @@ def api_validar_publicacion_lote_view(request, pk):
             status=status.HTTP_403_FORBIDDEN,
         )
 
-    puede_publicar, errores = validar_lote_para_publicacion(lote)
+    alerta = construir_alerta_trazabilidad_lote(lote)
     return Response(
         {
             "lote_id": lote.id,
             "codigo": lote.codigo,
             "publicado_en_catalogo": lote.publicado_en_catalogo,
-            "puede_publicar": puede_publicar,
-            "errores": errores,
+            "puede_publicar": alerta["puede_publicar"],
+            "porcentaje": alerta["porcentaje"],
+            "tipo": alerta["tipo"],
+            "errores": alerta["campos_faltantes"],
+            "alertas": alerta["alertas"],
         },
         status=status.HTTP_200_OK,
     )
@@ -2054,11 +2165,22 @@ def detalle_lote_view(request, pk):
     # El orden cronológico lo define EtapaBeneficio.Meta.ordering; se
     # repite aquí para que el historial no dependa de un cambio en Meta.
     etapas = lote.etapas_beneficio.filter(activo=True).order_by("fecha", "creado_en", "id")
+    historial_comercial = obtener_historial_comercial_lote(
+        lote=lote,
+        productor_id=productor_id,
+    )
+    alerta_trazabilidad = construir_alerta_trazabilidad_lote(lote)
 
     return render(
         request,
         "fincas/detalle_lote.html",
-        {"lote": lote, "codigo_qr": qr_obj, "etapas": etapas},
+        {
+            "lote": lote,
+            "codigo_qr": qr_obj,
+            "etapas": etapas,
+            "historial_comercial": historial_comercial["eventos"],
+            "alerta_trazabilidad": alerta_trazabilidad,
+        },
     )
 
 
@@ -2540,6 +2662,83 @@ def api_manifestar_interes_lote_view(request, pk):
         )
 
 
+# =============================================================================
+# Vistas del Motor de Búsqueda Global Unificada (HU-29 / SCRUM-238)
+# Subtareas:
+# - SCRUM-291 (HU29-ST1): Diseñar la experiencia de búsqueda global en el navbar.
+# - SCRUM-293 (HU29-ST4): Implementar el endpoint de búsqueda unificada.
+# =============================================================================
+
+def busqueda_global_view(request):
+    """
+    Vista web para la consulta y exploración unificada de entidades en Café Pérgamo.
+    Permite filtrar por tipo ('todas', 'lotes', 'productores', 'compradores', 'operaciones')
+    y renderiza los resultados respetando el rol de sesión del usuario.
+    """
+    termino = request.GET.get("q", "")
+    tipo_filtro = request.GET.get("tipo", "todas")
+
+    usuario_id = _resolver_productor_id(request)
+    rol_codigo = request.session.get("rol", "")
+    if not rol_codigo and getattr(request, "user", None) and request.user.is_authenticated:
+        if request.user.is_superuser or request.user.is_staff:
+            rol_codigo = "ADMINISTRADOR"
+
+    contexto = ejecutar_busqueda_global(
+        termino=termino,
+        tipo_entidad=tipo_filtro,
+        usuario_o_id=usuario_id or getattr(request, "user", None),
+        rol_codigo=rol_codigo,
+    )
+    contexto["q"] = termino
+    contexto["tipo_activo"] = contexto.get("tipo_filtro", tipo_filtro)
+
+    return render(request, "busqueda/resultados.html", contexto)
+
+
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication, JWTAuthentication])
+@permission_classes([AllowAny])
+def api_busqueda_global_view(request):
+    """
+    Endpoint REST unificado para búsqueda global de entidades (HU29-ST4 / SCRUM-293).
+    Acepta parámetros GET:
+    - q: término de búsqueda (mínimo 2 caracteres para coincidencia)
+    - tipo: 'todas', 'lotes', 'productores', 'compradores', 'operaciones' (default: 'todas')
+    - limite: cantidad máxima de registros por entidad (default 25, máx 100)
+    """
+    termino = request.query_params.get("q", "")
+    tipo_filtro = request.query_params.get("tipo", "todas")
+    try:
+        limite = int(request.query_params.get("limite", 25))
+        limite = max(1, min(limite, 100))
+    except (TypeError, ValueError):
+        limite = 25
+
+    usuario_id = _resolver_productor_id(request)
+    token = getattr(request, "auth", None)
+    rol_codigo = ""
+    if token is not None:
+        try:
+            rol_codigo = (token.get("role_code", "") or "").upper()
+        except AttributeError:
+            rol_codigo = ""
+    if not rol_codigo:
+        rol_codigo = (request.session.get("rol", "") or "").upper()
+    if not rol_codigo and getattr(request, "user", None) and request.user.is_authenticated:
+        if request.user.is_superuser or request.user.is_staff:
+            rol_codigo = "ADMINISTRADOR"
+
+    resultado = ejecutar_busqueda_global(
+        termino=termino,
+        tipo_entidad=tipo_filtro,
+        usuario_o_id=usuario_id or getattr(request, "user", None),
+        rol_codigo=rol_codigo,
+        limite_por_entidad=limite,
+    )
+    return Response(resultado, status=status.HTTP_200_OK)
+
+
 # ==============================================================================
 # ENDPOINT REST: REGISTRO Y CONSULTA DE VENTA DE LOTE (HU-24 / SCRUM-276)
 # ==============================================================================
@@ -2842,4 +3041,140 @@ def dashboard_indicadores_web_view(request):
     }
     return render(request, "fincas/dashboard_indicadores.html", context)
 
+
+def _resolver_rol_codigo(request) -> str:
+    """Código del rol de quien hace la petición: claim 'role_code' del JWT o rol de la sesión web."""
+    token = getattr(request, "auth", None)
+    if token is not None:
+        try:
+            role_code = token.get("role_code", "") or ""
+            if role_code:
+                return str(role_code)
+        except AttributeError:
+            pass
+    return str(request.session.get("rol", "") or "")
+
+
+@api_view(["POST"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_registrar_avance_negociacion_view(request, pk):
+    """
+    Endpoint REST para registrar un avance en la negociación de un lote
+    (HU23-ST5 / SCRUM-272). El `pk` es el de la manifestación de interés
+    de la que nace la negociación.
+
+    POST /fincas/api/manifestaciones-interes/<pk>/avances/
+    Body JSON: {"estado": "ABIERTA|ACEPTADA|RECHAZADA" (opcional, por defecto ABIERTA),
+                "cantidad_kg": <decimal>, "precio_por_kg": <decimal>,
+                "presupuesto": <decimal opcional>, "fecha_estimada_cierre": "AAAA-MM-DD" (opcional),
+                "observaciones": <str opcional>}
+
+    Respuestas: 201 creado; 400 datos o reglas de negocio inválidos; 401 sin
+    autenticar; 403 sin permiso o ajeno al lote; 404 manifestación inexistente.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        return Response(
+            {"error": "Debe autenticarse como productor para registrar avances de negociación."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    if not usuarios_permissions.usuario_tiene_permiso(_resolver_rol_codigo(request), "negociaciones.registrar_avance"):
+        return Response(
+            {"error": "No tiene permiso para registrar avances de negociación."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    serializer = AvanceNegociacionInputSerializer(data=request.data or {})
+    if not serializer.is_valid():
+        return Response(
+            {"error": "Datos de entrada inválidos.", "detalles": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        resultado = registrar_avance_negociacion(
+            manifestacion_id=pk,
+            productor_id=productor_id,
+            **serializer.validated_data,
+        )
+    except ValidationError as exc:
+        detalles = exc.message_dict if hasattr(exc, "message_dict") else {"error": str(exc)}
+        if "permiso" in detalles:
+            codigo = status.HTTP_403_FORBIDDEN
+        elif "manifestacion" in detalles:
+            codigo = status.HTTP_404_NOT_FOUND
+        else:
+            codigo = status.HTTP_400_BAD_REQUEST
+        return Response(
+            {"error": "No fue posible registrar el avance de la negociación.", "detalles": detalles},
+            status=codigo,
+        )
+
+    return Response(
+        {
+            "mensaje": f"Avance de negociación registrado para el lote '{resultado['lote_codigo']}'.",
+            "avance": resultado,
+        },
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@permiso_requerido_sesion("negociaciones.registrar_avance")
+def negociacion_manifestacion_view(request, pk):
+    """
+    Pantalla web de la negociación de una manifestación de interés
+    (HU-23 / SCRUM-232): historial de avances del productor (HU23-ST3 /
+    SCRUM-270) y formulario para registrar uno nuevo (HU23-ST2 / SCRUM-269).
+
+    Solo el productor dueño del lote puede verla; el registro lo hace
+    `services.registrar_avance_negociacion` (HU23-ST4/ST5), el mismo que
+    usa la API, así que las reglas de negocio son idénticas.
+    """
+    productor_id = _resolver_productor_id(request)
+    if not productor_id:
+        messages.error(request, "Debe iniciar sesión con su cuenta de productor para gestionar negociaciones.")
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    try:
+        contexto = obtener_negociacion_manifestacion(manifestacion_id=pk, productor_id=productor_id)
+    except ValidationError as exc:
+        errores = exc.message_dict if hasattr(exc, "message_dict") else {}
+        mensaje = next(iter(errores.values()))[0] if errores else "No se pudo cargar la negociación."
+        messages.error(request, mensaje)
+        return redirect("mis_manifestaciones_interes")
+
+    if request.method == "POST":
+        form = AvanceNegociacionForm(request.POST)
+        if form.is_valid():
+            try:
+                resultado = registrar_avance_negociacion(
+                    manifestacion_id=pk, productor_id=productor_id, **form.cleaned_data
+                )
+            except ValidationError as exc:
+                errores = exc.message_dict if hasattr(exc, "message_dict") else {"__all__": exc.messages}
+                for campo, lista_errores in errores.items():
+                    destino = campo if campo in form.fields else None
+                    for error in lista_errores:
+                        form.add_error(destino, error)
+            else:
+                messages.success(
+                    request,
+                    f"Avance registrado: la negociación del lote '{resultado['lote_codigo']}' quedó "
+                    f"{resultado['estado_display'].lower()}.",
+                )
+                return redirect("manifestacion_interes_negociacion", pk=pk)
+        contexto = obtener_negociacion_manifestacion(manifestacion_id=pk, productor_id=productor_id)
+    else:
+        ultimo = contexto["ultimo_avance"]
+        manifestacion = contexto["manifestacion"]
+        lote = contexto["lote"]
+        form = AvanceNegociacionForm(initial={
+            "cantidad_kg": (ultimo.cantidad_kg if ultimo else manifestacion.cantidad_kg),
+            "precio_por_kg": (ultimo.precio_por_kg if ultimo else lote.precio_referencial),
+            "presupuesto": ultimo.presupuesto if ultimo else None,
+        })
+
+    return render(request, "fincas/negociacion_manifestacion.html", {**contexto, "form": form})
 
