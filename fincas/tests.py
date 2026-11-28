@@ -13540,3 +13540,1393 @@ class HU28ST4PruebasCompletitudTrazabilidadTests(TestCase):
         self.assertTrue(lote_publicado.publicado_en_catalogo)
         self.assertIsNotNone(lote_publicado.fecha_publicacion)
 
+
+# ==============================================================================
+# HU-26 (SCRUM-235): DASHBOARD DE INDICADORES DE TRAZABILIDAD Y COMERCIALIZACION
+# ==============================================================================
+
+
+class TestScrum286DefinicionIndicadoresTrazabilidadComercializacion(TestCase):
+    """
+    Suite de Pruebas Automatizadas para HU-26 / SCRUM-235 / HU26-ST2 (SCRUM-286).
+    Certifica la definición formal, fórmulas matemáticas, estructura del DTO analítico,
+    aislamiento RBAC y filtros para indicadores de trazabilidad y comercialización.
+    """
+
+    def setUp(self):
+        from fincas.services import (
+            obtener_metricas_dashboard,
+            obtener_indicadores_dashboard,
+            registrar_venta_lote,
+        )
+        self.obtener_metricas_dashboard = staticmethod(obtener_metricas_dashboard)
+        self.obtener_indicadores_dashboard = staticmethod(obtener_indicadores_dashboard)
+        self.registrar_venta_lote = staticmethod(registrar_venta_lote)
+
+        self.productor_a_id = uuid.uuid4()
+        self.productor_b_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.muni_toledo = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first()
+        if not self.muni_toledo:
+            self.muni_toledo = Municipio.objects.create(
+                codigo="MUN-TOLEDO-ST2",
+                nombre="Toledo",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+
+        self.muni_pamplona = Municipio.objects.filter(
+            nombre="Pamplona", departamento="Norte de Santander"
+        ).first()
+        if not self.muni_pamplona:
+            self.muni_pamplona = Municipio.objects.create(
+                codigo="MUN-PAMPLONA-ST2",
+                nombre="Pamplona",
+                departamento="Norte de Santander",
+                activo=True,
+            )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo ST2",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso = ProcesoBeneficio.objects.create(
+            codigo="LAV_ST2",
+            nombre="Lavado ST2",
+            activo=True,
+        )
+
+    def test_estructura_dto_indicadores_dashboard_en_sistema_vacio(self):
+        """
+        Certifica que el DTO retornado cumpla rigurosamente con la estructura esperada
+        y maneje colecciones vacías con valores por defecto seguros (sin divisiones por cero).
+        """
+        data = self.obtener_metricas_dashboard(usuario=None)
+
+        # Secciones principales
+        self.assertIn("rol_usuario", data)
+        self.assertIn("es_asociacion_o_admin", data)
+        self.assertIn("resumen_general", data)
+        self.assertIn("indicadores_trazabilidad", data)
+        self.assertIn("indicadores_comercializacion", data)
+        self.assertIn("distribucion_regional", data)
+        self.assertIn("filtros_aplicados", data)
+
+        # Claves de trazabilidad
+        traz = data["indicadores_trazabilidad"]
+        self.assertEqual(traz["total_lotes_trazables"], 0)
+        self.assertEqual(traz["distribucion_etapas"]["cosecha"], 0)
+        self.assertEqual(traz["distribucion_etapas"]["despulpado"], 0)
+        self.assertEqual(traz["distribucion_etapas"]["fermentacion"], 0)
+        self.assertEqual(traz["distribucion_etapas"]["lavado"], 0)
+        self.assertEqual(traz["distribucion_etapas"]["secado"], 0)
+        self.assertEqual(traz["porcentaje_completitud_promedio"], 0.0)
+        self.assertEqual(traz["puntaje_catacion_promedio"], 0.0)
+        self.assertEqual(traz["lotes_con_evaluacion_calidad"], 0)
+        self.assertEqual(traz["lotes_con_qr_generado"], 0)
+
+        # Claves de comercialización
+        com = data["indicadores_comercializacion"]
+        self.assertEqual(com["volumen_total_producido_kg"], 0.0)
+        self.assertEqual(com["volumen_disponible_catalogo_kg"], 0.0)
+        self.assertEqual(com["volumen_vendido_kg"], 0.0)
+        self.assertEqual(com["ingresos_totales_cop"], 0.0)
+        self.assertEqual(com["precio_promedio_kg_cop"], 0.0)
+        self.assertEqual(com["total_ventas_concretadas"], 0)
+        self.assertEqual(com["tasa_conversion_ventas_pct"], 0.0)
+
+    def test_calculo_indicadores_trazabilidad_con_etapas_y_calidad(self):
+        """
+        Valida que el cálculo de completitud de trazabilidad, distribución de etapas
+        y promedio SCA sea exacto cuando se registran etapas y calidad de café.
+        """
+        finca = Finca.objects.create(
+            nombre="Finca La Trazabilidad",
+            productor_id=self.productor_a_id,
+            municipio=self.muni_toledo,
+            latitud=Decimal("7.3100"),
+            longitud=Decimal("-72.4800"),
+            activo=True,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 10, 15),
+            cantidad_total=Decimal("800.00"),
+            cantidad_disponible=Decimal("300.00"),
+            activo=True,
+        )
+        lote = Lote.objects.create(
+            cosecha=cosecha,
+            codigo="LOTE-TRAZ-ST2-01",
+            cantidad=Decimal("500.00"),
+            proceso_beneficio=self.proceso,
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # Registrar las 4 etapas de beneficio
+        EtapaBeneficio.objects.create(lote=lote, etapa=EtapaBeneficio.TipoEtapa.DESPULPADO, fecha=date(2026, 10, 16), activo=True)
+        EtapaBeneficio.objects.create(lote=lote, etapa=EtapaBeneficio.TipoEtapa.FERMENTACION, fecha=date(2026, 10, 17), activo=True)
+        EtapaBeneficio.objects.create(lote=lote, etapa=EtapaBeneficio.TipoEtapa.LAVADO, fecha=date(2026, 10, 18), activo=True)
+        EtapaBeneficio.objects.create(lote=lote, etapa=EtapaBeneficio.TipoEtapa.SECADO, fecha=date(2026, 10, 19), activo=True)
+
+        # Registrar calidad física y sensorial con 87.50 SCA
+        CaracteristicasCalidad.objects.create(
+            lote=lote,
+            puntaje_taza=Decimal("87.50"),
+            humedad=Decimal("11.00"),
+            merma=Decimal("1.50"),
+        )
+
+        # El código QR se genera automáticamente al persistir el lote (HU-18)
+        self.assertTrue(CodigoQRLote.objects.filter(lote=lote).exists())
+
+        data = self.obtener_metricas_dashboard(usuario=self.productor_a_id)
+        traz = data["indicadores_trazabilidad"]
+
+        self.assertEqual(traz["total_lotes_trazables"], 1)
+        self.assertEqual(traz["distribucion_etapas"]["cosecha"], 1)
+        self.assertEqual(traz["distribucion_etapas"]["despulpado"], 1)
+        self.assertEqual(traz["distribucion_etapas"]["fermentacion"], 1)
+        self.assertEqual(traz["distribucion_etapas"]["lavado"], 1)
+        self.assertEqual(traz["distribucion_etapas"]["secado"], 1)
+        self.assertEqual(traz["puntaje_catacion_promedio"], 87.50)
+        self.assertEqual(traz["lotes_con_evaluacion_calidad"], 1)
+        self.assertEqual(traz["lotes_con_qr_generado"], 1)
+
+        # 40 (base) + 10 (georref) + 15 (proceso) + 15 (etapas) + 20 (calidad) = 100.0%
+        self.assertEqual(traz["porcentaje_completitud_promedio"], 100.0)
+
+    def test_calculo_indicadores_comercializacion_y_conversion_negociaciones(self):
+        """
+        Valida que el volumen producido, vendido, saldo de catálogo, ingresos COP
+        y tasa de conversión de ventas se calculen con precisión matemática.
+        """
+        finca = Finca.objects.create(
+            nombre="Finca Comercial",
+            productor_id=self.productor_a_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 11, 1),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        lote = Lote.objects.create(
+            cosecha=cosecha,
+            codigo="LOTE-COM-ST2-01",
+            cantidad=Decimal("1000.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # 2 negociaciones: 1 aceptada (250 kg a $20,000 COP) y 1 rechazada (100 kg)
+        neg_aceptada = NegociacionLote.objects.create(
+            lote=lote,
+            comprador_id=self.comprador_id,
+            cantidad_kg=Decimal("250.00"),
+            precio_propuesto_por_kg=Decimal("20000.00"),
+            precio_acordado_por_kg=Decimal("20000.00"),
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+        )
+        NegociacionLote.objects.create(
+            lote=lote,
+            comprador_id=self.comprador_id,
+            cantidad_kg=Decimal("100.00"),
+            precio_propuesto_por_kg=Decimal("19000.00"),
+            estado=NegociacionLote.EstadoNegociacion.RECHAZADA,
+        )
+
+        # Formalizar venta atómica
+        venta = self.registrar_venta_lote(
+            negociacion_id=neg_aceptada.pk,
+            usuario_actual_id=self.productor_a_id,
+        )
+        self.assertIsNotNone(venta.pk)
+
+        data = self.obtener_metricas_dashboard(usuario=self.productor_a_id)
+        com = data["indicadores_comercializacion"]
+
+        # Volumen vendido: 250.0 kg
+        self.assertEqual(com["volumen_vendido_kg"], 250.0)
+        # Ingresos totales: 250 * 20,000 = $5,000,000 COP
+        self.assertEqual(com["ingresos_totales_cop"], 5000000.0)
+        # Precio promedio por kg: $20,000 COP
+        self.assertEqual(com["precio_promedio_kg_cop"], 20000.0)
+        # Saldo remanente en catálogo: 1000 - 250 = 750.0 kg
+        self.assertEqual(com["volumen_disponible_catalogo_kg"], 750.0)
+        # Volumen total producido: 750 remanente + 250 vendido = 1000.0 kg
+        self.assertEqual(com["volumen_total_producido_kg"], 1000.0)
+        # Total ventas concretadas: 1
+        self.assertEqual(com["total_ventas_concretadas"], 1)
+        # Negociaciones: 2 total, 1 aceptada, 1 rechazada
+        self.assertEqual(com["resumen_negociaciones"]["total"], 2)
+        self.assertEqual(com["resumen_negociaciones"]["aceptadas"], 1)
+        self.assertEqual(com["resumen_negociaciones"]["rechazadas"], 1)
+        # Tasa de conversión: 1 venta / 2 negociaciones = 50.0%
+        self.assertEqual(com["tasa_conversion_ventas_pct"], 50.0)
+
+    def test_aislamiento_rbac_productor_vs_asociacion(self):
+        """
+        Verifica que el rol PRODUCTOR solo acceda a las métricas de sus propias fincas,
+        mientras que el rol ASOCIACION / ADMINISTRADOR consolide el panorama regional completo.
+        """
+        # Finca Productor A (Toledo)
+        finca_a = Finca.objects.create(
+            nombre="Finca Productor A",
+            productor_id=self.productor_a_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        cosecha_a = Cosecha.objects.create(
+            finca=finca_a,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 11, 2),
+            cantidad_total=Decimal("400.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=cosecha_a,
+            codigo="LOTE-RBAC-A",
+            cantidad=Decimal("400.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # Finca Productor B (Pamplona)
+        finca_b = Finca.objects.create(
+            nombre="Finca Productor B",
+            productor_id=self.productor_b_id,
+            municipio=self.muni_pamplona,
+            activo=True,
+        )
+        cosecha_b = Cosecha.objects.create(
+            finca=finca_b,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 11, 3),
+            cantidad_total=Decimal("600.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=cosecha_b,
+            codigo="LOTE-RBAC-B",
+            cantidad=Decimal("600.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # 1. Consulta como Productor A -> Solo ve su lote y finca
+        data_a = self.obtener_metricas_dashboard(usuario=self.productor_a_id, rol_override="PRODUCTOR")
+        self.assertEqual(data_a["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(data_a["resumen_general"]["total_fincas"], 1)
+        self.assertEqual(data_a["indicadores_comercializacion"]["volumen_total_producido_kg"], 400.0)
+
+        # 2. Consulta como Productor B -> Solo ve su lote y finca
+        data_b = self.obtener_metricas_dashboard(usuario=self.productor_b_id, rol_override="PRODUCTOR")
+        self.assertEqual(data_b["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(data_b["resumen_general"]["total_fincas"], 1)
+        self.assertEqual(data_b["indicadores_comercializacion"]["volumen_total_producido_kg"], 600.0)
+
+        # 3. Consulta como Asociación / Administrador -> Ve ambos lotes y distribución regional
+        data_asoc = self.obtener_metricas_dashboard(rol_override="ASOCIACION")
+        self.assertEqual(data_asoc["resumen_general"]["total_lotes"], 2)
+        self.assertEqual(data_asoc["resumen_general"]["total_fincas"], 2)
+        self.assertEqual(data_asoc["resumen_general"]["total_municipios"], 2)
+        self.assertEqual(data_asoc["indicadores_comercializacion"]["volumen_total_producido_kg"], 1000.0)
+
+        # Validar distribución regional
+        reg = data_asoc["distribucion_regional"]
+        nombres_mun = [m["municipio"] for m in reg]
+        self.assertIn("Toledo", nombres_mun)
+        self.assertIn("Pamplona", nombres_mun)
+
+    def test_filtros_analiticos_por_municipio_y_fechas(self):
+        """
+        Valida que los filtros opcionales de municipio y rango de fechas acoten
+        correctamente el alcance de los indicadores generados.
+        """
+        finca = Finca.objects.create(
+            nombre="Finca Filtros",
+            productor_id=self.productor_a_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        cosecha = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 11, 10),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("500.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=cosecha,
+            codigo="LOTE-FILTRO-01",
+            cantidad=Decimal("500.00"),
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # Filtro con municipio donde sí hay datos
+        filtros_ok = {"municipio_id": self.muni_toledo.pk}
+        data_toledo = self.obtener_metricas_dashboard(rol_override="ASOCIACION", filtros=filtros_ok)
+        self.assertEqual(data_toledo["resumen_general"]["total_lotes"], 1)
+
+        # Filtro con municipio donde no hay lotes
+        filtros_vacio = {"municipio_id": self.muni_pamplona.pk}
+        data_pamplona = self.obtener_metricas_dashboard(rol_override="ASOCIACION", filtros=filtros_vacio)
+        self.assertEqual(data_pamplona["resumen_general"]["total_lotes"], 0)
+
+    def test_alias_canonico_obtener_indicadores_dashboard(self):
+        """
+        Valida que el alias de conveniencia obtener_indicadores_dashboard retorne
+        exactamente el mismo DTO que obtener_metricas_dashboard.
+        """
+        res1 = self.obtener_metricas_dashboard(rol_override="ASOCIACION")
+        res2 = self.obtener_indicadores_dashboard(rol_override="ASOCIACION")
+        self.assertEqual(res1, res2)
+
+
+class TestScrum288ConsultasAgregacionYFiltrosAnaliticos(TestCase):
+    """
+    Suite de Pruebas Automatizadas para HU-26 / SCRUM-288 / HU26-ST3.
+    Certifica las consultas de agregación ORM optimizadas (desglose por variedad,
+    ranking de fincas, filtros multicriterio por asociación/productor/municipio/fechas)
+    y el servicio de opciones de filtro.
+    """
+
+    def setUp(self):
+        from fincas.services import (
+            obtener_metricas_dashboard,
+            obtener_opciones_filtro_dashboard,
+            registrar_venta_lote,
+        )
+        self.obtener_metricas_dashboard = staticmethod(obtener_metricas_dashboard)
+        self.obtener_opciones_filtro_dashboard = staticmethod(obtener_opciones_filtro_dashboard)
+        self.registrar_venta_lote = staticmethod(registrar_venta_lote)
+
+        self.productor_1_id = uuid.uuid4()
+        self.productor_2_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.muni_toledo = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-TOL-ST3",
+            nombre="Toledo",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+        self.muni_arboledas = Municipio.objects.filter(
+            nombre="Arboledas", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-ARB-ST3",
+            nombre="Arboledas",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.var_castillo = VariedadCafe.objects.create(
+            nombre="Castillo ST3",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+        self.var_caturra = VariedadCafe.objects.create(
+            nombre="Caturra ST3",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+    def test_agregacion_volumen_por_variedad_cafe(self):
+        """
+        Valida que el servicio calcule con precisión el volumen producido y vendido
+        desglosado por cada variedad botánica de café.
+        """
+        finca = Finca.objects.create(
+            nombre="Finca Variedades",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        # Cosecha Castillo: 500 kg
+        c_castillo = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 5),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        lote_castillo = Lote.objects.create(
+            cosecha=c_castillo,
+            codigo="LOTE-VAR-CASTILLO",
+            cantidad=Decimal("500.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # Cosecha Caturra: 300 kg
+        c_caturra = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.var_caturra,
+            fecha_cosecha=date(2026, 11, 6),
+            cantidad_total=Decimal("300.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=c_caturra,
+            codigo="LOTE-VAR-CATURRA",
+            cantidad=Decimal("300.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # Venta sobre Castillo: 200 kg a $22,000 COP/kg
+        neg = NegociacionLote.objects.create(
+            lote=lote_castillo,
+            comprador_id=self.comprador_id,
+            cantidad_kg=Decimal("200.00"),
+            precio_propuesto_por_kg=Decimal("22000.00"),
+            precio_acordado_por_kg=Decimal("22000.00"),
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+        )
+        self.registrar_venta_lote(
+            negociacion_id=neg.pk,
+            usuario_actual_id=self.productor_1_id,
+        )
+
+        data = self.obtener_metricas_dashboard(usuario=self.productor_1_id)
+        desglose = data["volumen_por_variedad"]
+
+        self.assertEqual(len(desglose), 2)
+        nombres = {item["variedad"]: item for item in desglose}
+        self.assertIn("Castillo ST3", nombres)
+        self.assertIn("Caturra ST3", nombres)
+
+        castillo_data = nombres["Castillo ST3"]
+        self.assertEqual(castillo_data["total_lotes"], 1)
+        self.assertEqual(castillo_data["volumen_vendido_kg"], 200.0)
+        self.assertEqual(castillo_data["volumen_producido_kg"], 500.0)
+        self.assertEqual(castillo_data["ingresos_totales_cop"], 4400000.0)
+
+        caturra_data = nombres["Caturra ST3"]
+        self.assertEqual(caturra_data["total_lotes"], 1)
+        self.assertEqual(caturra_data["volumen_vendido_kg"], 0.0)
+        self.assertEqual(caturra_data["volumen_producido_kg"], 300.0)
+
+    def test_filtro_por_variedad_en_dashboard(self):
+        """
+        Valida que el filtro `variedad_id` aplique exclusión precisa sobre todas
+        las métricas y agrupaciones del dashboard.
+        """
+        finca = Finca.objects.create(
+            nombre="Finca Filtro Variedad",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        c1 = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 7),
+            cantidad_total=Decimal("400.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=c1,
+            codigo="LOTE-FVAR-1",
+            cantidad=Decimal("400.00"),
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        c2 = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.var_caturra,
+            fecha_cosecha=date(2026, 11, 8),
+            cantidad_total=Decimal("600.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=c2,
+            codigo="LOTE-FVAR-2",
+            cantidad=Decimal("600.00"),
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # Consulta con filtro de variedad Castillo
+        filtros = {"variedad_id": self.var_castillo.pk}
+        data = self.obtener_metricas_dashboard(usuario=self.productor_1_id, filtros=filtros)
+        self.assertEqual(data["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(data["indicadores_comercializacion"]["volumen_total_producido_kg"], 400.0)
+
+    def test_filtro_asociacion_por_productor_especifico(self):
+        """
+        Valida que un rol Asociación/Admin pueda filtrar métricas acotadas
+        a un caficultor específico mediante `productor_id`.
+        """
+        f1 = Finca.objects.create(
+            nombre="Finca Productor 1",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        c1 = Cosecha.objects.create(
+            finca=f1,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 9),
+            cantidad_total=Decimal("350.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=c1,
+            codigo="LOTE-P1",
+            cantidad=Decimal("350.00"),
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        f2 = Finca.objects.create(
+            nombre="Finca Productor 2",
+            productor_id=self.productor_2_id,
+            municipio=self.muni_arboledas,
+            activo=True,
+        )
+        c2 = Cosecha.objects.create(
+            finca=f2,
+            variedad=self.var_caturra,
+            fecha_cosecha=date(2026, 11, 10),
+            cantidad_total=Decimal("700.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(
+            cosecha=c2,
+            codigo="LOTE-P2",
+            cantidad=Decimal("700.00"),
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        # Consulta como Asociación filtrando solo productor 1
+        filtros_p1 = {"productor_id": self.productor_1_id}
+        data_p1 = self.obtener_metricas_dashboard(rol_override="ASOCIACION", filtros=filtros_p1)
+        self.assertEqual(data_p1["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(data_p1["indicadores_comercializacion"]["volumen_total_producido_kg"], 350.0)
+
+    def test_ranking_top_fincas(self):
+        """
+        Valida que el ranking de fincas retorne las fincas más productivas ordenadas por volumen.
+        """
+        finca_pequena = Finca.objects.create(
+            nombre="Finca Pequeña",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        c_peq = Cosecha.objects.create(
+            finca=finca_pequena,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 11),
+            cantidad_total=Decimal("150.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(cosecha=c_peq, codigo="LOTE-PEQ", cantidad=Decimal("150.00"))
+
+        finca_grande = Finca.objects.create(
+            nombre="Finca Grande",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        c_grd = Cosecha.objects.create(
+            finca=finca_grande,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 12),
+            cantidad_total=Decimal("950.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(cosecha=c_grd, codigo="LOTE-GRD", cantidad=Decimal("950.00"))
+
+        data = self.obtener_metricas_dashboard(usuario=self.productor_1_id)
+        ranking = data["top_fincas"]
+
+        self.assertGreaterEqual(len(ranking), 2)
+        self.assertEqual(ranking[0]["nombre"], "Finca Grande")
+        self.assertEqual(ranking[0]["volumen_producido_kg"], 950.0)
+        self.assertEqual(ranking[1]["nombre"], "Finca Pequeña")
+        self.assertEqual(ranking[1]["volumen_producido_kg"], 150.0)
+
+    def test_obtener_opciones_filtro_dashboard(self):
+        """
+        Valida que el servicio de opciones de filtro provea los catálogos válidos
+        respetando el aislamiento RBAC del usuario.
+        """
+        finca = Finca.objects.create(
+            nombre="Finca Opciones",
+            productor_id=self.productor_1_id,
+            municipio=self.muni_toledo,
+            activo=True,
+        )
+        c = Cosecha.objects.create(
+            finca=finca,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 13),
+            cantidad_total=Decimal("300.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+        Lote.objects.create(cosecha=c, codigo="LOTE-OPC", cantidad=Decimal("300.00"))
+
+        opciones = self.obtener_opciones_filtro_dashboard(usuario=self.productor_1_id)
+
+        self.assertIn("municipios", opciones)
+        self.assertIn("fincas", opciones)
+        self.assertIn("variedades", opciones)
+        self.assertIn("estados_comerciales", opciones)
+
+        nombres_mun = [m["nombre"] for m in opciones["municipios"]]
+        self.assertIn("Toledo", nombres_mun)
+
+        nombres_fincas = [f["nombre"] for f in opciones["fincas"]]
+        self.assertIn("Finca Opciones", nombres_fincas)
+
+        nombres_var = [v["nombre"] for v in opciones["variedades"]]
+        self.assertIn("Castillo ST3", nombres_var)
+
+        self.assertTrue(len(opciones["estados_comerciales"]) > 0)
+
+
+class TestScrum287EndpointApiIndicadoresDashboard(TestCase):
+    """
+    Pruebas automatizadas de integración para los endpoints REST del Dashboard
+    de Indicadores (HU-26 / SCRUM-287 / HU26-ST4):
+    - GET /api/v1/indicadores/dashboard/
+    - GET /api/v1/indicadores/opciones-filtro/
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_dashboard = reverse("api_v1_dashboard_indicadores")
+        self.url_opciones = reverse("api_v1_opciones_filtro_dashboard")
+
+        self.productor_id = uuid.uuid4()
+        self.otro_productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-TOL-ST4",
+            nombre="Toledo",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Castillo ST4",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.finca = Finca.objects.create(
+            nombre="Finca API Indicadores",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 11, 14),
+            cantidad_total=Decimal("600.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        self.lote = Lote.objects.create(
+            cosecha=self.cosecha,
+            codigo="LOTE-API-IND-01",
+            cantidad=Decimal("600.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+    def _autenticar(self, usuario_id, rol="PRODUCTOR"):
+        session = self.client.session
+        session["usuario_id"] = str(usuario_id)
+        session["rol"] = rol
+        session["correo"] = f"{rol.lower()}@cafepergamo.com"
+        session.save()
+
+    def test_api_dashboard_sin_autenticacion_401_unauthorized(self):
+        """
+        Petición GET anónima a /api/v1/indicadores/dashboard/ responde 401 Unauthorized.
+        """
+        resp = self.client.get(self.url_dashboard)
+        self.assertEqual(resp.status_code, 401)
+        self.assertIn("error", resp.data)
+
+    def test_api_dashboard_rol_sin_permiso_403_forbidden(self):
+        """
+        Petición con rol sin el permiso 'indicadores.ver_dashboard' (ej. COMPRADOR) responde 403.
+        """
+        self._autenticar(self.comprador_id, rol="COMPRADOR")
+        resp = self.client.get(self.url_dashboard)
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("permisos", resp.data["error"])
+
+    def test_api_dashboard_asociacion_200_ok(self):
+        """
+        Usuario con rol ASOCIACION recibe 200 OK con todas las secciones de analítica macro.
+        """
+        self._autenticar(self.productor_id, rol="ASOCIACION")
+        resp = self.client.get(self.url_dashboard)
+        self.assertEqual(resp.status_code, 200)
+
+        data = resp.data
+        self.assertTrue(data["es_asociacion_o_admin"])
+        self.assertIn("resumen_general", data)
+        self.assertIn("indicadores_trazabilidad", data)
+        self.assertIn("indicadores_comercializacion", data)
+        self.assertIn("volumen_por_variedad", data)
+        self.assertIn("top_fincas", data)
+        self.assertIn("distribucion_regional", data)
+
+    def test_api_dashboard_productor_200_ok_con_aislamiento(self):
+        """
+        Usuario con rol PRODUCTOR recibe 200 OK con sus datos aislados.
+        """
+        self._autenticar(self.productor_id, rol="PRODUCTOR")
+        resp = self.client.get(self.url_dashboard)
+        self.assertEqual(resp.status_code, 200)
+
+        data = resp.data
+        self.assertFalse(data["es_asociacion_o_admin"])
+        self.assertEqual(data["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(data["indicadores_comercializacion"]["volumen_total_producido_kg"], 600.0)
+
+    def test_api_dashboard_filtros_query_params(self):
+        """
+        Valida que los filtros pasados en la query string (?municipio_id=...) se apliquen.
+        """
+        self._autenticar(self.productor_id, rol="ASOCIACION")
+
+        # Filtro con el municipio de la finca
+        resp_ok = self.client.get(f"{self.url_dashboard}?municipio_id={self.municipio.pk}")
+        self.assertEqual(resp_ok.status_code, 200)
+        self.assertEqual(resp_ok.data["resumen_general"]["total_lotes"], 1)
+
+        # Filtro con municipio inexistente o sin fincas
+        resp_vacio = self.client.get(f"{self.url_dashboard}?municipio_id=999999")
+        self.assertEqual(resp_vacio.status_code, 200)
+        self.assertEqual(resp_vacio.data["resumen_general"]["total_lotes"], 0)
+
+    def test_api_opciones_filtro_sin_autenticacion_401(self):
+        """
+        Petición anónima a /api/v1/indicadores/opciones-filtro/ responde 401.
+        """
+        resp = self.client.get(self.url_opciones)
+        self.assertEqual(resp.status_code, 401)
+
+    def test_api_opciones_filtro_exitoso_200_ok(self):
+        """
+        Petición autenticada a /api/v1/indicadores/opciones-filtro/ responde 200 OK con catálogos.
+        """
+        self._autenticar(self.productor_id, rol="PRODUCTOR")
+        resp = self.client.get(self.url_opciones)
+        self.assertEqual(resp.status_code, 200)
+
+        data = resp.data
+        self.assertIn("municipios", data)
+        self.assertIn("fincas", data)
+        self.assertIn("variedades", data)
+        self.assertIn("estados_comerciales", data)
+        self.assertTrue(len(data["fincas"]) > 0)
+
+
+class TestScrum285InterfazDashboardWeb(TestCase):
+    """
+    Pruebas automatizadas para la interfaz web interactiva del Dashboard de Indicadores
+    (HU-26 / SCRUM-285 / HU26-ST1).
+    Valida renderizado del template, tarjetas KPI, gráficos Chart.js, aislamiento RBAC
+    y controles de filtrado analítico.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_dashboard_web = reverse("dashboard_indicadores")
+        self.productor_id = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.municipio = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-TOL-ST1",
+            nombre="Toledo",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.variedad = VariedadCafe.objects.create(
+            nombre="Caturra ST1",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.finca = Finca.objects.create(
+            nombre="Finca La Esperanza ST1",
+            productor_id=self.productor_id,
+            municipio=self.municipio,
+            activo=True,
+        )
+
+        self.cosecha = Cosecha.objects.create(
+            finca=self.finca,
+            variedad=self.variedad,
+            fecha_cosecha=date(2026, 11, 10),
+            cantidad_total=Decimal("850.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        self.lote = Lote.objects.create(
+            cosecha=self.cosecha,
+            codigo="LOT-DASH-ST1-01",
+            cantidad=Decimal("850.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+    def test_acceso_anonimo_redirige_a_login(self):
+        """Petición anónima a /fincas/dashboard/ es redirigida al login institucional."""
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 302)
+        self.assertIn(reverse("login"), resp.url)
+
+    def test_acceso_comprador_retorna_403_forbidden(self):
+        """Rol sin permiso 'indicadores.ver_dashboard' (COMPRADOR) recibe HTTP 403 Forbidden."""
+        _iniciar_sesion_comprador(self.client, usuario_id=self.comprador_id)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 403)
+
+    def test_acceso_productor_exitoso_renderiza_template_y_kpis(self):
+        """Productor autenticado recibe HTTP 200, plantilla adecuada y tarjetas KPI del contexto."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, "fincas/dashboard_indicadores.html")
+
+        # Verificar objetos en contexto
+        self.assertIn("metricas", resp.context)
+        self.assertIn("opciones_filtro", resp.context)
+        self.assertIn("metricas_json", resp.context)
+
+        # Contenido HTML renderizado
+        content = resp.content.decode("utf-8")
+        self.assertIn("Dashboard de Trazabilidad y Comercialización", content)
+        self.assertIn("Lotes Activos", content)
+        self.assertIn("Volumen Producido", content)
+        self.assertIn("graficoEtapasBeneficio", content)
+        self.assertIn("graficoVariedades", content)
+        self.assertIn("graficoEstadosComerciales", content)
+        self.assertIn("graficoRegional", content)
+        self.assertIn('id="datos-dashboard-inicial"', content)
+
+    def test_acceso_asociacion_renderiza_desglose_regional_y_filtros(self):
+        """Usuario con rol ASOCIACION visualiza la tabla de desglose regional y ranking de fincas."""
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_id)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context["metricas"]["es_asociacion_o_admin"])
+
+        content = resp.content.decode("utf-8")
+        self.assertIn("Desglose Regional por Municipio", content)
+        self.assertIn("Top Predios", content)
+        self.assertIn("Toledo", content)
+
+    def test_filtro_municipio_en_vista_web(self):
+        """Parámetro GET ?municipio_id= acota las métricas pasadas al contexto del template."""
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_id)
+
+        # Filtro con municipio donde hay finca
+        resp_ok = self.client.get(f"{self.url_dashboard_web}?municipio_id={self.municipio.id}")
+        self.assertEqual(resp_ok.status_code, 200)
+        self.assertEqual(resp_ok.context["metricas"]["resumen_general"]["total_lotes"], 1)
+
+        # Filtro con municipio sin fincas
+        resp_vacio = self.client.get(f"{self.url_dashboard_web}?municipio_id=999999")
+        self.assertEqual(resp_vacio.status_code, 200)
+        self.assertEqual(resp_vacio.context["metricas"]["resumen_general"]["total_lotes"], 0)
+
+    def test_navbar_contiene_enlace_dashboard_para_roles_autorizados(self):
+        """El navbar en base.html incluye el enlace directo al Dashboard para roles autorizados."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_id)
+        resp = self.client.get(reverse("home"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, reverse("dashboard_indicadores"))
+
+
+class TestScrum289SuiteIntegralPruebasQAIndicadores(TestCase):
+    """
+    Subtarea: SCRUM-289 / HU26-ST5: Implementar suite integral de pruebas automatizadas y QA.
+    Certifica la trazabilidad técnica de extremo a extremo, resiliencia ante estados parciales,
+    consistencia cruzada entre API y Web, y aislamiento multi-inquilino.
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_dashboard_web = reverse("dashboard_indicadores")
+        self.url_dashboard_api = reverse("api_v1_dashboard_indicadores")
+
+        self.productor_a = uuid.uuid4()
+        self.productor_b = uuid.uuid4()
+        self.comprador_id = uuid.uuid4()
+
+        self.mun_toledo = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-TOL-QA",
+            nombre="Toledo",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.mun_chinacota = Municipio.objects.filter(
+            nombre="Chinácota", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-CHI-QA",
+            nombre="Chinácota",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.var_geisha = VariedadCafe.objects.create(
+            nombre="Geisha QA",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.var_castillo = VariedadCafe.objects.create(
+            nombre="Castillo QA",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso_lavado = ProcesoBeneficio.objects.create(
+            codigo="LAV-QA-01",
+            nombre="Lavado QA",
+            orden=1,
+            activo=True,
+        )
+
+        self.proceso_natural = ProcesoBeneficio.objects.create(
+            codigo="NAT-QA-02",
+            nombre="Natural QA",
+            orden=2,
+            activo=True,
+        )
+
+        # Finca A (Productor A en Toledo)
+        self.finca_a = Finca.objects.create(
+            nombre="Finca El Roble QA",
+            productor_id=self.productor_a,
+            municipio=self.mun_toledo,
+            activo=True,
+        )
+
+        # Finca B (Productor B en Chinácota)
+        self.finca_b = Finca.objects.create(
+            nombre="Finca La Cabaña QA",
+            productor_id=self.productor_b,
+            municipio=self.mun_chinacota,
+            activo=True,
+        )
+
+        # Cosechas
+        self.cosecha_a = Cosecha.objects.create(
+            finca=self.finca_a,
+            variedad=self.var_geisha,
+            fecha_cosecha=date(2026, 11, 1),
+            cantidad_total=Decimal("1000.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        self.cosecha_b = Cosecha.objects.create(
+            finca=self.finca_b,
+            variedad=self.var_castillo,
+            fecha_cosecha=date(2026, 11, 2),
+            cantidad_total=Decimal("500.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        # Lotes
+        self.lote_a = Lote.objects.create(
+            cosecha=self.cosecha_a,
+            codigo="LOT-QA-GEISHA-01",
+            cantidad=Decimal("1000.00"),
+            proceso_beneficio=self.proceso_lavado,
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        self.lote_b = Lote.objects.create(
+            cosecha=self.cosecha_b,
+            codigo="LOT-QA-CASTILLO-02",
+            cantidad=Decimal("500.00"),
+            proceso_beneficio=self.proceso_natural,
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+    def test_qa_flujo_integral_trazabilidad_y_comercializacion(self):
+        """
+        Certifica el ciclo de vida completo: registro de etapas de beneficio, evaluación
+        de calidad SCA, negociación y venta liquidada, verificando su impacto en el Dashboard.
+        """
+        from fincas.services import obtener_metricas_dashboard
+        # 1. Registrar etapa de beneficio
+        EtapaBeneficio.objects.create(
+            lote=self.lote_a,
+            etapa=EtapaBeneficio.TipoEtapa.FERMENTACION,
+            fecha=date(2026, 11, 3),
+        )
+
+        # 2. Registrar evaluación sensorial SCA
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote_a,
+            puntaje_taza=Decimal("87.50"),
+            humedad=Decimal("11.50"),
+            perfil_sensorial="Jazmín, bergamota, miel y acidez brillante",
+        )
+
+        # 3. Negociación y Venta
+        negociacion = NegociacionLote.objects.create(
+            lote=self.lote_a,
+            comprador_id=self.comprador_id,
+            cantidad_kg=Decimal("600.00"),
+            precio_propuesto_por_kg=Decimal("30000.00"),
+            precio_acordado_por_kg=Decimal("30000.00"),
+            estado=NegociacionLote.EstadoNegociacion.ACEPTADA,
+        )
+
+        VentaLote.objects.create(
+            lote=self.lote_a,
+            negociacion=negociacion,
+            comprador_id=self.comprador_id,
+            cantidad_kg=Decimal("600.00"),
+            precio_unitario_kg=Decimal("30000.00"),
+            precio_total=Decimal("18000000.00"),
+            codigo_comprobante="VTA-QA-0001",
+        )
+
+        # Consultar métricas del Productor A
+        metricas_a = obtener_metricas_dashboard(usuario=self.productor_a, rol_override="PRODUCTOR")
+        self.assertEqual(metricas_a["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(metricas_a["indicadores_trazabilidad"]["puntaje_sca_promedio"], 87.5)
+        self.assertEqual(metricas_a["indicadores_trazabilidad"]["lotes_con_evaluacion_calidad"], 1)
+        self.assertEqual(metricas_a["indicadores_trazabilidad"]["etapas_beneficio"]["fermentacion"], 1)
+        self.assertEqual(metricas_a["indicadores_comercializacion"]["volumen_vendido_kg"], 600.0)
+        self.assertEqual(metricas_a["indicadores_comercializacion"]["ingresos_totales_cop"], 18000000.0)
+        self.assertEqual(metricas_a["indicadores_comercializacion"]["precio_promedio_kg_cop"], 30000.0)
+        self.assertEqual(metricas_a["indicadores_comercializacion"]["tasa_conversion_porcentaje"], 100.0)
+
+    def test_qa_aislamiento_estricto_entre_productores_y_consolidacion_asociacion(self):
+        """
+        Certifica que el Productor A no acceda a información del Productor B,
+        y que la Asociación obtenga el consolidado macro de ambos municipios.
+        """
+        # Productor A consulta
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_a)
+        resp_a = self.client.get(self.url_dashboard_api)
+        self.assertEqual(resp_a.status_code, 200)
+        self.assertEqual(resp_a.data["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(resp_a.data["indicadores_comercializacion"]["volumen_total_producido_kg"], 1000.0)
+
+        # Productor B consulta
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_b)
+        resp_b = self.client.get(self.url_dashboard_api)
+        self.assertEqual(resp_b.status_code, 200)
+        self.assertEqual(resp_b.data["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(resp_b.data["indicadores_comercializacion"]["volumen_total_producido_kg"], 500.0)
+
+        # Asociación consulta
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_a)
+        resp_asoc = self.client.get(self.url_dashboard_api)
+        self.assertEqual(resp_asoc.status_code, 200)
+        self.assertTrue(resp_asoc.data["es_asociacion_o_admin"])
+        # Debe sumar ambos lotes (1000 + 500 = 1500)
+        self.assertEqual(resp_asoc.data["resumen_general"]["total_lotes"], 2)
+        self.assertEqual(resp_asoc.data["indicadores_comercializacion"]["volumen_total_producido_kg"], 1500.0)
+        self.assertEqual(len(resp_asoc.data["distribucion_regional"]), 2)
+
+    def test_qa_consistencia_filtros_entre_api_y_vista_web(self):
+        """
+        Certifica que la vista web y el endpoint REST devuelvan exactamente las mismas
+        métricas ante idénticos parámetros de filtro.
+        """
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_a)
+
+        params = f"?municipio_id={self.mun_toledo.id}&variedad_id={self.var_geisha.id}"
+        resp_api = self.client.get(f"{self.url_dashboard_api}{params}")
+        resp_web = self.client.get(f"{self.url_dashboard_web}{params}")
+
+        self.assertEqual(resp_api.status_code, 200)
+        self.assertEqual(resp_web.status_code, 200)
+
+        metricas_api = resp_api.data
+        metricas_web = resp_web.context["metricas"]
+
+        self.assertEqual(
+            metricas_api["resumen_general"]["total_lotes"],
+            metricas_web["resumen_general"]["total_lotes"],
+        )
+        self.assertEqual(
+            metricas_api["indicadores_comercializacion"]["volumen_total_producido_kg"],
+            metricas_web["indicadores_comercializacion"]["volumen_total_producido_kg"],
+        )
+        self.assertEqual(
+            metricas_api["indicadores_trazabilidad"]["completitud_promedio_porcentaje"],
+            metricas_web["indicadores_trazabilidad"]["completitud_promedio_porcentaje"],
+        )
+
+
+class TestScrum290CasosPruebaFuncionalesDashboard(TestCase):
+    """
+    Subtarea: SCRUM-290 / HU26-ST6: Validar el dashboard con casos de prueba funcionales.
+    Ejecuta y certifica programáticamente la matriz formal de casos de prueba funcionales (CP):
+    - CP-HU26-01: Visualización macro para Asociación / Administrador
+    - CP-HU26-02: Aislamiento multi-inquilino para Productor Cafetero
+    - CP-HU26-03: Filtrado dinámico multicriterio
+    - CP-HU26-04: Cálculo exacto de completitud técnica (100%) y puntaje SCA
+    - CP-HU26-05: Renderizado y consistencia de gráficos interactivos Chart.js
+    - CP-HU26-06: Control de acceso RBAC y denegación de perfiles no autorizados
+    - CP-HU26-07: Resiliencia ante estados vacíos (evita ZeroDivisionError)
+    - CP-HU26-08: Soporte para exportación e impresión de informe analítico
+    """
+
+    def setUp(self):
+        self.client = Client()
+        self.url_dashboard_web = reverse("dashboard_indicadores")
+        self.url_dashboard_api = reverse("api_v1_dashboard_indicadores")
+
+        self.productor_1 = uuid.uuid4()
+        self.productor_2 = uuid.uuid4()
+        self.comprador = uuid.uuid4()
+
+        self.mun_toledo = Municipio.objects.filter(
+            nombre="Toledo", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-TOL-ST6",
+            nombre="Toledo",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.mun_labateca = Municipio.objects.filter(
+            nombre="Labateca", departamento="Norte de Santander"
+        ).first() or Municipio.objects.create(
+            codigo="MUN-LAB-ST6",
+            nombre="Labateca",
+            departamento="Norte de Santander",
+            activo=True,
+        )
+
+        self.var_caturra = VariedadCafe.objects.create(
+            nombre="Caturra ST6",
+            especie=VariedadCafe.Especie.ARABICA,
+            activo=True,
+        )
+
+        self.proceso_lavado = ProcesoBeneficio.objects.create(
+            codigo="LAV-ST6",
+            nombre="Lavado ST6",
+            orden=1,
+            activo=True,
+        )
+
+        # Finca 1: Georreferenciada (Toledo)
+        self.finca_1 = Finca.objects.create(
+            nombre="Finca La Alborada ST6",
+            productor_id=self.productor_1,
+            municipio=self.mun_toledo,
+            latitud=Decimal("7.311234"),
+            longitud=Decimal("-72.481234"),
+            activo=True,
+        )
+
+        # Finca 2: Sin georreferenciación (Labateca)
+        self.finca_2 = Finca.objects.create(
+            nombre="Finca Los Pinos ST6",
+            productor_id=self.productor_2,
+            municipio=self.mun_labateca,
+            activo=True,
+        )
+
+        # Cosechas
+        self.cosecha_1 = Cosecha.objects.create(
+            finca=self.finca_1,
+            variedad=self.var_caturra,
+            fecha_cosecha=date(2026, 11, 5),
+            cantidad_total=Decimal("1200.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        self.cosecha_2 = Cosecha.objects.create(
+            finca=self.finca_2,
+            variedad=self.var_caturra,
+            fecha_cosecha=date(2026, 11, 6),
+            cantidad_total=Decimal("800.00"),
+            cantidad_disponible=Decimal("0.00"),
+            activo=True,
+        )
+
+        # Lote 1: Con ficha técnica completa (100% de completitud)
+        self.lote_1 = Lote.objects.create(
+            cosecha=self.cosecha_1,
+            codigo="LOT-ST6-COMPLETO",
+            cantidad=Decimal("1200.00"),
+            proceso_beneficio=self.proceso_lavado,
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+        EtapaBeneficio.objects.create(
+            lote=self.lote_1,
+            etapa=EtapaBeneficio.TipoEtapa.SECADO,
+            fecha=date(2026, 11, 7),
+        )
+
+        CaracteristicasCalidad.objects.create(
+            lote=self.lote_1,
+            puntaje_taza=Decimal("89.00"),
+            humedad=Decimal("11.00"),
+            perfil_sensorial="Chocolate, frutos rojos, panela",
+        )
+
+        # Lote 2: Parcial (sin calidad ni etapas)
+        self.lote_2 = Lote.objects.create(
+            cosecha=self.cosecha_2,
+            codigo="LOT-ST6-PARCIAL",
+            cantidad=Decimal("800.00"),
+            publicado_en_catalogo=True,
+            estado_comercial=Lote.EstadoComercial.DISPONIBLE,
+        )
+
+    def test_cp_hu26_01_visualizacion_macro_asociacion_administrador(self):
+        """CP-HU26-01: Visualización consolidada de todos los municipios para Asociación/Admin."""
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_1)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+
+        metricas = resp.context["metricas"]
+        self.assertTrue(metricas["es_asociacion_o_admin"])
+        self.assertEqual(metricas["resumen_general"]["total_lotes"], 2)
+        self.assertEqual(metricas["indicadores_comercializacion"]["volumen_total_producido_kg"], 2000.0)
+
+        content = resp.content.decode("utf-8")
+        self.assertIn("Desglose Regional por Municipio", content)
+        self.assertIn("Toledo", content)
+        self.assertIn("Labateca", content)
+
+    def test_cp_hu26_02_aislamiento_multi_inquilino_productor(self):
+        """CP-HU26-02: Productor solo ve sus lotes propios y no la producción ajena."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_1)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+
+        metricas = resp.context["metricas"]
+        self.assertFalse(metricas["es_asociacion_o_admin"])
+        # Productor 1 solo tiene el Lote 1 (1200 kg), no debe sumar los 800 kg de Productor 2
+        self.assertEqual(metricas["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(metricas["indicadores_comercializacion"]["volumen_total_producido_kg"], 1200.0)
+
+    def test_cp_hu26_03_filtrado_dinamico_por_municipio_y_variedad(self):
+        """CP-HU26-03: Filtrado multicriterio acota correctamente las agregaciones."""
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_1)
+
+        # Filtrar solo por Toledo
+        resp = self.client.get(f"{self.url_dashboard_web}?municipio_id={self.mun_toledo.id}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["metricas"]["resumen_general"]["total_lotes"], 1)
+        self.assertEqual(resp.context["metricas"]["indicadores_comercializacion"]["volumen_total_producido_kg"], 1200.0)
+
+    def test_cp_hu26_04_calculo_exacto_completitud_tecnica_y_calidad_sca(self):
+        """CP-HU26-04: Validación matemática de completitud 100% y puntaje de catación SCA."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_1)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+
+        trazabilidad = resp.context["metricas"]["indicadores_trazabilidad"]
+        # Lote 1 tiene base(40) + georref(10) + proceso(15) + etapa(15) + calidad(20) = 100%
+        self.assertEqual(trazabilidad["completitud_promedio_porcentaje"], 100.0)
+        self.assertEqual(trazabilidad["puntaje_sca_promedio"], 89.0)
+        self.assertEqual(trazabilidad["lotes_con_evaluacion_calidad"], 1)
+
+    def test_cp_hu26_05_renderizado_graficos_chartjs_y_datos_script(self):
+        """CP-HU26-05: El DOM contiene los lienzos Chart.js y el tag json_script con el DTO."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_1)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+
+        content = resp.content.decode("utf-8")
+        self.assertIn('id="graficoEtapasBeneficio"', content)
+        self.assertIn('id="graficoVariedades"', content)
+        self.assertIn('id="graficoEstadosComerciales"', content)
+        self.assertIn('id="graficoRegional"', content)
+        self.assertIn('id="datos-dashboard-inicial"', content)
+        self.assertIn("chart.umd.min.js", content)
+        self.assertIn("dashboard_indicadores.js", content)
+
+    def test_cp_hu26_06_control_acceso_rbac_rechazo_comprador_y_anonimo(self):
+        """CP-HU26-06: Bloqueo de perfiles no autorizados (302 login para anónimo y 403 comprador)."""
+        # 1. Petición anónima
+        resp_anon = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp_anon.status_code, 302)
+        self.assertIn(reverse("login"), resp_anon.url)
+
+        # 2. Petición con rol COMPRADOR
+        _iniciar_sesion_comprador(self.client, usuario_id=self.comprador)
+        resp_comp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp_comp.status_code, 403)
+
+    def test_cp_hu26_07_resiliencia_estado_vacio_sin_errores(self):
+        """CP-HU26-07: Comprobación de que no ocurre ZeroDivisionError ante filtros sin resultados."""
+        _iniciar_sesion_con_rol(self.client, "ASOCIACION", usuario_id=self.productor_1)
+        resp = self.client.get(f"{self.url_dashboard_web}?municipio_id=999999")
+        self.assertEqual(resp.status_code, 200)
+
+        metricas = resp.context["metricas"]
+        self.assertEqual(metricas["resumen_general"]["total_lotes"], 0)
+        self.assertEqual(metricas["indicadores_comercializacion"]["volumen_total_producido_kg"], 0.0)
+        self.assertEqual(metricas["indicadores_comercializacion"]["precio_promedio_kg_cop"], 0.0)
+        self.assertEqual(metricas["indicadores_trazabilidad"]["completitud_promedio_porcentaje"], 0.0)
+
+    def test_cp_hu26_08_soporte_impresion_y_exportacion_reporte(self):
+        """CP-HU26-08: Verificación de presencia del botón y estilos de exportación/impresión."""
+        _iniciar_sesion_productor(self.client, usuario_id=self.productor_1)
+        resp = self.client.get(self.url_dashboard_web)
+        self.assertEqual(resp.status_code, 200)
+
+        content = resp.content.decode("utf-8")
+        self.assertIn("window.print()", content)
+        self.assertIn("@media print", content)
+        self.assertIn("Exportar / Imprimir", content)

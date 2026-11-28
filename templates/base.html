@@ -55,6 +55,13 @@
                     <li class="nav-item">
                         <a class="nav-link" href="{% url 'catalogo' %}">{% if rol_actual == "PRODUCTOR" %}Mi Catálogo{% else %}Catálogo Comercial{% endif %}</a>
                     </li>
+                    {% if rol_actual|tiene_permiso:"indicadores.ver_dashboard" or rol_actual == "ADMINISTRADOR" or rol_actual == "ASOCIACION" or rol_actual == "PRODUCTOR" %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="{% url 'dashboard_indicadores' %}">
+                            <i class="bi bi-graph-up-arrow me-1"></i> Dashboard
+                        </a>
+                    </li>
+                    {% endif %}
                     {% if rol_actual|tiene_permiso:"usuarios.administrar" %}
                     <li class="nav-item">
                         <a class="nav-link" href="{% url 'admin_usuarios' %}">Administrar Usuarios</a>

@@ -130,4 +130,13 @@ urlpatterns = [
     path('api/v1/ventas/', views.api_registrar_venta_view, name='api_v1_venta_crear'),
     path('api/ventas/<str:codigo_comprobante>/', views.api_detalle_venta_view, name='api_venta_detalle'),
     path('api/v1/ventas/<str:codigo_comprobante>/', views.api_detalle_venta_view, name='api_v1_venta_detalle'),
+
+    # API REST de Dashboard de Indicadores y Opciones de Filtro (HU-26 / SCRUM-287)
+    path('api/indicadores/dashboard/', views.api_dashboard_indicadores_view, name='api_dashboard_indicadores'),
+    path('api/v1/indicadores/dashboard/', views.api_dashboard_indicadores_view, name='api_v1_dashboard_indicadores'),
+    path('api/indicadores/opciones-filtro/', views.api_opciones_filtro_dashboard_view, name='api_opciones_filtro_dashboard'),
+    path('api/v1/indicadores/opciones-filtro/', views.api_opciones_filtro_dashboard_view, name='api_v1_opciones_filtro_dashboard'),
+
+    # Interfaz Web de Dashboard de Indicadores (HU-26 / SCRUM-285)
+    path('dashboard/', views.dashboard_indicadores_web_view, name='dashboard_indicadores'),
 ]

@@ -26,6 +26,7 @@ poder consultarse ahora, no solo en el siguiente sprint.
 """
 
 from decimal import Decimal
+import json
 from typing import Optional
 
 from django.contrib import messages
@@ -108,6 +109,8 @@ from .services import (
     registrar_venta_lote,
     obtener_venta_lote,
     obtener_historial_comercial_lote,
+    obtener_metricas_dashboard,
+    obtener_opciones_filtro_dashboard,
     resumen_trazabilidad_productor,
     cambiar_estado_lote,
     lote_esta_en_beneficio,
@@ -2845,6 +2848,198 @@ def api_detalle_venta_view(request, codigo_comprobante):
             {"error": "Comprobante de venta no encontrado."},
             status=status.HTTP_404_NOT_FOUND,
         )
+
+
+# ==============================================================================
+# ENDPOINTS REST: DASHBOARD Y ANALÍTICA DE INDICADORES (HU-26 / SCRUM-287)
+# ==============================================================================
+
+def _resolver_rol_usuario_request(request) -> str:
+    """
+    Resuelve el código de rol del usuario autenticado a partir de sesión web,
+    claims del token JWT o perfil de usuario Django.
+    """
+    rol = request.session.get("rol", "")
+    if rol:
+        return str(rol).upper()
+
+    token = getattr(request, "auth", None)
+    if token is not None:
+        try:
+            rol = token.get("rol") or token.get("role") or ""
+            if rol:
+                return str(rol).upper()
+        except AttributeError:
+            pass
+
+    user = getattr(request, "user", None)
+    if user and getattr(user, "is_authenticated", False):
+        if getattr(user, "is_superuser", False) or getattr(user, "is_staff", False):
+            return "ADMINISTRADOR"
+        rol_obj = getattr(user, "rol", None)
+        if rol_obj:
+            if hasattr(rol_obj, "codigo"):
+                return str(rol_obj.codigo).upper()
+            return str(rol_obj).upper()
+
+    return ""
+
+
+def _verificar_permiso_dashboard(rol_actual: str) -> bool:
+    """
+    Verifica si el rol cuenta con el permiso 'indicadores.ver_dashboard'.
+    Maneja excepciones de base de datos en entornos de prueba con fallback
+    a los roles autorizados canónicos: ADMINISTRADOR, ASOCIACION y PRODUCTOR.
+    """
+    if not rol_actual:
+        return False
+    if rol_actual in ("ADMINISTRADOR", "SUPERADMIN"):
+        return True
+    try:
+        return bool(usuarios_permissions.usuario_tiene_permiso(rol_actual, "indicadores.ver_dashboard"))
+    except Exception:
+        # Fallback para SQLite / entornos donde la tabla Supabase rol_permisos no esté migrada
+        return rol_actual in ("ADMINISTRADOR", "ASOCIACION", "PRODUCTOR")
+
+
+@api_view(["GET"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_dashboard_indicadores_view(request):
+    """
+    Endpoint REST para consultar los indicadores analíticos consolidados de trazabilidad
+    y comercialización del Dashboard de Café Pérgamo (HU-26 / SCRUM-287 / SCRUM-235).
+    GET /api/v1/indicadores/dashboard/
+    Parámetros de consulta (Query Params opcionales):
+      - municipio_id: ID de municipio
+      - variedad_id: ID de variedad de café
+      - productor_id: ID del productor (solo para Asociación/Admin)
+      - finca_id: ID de finca
+      - estado_comercial: Estado comercial del lote
+      - fecha_inicio: Fecha ISO (YYYY-MM-DD)
+      - fecha_fin: Fecha ISO (YYYY-MM-DD)
+    """
+    productor_id = _resolver_productor_id(request)
+    user_autenticado = bool(productor_id or (request.user and request.user.is_authenticated))
+    if not user_autenticado:
+        return Response(
+            {"error": "Debe autenticarse con una cuenta autorizada para consultar los indicadores."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    rol_actual = _resolver_rol_usuario_request(request)
+    if request.user and (getattr(request.user, "is_superuser", False) or getattr(request.user, "is_staff", False)):
+        rol_actual = "ADMINISTRADOR"
+
+    if not _verificar_permiso_dashboard(rol_actual):
+        return Response(
+            {"error": "Su cuenta no cuenta con permisos suficientes (indicadores.ver_dashboard) para visualizar el dashboard."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    filtros = {
+        "municipio_id": request.query_params.get("municipio_id"),
+        "variedad_id": request.query_params.get("variedad_id"),
+        "productor_id": request.query_params.get("productor_id"),
+        "finca_id": request.query_params.get("finca_id"),
+        "estado_comercial": request.query_params.get("estado_comercial"),
+        "fecha_inicio": request.query_params.get("fecha_inicio"),
+        "fecha_fin": request.query_params.get("fecha_fin"),
+    }
+    filtros = {k: v for k, v in filtros.items() if v not in (None, "", "null", "undefined")}
+
+    data = obtener_metricas_dashboard(
+        usuario=productor_id or request.user,
+        rol_override=rol_actual,
+        filtros=filtros,
+    )
+    return Response(data, status=status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([AllowAny])
+def api_opciones_filtro_dashboard_view(request):
+    """
+    Endpoint REST para obtener los conjuntos de opciones válidos para los filtros del dashboard.
+    GET /api/v1/indicadores/opciones-filtro/
+    """
+    productor_id = _resolver_productor_id(request)
+    user_autenticado = bool(productor_id or (request.user and request.user.is_authenticated))
+    if not user_autenticado:
+        return Response(
+            {"error": "Debe autenticarse para consultar las opciones de filtro del dashboard."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    rol_actual = _resolver_rol_usuario_request(request)
+    if request.user and (getattr(request.user, "is_superuser", False) or getattr(request.user, "is_staff", False)):
+        rol_actual = "ADMINISTRADOR"
+
+    if not _verificar_permiso_dashboard(rol_actual):
+        return Response(
+            {"error": "Su cuenta no cuenta con permisos suficientes para consultar opciones de filtro."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    opciones = obtener_opciones_filtro_dashboard(
+        usuario=productor_id or request.user,
+        rol_override=rol_actual,
+    )
+    return Response(opciones, status=status.HTTP_200_OK)
+
+
+def dashboard_indicadores_web_view(request):
+    """
+    Vista web interactiva del Dashboard de Indicadores de Trazabilidad y Comercialización
+    (HU-26 / SCRUM-285 / SCRUM-235).
+    Renderiza la interfaz con tarjetas KPI, gráficos dinámicos (Chart.js), tablas de desglose
+    y controles de filtrado interactivo multicriterio.
+    """
+    if not request.user.is_authenticated:
+        messages.error(request, "Debe iniciar sesión para acceder al dashboard de indicadores.")
+        return redirect(f"{reverse('login')}?next={request.path}")
+
+    rol_actual = _resolver_rol_usuario_request(request)
+    if request.user.is_superuser or getattr(request.user, "is_staff", False):
+        rol_actual = "ADMINISTRADOR"
+
+    if not _verificar_permiso_dashboard(rol_actual):
+        messages.error(request, "No tiene permisos para acceder al dashboard de indicadores.")
+        return HttpResponseForbidden("No tiene permisos para acceder al dashboard de indicadores.")
+
+    productor_id = _resolver_productor_id(request)
+    usuario_analitico = productor_id or request.user
+
+    filtros = {
+        "municipio_id": request.GET.get("municipio_id"),
+        "variedad_id": request.GET.get("variedad_id"),
+        "productor_id": request.GET.get("productor_id"),
+        "finca_id": request.GET.get("finca_id"),
+        "estado_comercial": request.GET.get("estado_comercial"),
+        "fecha_inicio": request.GET.get("fecha_inicio"),
+        "fecha_fin": request.GET.get("fecha_fin"),
+    }
+    filtros = {k: v for k, v in filtros.items() if v not in (None, "", "null", "undefined")}
+
+    metricas = obtener_metricas_dashboard(
+        usuario=usuario_analitico,
+        rol_override=rol_actual,
+        filtros=filtros,
+    )
+    opciones_filtro = obtener_opciones_filtro_dashboard(
+        usuario=usuario_analitico,
+        rol_override=rol_actual,
+    )
+
+    context = {
+        "metricas": metricas,
+        "opciones_filtro": opciones_filtro,
+        "rol_actual": rol_actual,
+        "filtros_actuales": filtros,
+        "metricas_json": json.dumps(metricas, default=str),
+    }
+    return render(request, "fincas/dashboard_indicadores.html", context)
 
 
 def _resolver_rol_codigo(request) -> str:
